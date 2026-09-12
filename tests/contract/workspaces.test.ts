@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import {
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -162,6 +163,132 @@ describe("delegate workspace and shared-write contract", () => {
       expect(result.isError).toBe(true);
       expect(result.text).toMatch(/isolated|shared|overlap|conflict/i);
       expect(subagents.state.callCount).toBe(0);
+    },
+  );
+
+  test(
+    "unimplemented workspace modes fail loudly before any provider call",
+    async () => {
+      // INVARIANTS: unsupported modes must not silently degrade to shared.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      const dir = tempDir();
+      gitInit(dir);
+
+      for (const workspace of ["scratch", "isolated"]) {
+        const result = await callDelegate(session, {
+          tasks: [
+            {
+              prompt: "write marker",
+              cwd: dir,
+              model: subagents.spec,
+              tools: ["write"],
+              workspace,
+            },
+          ],
+        });
+        expect(result.isError).toBe(true);
+        expect(result.text).toMatch(/not implemented|unsupported/i);
+      }
+      expect(subagents.state.callCount).toBe(0);
+    },
+  );
+
+  test(
+    "inherited GIT_DIR redirect fails closed for a bash-capable multi-writer batch",
+    async () => {
+      // INVARIANTS: admission must fail closed when inherited Git redirects
+      // could make a bash-capable writer escape the reserved scope.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      const dir = tempDir();
+      gitInit(dir);
+
+      const previous = process.env.GIT_DIR;
+      process.env.GIT_DIR = join(dir, "bogus-git-dir");
+      try {
+        const result = await callDelegate(session, {
+          tasks: [
+            {
+              prompt: "first",
+              cwd: dir,
+              model: subagents.spec,
+              tools: ["write", "bash"],
+            },
+            {
+              prompt: "second",
+              cwd: dir,
+              model: subagents.spec,
+              tools: ["write"],
+            },
+          ],
+        });
+        expect(result.isError).toBe(true);
+        expect(result.text).toMatch(/git|redirect|scope|unsafe/i);
+      } finally {
+        if (previous === undefined) delete process.env.GIT_DIR;
+        else process.env.GIT_DIR = previous;
+      }
+      expect(subagents.state.callCount).toBe(0);
+    },
+  );
+
+  test(
+    "inherited GIT_DIR does not shrink reserved scope for non-bash writers",
+    async () => {
+      // The Git probe must run with GIT_* scrubbed; otherwise a bogus
+      // redirect makes scope discovery fail and admission would either fall
+      // back to per-task cwds (missing the same-repo overlap) or reject
+      // everything.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      const dir = tempDir();
+      gitInit(dir);
+      const left = join(dir, "left");
+      const right = join(dir, "right");
+      mkdirSync(left, { recursive: true });
+      mkdirSync(right, { recursive: true });
+
+      let active = 0;
+      let maxActive = 0;
+      const gated: FauxResponseFactory = async () => {
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        await new Promise((r) => setTimeout(r, 25));
+        active -= 1;
+        return fauxAssistantMessage("done");
+      };
+      subagents.respond([gated, gated]);
+
+      const previous = process.env.GIT_DIR;
+      process.env.GIT_DIR = join(dir, "bogus-git-dir");
+      let result: Awaited<ReturnType<typeof callDelegate>> | undefined;
+      try {
+        result = await callDelegate(session, {
+          tasks: [
+            {
+              prompt: "write left",
+              cwd: left,
+              model: subagents.spec,
+              tools: ["write"],
+            },
+            {
+              prompt: "write right",
+              cwd: right,
+              model: subagents.spec,
+              tools: ["write"],
+            },
+          ],
+        });
+      } finally {
+        if (previous === undefined) delete process.env.GIT_DIR;
+        else process.env.GIT_DIR = previous;
+      }
+
+      // Same repository scope → the writers serialize despite disjoint cwds.
+      expect(result?.isError).toBe(false);
+      expect(maxActive).toBe(1);
+      expect(subagents.state.callCount).toBe(2);
     },
   );
 

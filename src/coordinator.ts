@@ -1,7 +1,7 @@
 import type { DefaultResourceLoader } from "@earendil-works/pi-coding-agent";
 import type { Usage } from "@earendil-works/pi-ai";
 import type { AdmissionGrant } from "./admission.ts";
-import type { DelegateConfig } from "./config.ts";
+import { modelConcurrencyLimit, type DelegateConfig } from "./config.ts";
 import { runTask, type RunControls } from "./execution.ts";
 import type { HostEnvironment } from "./host.ts";
 import { Semaphore } from "./types.ts";
@@ -46,8 +46,42 @@ export interface DispatchOutcome {
  */
 export class DispatchCoordinator {
   private readonly semaphore = new Semaphore(3);
+  private readonly modelSemaphores = new Map<string, Semaphore>();
 
   constructor(private readonly tickets: TicketStore) {}
+
+  /** Per-model bound, keyed `provider/id`; created once, re-limited per call. */
+  private modelSemaphore(task: ResolvedTask, config: DelegateConfig): Semaphore {
+    const key = `${task.model.provider}/${task.model.id}`;
+    let semaphore = this.modelSemaphores.get(key);
+    if (!semaphore) {
+      semaphore = new Semaphore(modelConcurrencyLimit(key, config));
+      this.modelSemaphores.set(key, semaphore);
+    } else {
+      semaphore.setLimit(modelConcurrencyLimit(key, config));
+    }
+    return semaphore;
+  }
+
+  /**
+   * Acquire a semaphore slot with abort wake-up: a grant resolving after the
+   * abort is handed straight back, and undefined signals cancellation.
+   */
+  private async acquireOrAborted(
+    semaphore: Semaphore,
+    signal: AbortSignal,
+  ): Promise<(() => void) | undefined> {
+    const acquire = semaphore.acquire();
+    const release = await Promise.race([
+      acquire,
+      onAbort(signal).then(() => undefined),
+    ]);
+    if (release === undefined) {
+      void acquire.then((late) => late());
+      return undefined;
+    }
+    return release;
+  }
 
   /**
    * Run a batch to completion. Resolves with index-aligned outcomes; a task
@@ -78,7 +112,13 @@ export class DispatchCoordinator {
         }),
       );
     } finally {
-      grant.release();
+      // Tasks whose sessions could not be confirmed quiescent keep their
+      // reservations: their roots may still be mutating.
+      const retained = new Set<number>();
+      for (const outcome of outcomes) {
+        if (outcome?.quarantined) retained.add(outcome.index);
+      }
+      grant.release(retained);
       options.ticket?.finishedGate.resolve();
     }
 
@@ -95,6 +135,7 @@ export class DispatchCoordinator {
     task: ResolvedTask,
     options: {
       env: HostEnvironment;
+      config: DelegateConfig;
       signal?: AbortSignal;
       ticket?: Ticket;
     },
@@ -134,18 +175,26 @@ export class DispatchCoordinator {
         record({ index: task.index, id: task.id, status: "cancelled", retries: 0 });
         return;
       }
-      // Abort wakes a queued task without waiting for a slot; a grant that
-      // resolves after the abort is handed straight back.
-      const acquire = this.semaphore.acquire();
-      const release = await Promise.race([
-        acquire,
-        onAbort(signal).then(() => undefined),
-      ]);
-      if (release === undefined) {
-        void acquire.then((late) => late());
+      // Queued tasks need both a per-model slot and a global slot; abort
+      // wakes them without waiting for either.
+      const modelRelease = await this.acquireOrAborted(
+        this.modelSemaphore(task, options.config),
+        signal,
+      );
+      if (modelRelease === undefined) {
         record({ index: task.index, id: task.id, status: "cancelled", retries: 0 });
         return;
       }
+      const release = await this.acquireOrAborted(this.semaphore, signal);
+      if (release === undefined) {
+        modelRelease();
+        record({ index: task.index, id: task.id, status: "cancelled", retries: 0 });
+        return;
+      }
+      const releaseBoth = () => {
+        release();
+        modelRelease();
+      };
       if (!ticket?.paused || signal.aborted) {
         try {
           if (signal.aborted) {
@@ -165,11 +214,11 @@ export class DispatchCoordinator {
           record(outcome);
           return;
         } finally {
-          release();
+          releaseBoth();
         }
       }
-      // Paused between acquire and start: give the slot back and re-park.
-      release();
+      // Paused between acquire and start: give the slots back and re-park.
+      releaseBoth();
     }
   }
 

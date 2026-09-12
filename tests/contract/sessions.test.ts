@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
 import type { TestSession } from "@marcfargas/pi-test-harness";
 import {
   fauxAssistantMessage,
@@ -145,6 +147,63 @@ describe("delegate session contract", () => {
       });
       expect(result.text).toMatch(/resume|transcript|jsonl|exist/i);
       expect(result.text).not.toContain("dispatch is not implemented");
+    },
+  );
+
+  test(
+    "resumeFrom without a prompt continues the transcript with a default instruction",
+    async () => {
+      // SPEC: prompt is optional only with resumeFrom; a bare resumeFrom must
+      // not send an empty message — it continues with a default prompt.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+
+      const transcript = join(session.cwd, "prior-session.jsonl");
+      const now = new Date().toISOString();
+      writeFileSync(
+        transcript,
+        [
+          JSON.stringify({
+            type: "session",
+            version: 3,
+            id: "fixture-1",
+            timestamp: now,
+            cwd: session.cwd,
+          }),
+          JSON.stringify({
+            type: "message",
+            id: "m1",
+            parentId: null,
+            timestamp: now,
+            message: {
+              role: "user",
+              content: [{ type: "text", text: "PRIOR-INSTRUCTION" }],
+              timestamp: Date.now(),
+            },
+          }),
+        ].join("\n") + "\n",
+      );
+
+      let sawPrior = false;
+      let sawDefaultPrompt = false;
+      const inspect: FauxResponseFactory = (context) => {
+        const serialized = JSON.stringify(context);
+        sawPrior = serialized.includes("PRIOR-INSTRUCTION");
+        const users = context.messages.filter((m) => m.role === "user");
+        sawDefaultPrompt = JSON.stringify(users.at(-1)).includes(
+          "Continue from where you left off",
+        );
+        return fauxAssistantMessage("RESUMED");
+      };
+      subagents.respond([inspect]);
+
+      const result = await callDelegate(session, {
+        tasks: [{ resumeFrom: transcript, model: subagents.spec }],
+      });
+      expect(result.isError).toBe(false);
+      expect(result.text).toContain("RESUMED");
+      expect(sawPrior).toBe(true);
+      expect(sawDefaultPrompt).toBe(true);
     },
   );
 

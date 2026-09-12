@@ -40,6 +40,11 @@ export interface AttemptResult {
   readonly error?: string;
   readonly usage?: Usage;
   readonly hadSideEffects: boolean;
+  /**
+   * The session could not be confirmed quiescent and was left undisposed.
+   * Its write reservations must stay held; retrying is unsafe.
+   */
+  readonly quarantined: boolean;
 }
 
 function log(context: string, error: unknown): void {
@@ -106,16 +111,40 @@ function lastAssistantText(session: AgentSession): {
 }
 
 /**
+ * Cancellation-cause precedence: a parent/ticket abort outranks a deadline,
+ * which outranks a stall. Lower rank wins when causes race.
+ */
+const ABORT_PRECEDENCE: Record<string, number> = {
+  cancelled: 0,
+  deadline: 1,
+  stall: 2,
+};
+
+function preferredReason(
+  existing: string | undefined,
+  incoming: string,
+): string {
+  if (existing === undefined) return incoming;
+  return (ABORT_PRECEDENCE[incoming] ?? 99) <
+    (ABORT_PRECEDENCE[existing] ?? 99)
+    ? incoming
+    : existing;
+}
+
+/**
  * One attempt at one task. Owns the child AgentSession for the attempt's
  * duration and exposes cooperative abort. A run ends when prompt() settles;
  * the child is extension-free, so settlement means no background
- * continuations remain.
+ * continuations remain. Disposal happens exactly once, in run()'s finally:
+ * abort() alone is not proof of quiescence because a prompt in preflight
+ * has not registered its run yet, and a run can still start afterward.
  */
 export class TaskExecution implements ExecutionHandle {
   private session: AgentSession | undefined;
   private abortReason: string | undefined;
   private finished = false;
   private disposed = false;
+  private quarantined = false;
   private readonly done: Promise<AttemptResult>;
 
   constructor(
@@ -130,20 +159,24 @@ export class TaskExecution implements ExecutionHandle {
     return this.done;
   }
 
-  /** Cooperative abort: request cancellation and wait for the session to idle. */
+  /**
+   * Cooperative abort: record the cause and ask the session to idle. Never
+   * disposes — a prompt in preflight registers no run yet, so session.abort()
+   * can return while a run is about to start; the agent_start listener in
+   * run() kills such late runs and run()'s finally disposes.
+   */
   async abort(reason: string): Promise<void> {
-    this.abortReason ??= reason;
+    this.abortReason = preferredReason(this.abortReason, reason);
     const session = this.session;
     if (!session || this.finished) return;
     try {
       await session.abort();
     } catch (error) {
-      // The session may still be mutating; leave it undisposed (quarantined)
-      // rather than risk cleanup while work continues.
+      // The session may still be mutating; quarantine it — never dispose,
+      // never release its write reservations.
+      this.quarantined = true;
       log(`abort of task ${this.task.id} failed; session left undisposed`, error);
-      return;
     }
-    this.disposeSession();
   }
 
   private disposeSession(): void {
@@ -158,23 +191,41 @@ export class TaskExecution implements ExecutionHandle {
 
   private async run(loader: DefaultResourceLoader): Promise<AttemptResult> {
     let session: AgentSession | undefined;
+    // Tracked outside try so a prompt() that throws after a mutating tool
+    // ran still reports its side effects and can never be retried.
+    let hadSideEffects = false;
     try {
       session = await createSubagentSession(this.task, this.controls.env, loader);
       this.session = session;
-      // A cancellation that landed during session creation would have found
-      // no session to abort; honor it now before the prompt starts.
+      // A cancellation that landed during session creation found no session
+      // to abort; honor it now — the session must never be prompted.
       if (this.abortReason !== undefined || this.controls.isAborted()) {
         try {
           await session.abort();
         } catch (error) {
+          this.quarantined = true;
           log(`abort during setup of task ${this.task.id} failed`, error);
         }
+        if (this.abortReason === "deadline") {
+          return {
+            status: "failed",
+            error: `deadline exceeded after ${this.task.deadlineMs}ms`,
+            hadSideEffects: false,
+            quarantined: this.quarantined,
+          };
+        }
+        return {
+          status: "cancelled",
+          hadSideEffects: false,
+          quarantined: this.quarantined,
+        };
       }
 
       // Pause gate between model turns: when the ticket is paused, a turn
       // that produced tool calls parks before the next provider request. A
       // naturally final turn (no tool results) never parks.
-      const agent = session.agent;
+      const child = session;
+      const agent = child.agent;
       const previous = agent.prepareNextTurnWithContext;
       agent.prepareNextTurnWithContext = async (turn, signal) => {
         if (turn.toolResults.length > 0) {
@@ -184,9 +235,16 @@ export class TaskExecution implements ExecutionHandle {
       };
 
       // Track tool executions that produced side effects; whole-task retry
-      // must never replay them.
-      let hadSideEffects = false;
-      const unsubscribe = session.subscribe((event: AgentSessionEvent) => {
+      // must never replay them. A run that starts after cancellation (abort
+      // landed in prompt preflight, before the run registered) is killed at
+      // its first event.
+      const unsubscribe = child.subscribe((event: AgentSessionEvent) => {
+        if (event.type === "agent_start") {
+          if (this.abortReason !== undefined || this.controls.isAborted()) {
+            child.agent.abort();
+          }
+          return;
+        }
         if (
           event.type === "tool_execution_end" &&
           SIDE_EFFECT_TOOLS.has(event.toolName)
@@ -216,6 +274,7 @@ export class TaskExecution implements ExecutionHandle {
           error: `deadline exceeded after ${this.task.deadlineMs}ms`,
           usage,
           hadSideEffects,
+          quarantined: this.quarantined,
         };
       }
       if (this.abortReason || this.controls.isAborted() || stopReason === "aborted") {
@@ -224,6 +283,7 @@ export class TaskExecution implements ExecutionHandle {
           output: text || undefined,
           usage,
           hadSideEffects,
+          quarantined: this.quarantined,
         };
       }
       if (stopReason === "error") {
@@ -236,28 +296,42 @@ export class TaskExecution implements ExecutionHandle {
             : error,
           usage,
           hadSideEffects,
+          quarantined: this.quarantined,
         };
       }
-      return { status: "ok", output: text, usage, hadSideEffects };
+      return {
+        status: "ok",
+        output: text,
+        usage,
+        hadSideEffects,
+        quarantined: this.quarantined,
+      };
     } catch (error) {
       if (this.abortReason === "deadline") {
         return {
           status: "failed",
           error: `deadline exceeded after ${this.task.deadlineMs}ms`,
-          hadSideEffects: false,
+          hadSideEffects,
+          quarantined: this.quarantined,
         };
       }
       if (this.abortReason || this.controls.isAborted()) {
-        return { status: "cancelled", hadSideEffects: false };
+        return {
+          status: "cancelled",
+          hadSideEffects,
+          quarantined: this.quarantined,
+        };
       }
       return {
         status: "failed",
         error: error instanceof Error ? error.message : String(error),
-        hadSideEffects: false,
+        hadSideEffects,
+        quarantined: this.quarantined,
       };
     } finally {
       this.finished = true;
-      this.disposeSession();
+      // A quarantined session may still be mutating; leave it undisposed.
+      if (!this.quarantined) this.disposeSession();
     }
   }
 }
@@ -270,6 +344,7 @@ function canRetryWholeTask(
     !task.sessionId &&
     !task.resumeFrom &&
     !attempt.hadSideEffects &&
+    !attempt.quarantined &&
     isClearlyTransientError(attempt.error)
   );
 }
@@ -277,7 +352,9 @@ function canRetryWholeTask(
 /**
  * Run a task with the whole-task retry policy: a clearly transient failure
  * gets a bounded number of fresh attempts; model-attributable, cancelled,
- * and side-effecting failures return immediately.
+ * side-effecting, and quarantined failures return immediately. The deadline
+ * budget is one wall-clock window measured from when the task leaves the
+ * queue — all attempts and the backoff between them share it.
  */
 export async function runTask(
   task: ResolvedTask,
@@ -291,14 +368,29 @@ export async function runTask(
     status: "failed",
     error: "no attempt ran",
     hadSideEffects: false,
+    quarantined: false,
   };
+  const deadlineAt =
+    task.deadlineMs !== undefined ? Date.now() + task.deadlineMs : undefined;
+  const deadlineExpired = (): AttemptResult => ({
+    status: "failed",
+    output: last.output,
+    error: `deadline exceeded after ${task.deadlineMs}ms`,
+    usage: last.usage,
+    hadSideEffects: last.hadSideEffects,
+    quarantined: last.quarantined,
+  });
 
   for (;;) {
     if (controls.isAborted()) {
-      last = { status: "cancelled", hadSideEffects: false };
+      last = { status: "cancelled", hadSideEffects: false, quarantined: last.quarantined };
       break;
     }
-    const key = `${task.cwd}${task.systemPrompt ?? ""}`;
+    if (deadlineAt !== undefined && Date.now() >= deadlineAt) {
+      last = deadlineExpired();
+      break;
+    }
+    const key = JSON.stringify([task.cwd, task.systemPrompt ?? null]);
     let loaderPromise = loaders.get(key);
     if (!loaderPromise) {
       const loader = createSubagentResourceLoader(task, controls.env);
@@ -310,8 +402,11 @@ export async function runTask(
     const execution = new TaskExecution(task, controls, loader);
     onExecution?.(execution);
     let timer: ReturnType<typeof setTimeout> | undefined;
-    if (task.deadlineMs !== undefined) {
-      timer = setTimeout(() => void execution.abort("deadline"), task.deadlineMs);
+    if (deadlineAt !== undefined) {
+      timer = setTimeout(
+        () => void execution.abort("deadline"),
+        Math.max(0, deadlineAt - Date.now()),
+      );
     }
     try {
       last = await execution.result();
@@ -324,13 +419,17 @@ export async function runTask(
     if (retries + 1 >= MAX_TASK_ATTEMPTS || !canRetryWholeTask(task, last)) break;
     retries += 1;
     try {
-      await sleep(RETRY_DELAY_MS, controls.signal);
+      // The backoff shares the deadline window: never sleep past it.
+      const remaining =
+        deadlineAt !== undefined ? deadlineAt - Date.now() : RETRY_DELAY_MS;
+      await sleep(Math.min(RETRY_DELAY_MS, Math.max(0, remaining)), controls.signal);
     } catch {
       last = {
         status: "cancelled",
         output: last.output,
         usage: last.usage,
         hadSideEffects: last.hadSideEffects,
+        quarantined: last.quarantined,
       };
       break;
     }
@@ -345,5 +444,6 @@ export async function runTask(
     error: last.error,
     retries,
     usage,
+    quarantined: last.quarantined || undefined,
   };
 }

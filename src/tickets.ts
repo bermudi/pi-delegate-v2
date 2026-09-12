@@ -2,13 +2,6 @@ import type { TaskOutcome, Ticket, TicketStatus } from "./types.ts";
 import { Deferred } from "./types.ts";
 import type { ResolvedTask } from "./types.ts";
 
-let ticketSeq = 0;
-
-function newTicketId(): string {
-  ticketSeq += 1;
-  return `t-${ticketSeq.toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
 function isTerminal(status: TicketStatus): boolean {
   return status !== "running";
 }
@@ -68,10 +61,16 @@ function aborted(signal: AbortSignal): Promise<void> {
  */
 export class TicketStore {
   private readonly tickets = new Map<string, Ticket>();
+  private seq = 0;
+
+  private newTicketId(): string {
+    this.seq += 1;
+    return `t-${this.seq.toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  }
 
   create(tasks: readonly ResolvedTask[]): Ticket {
     const ticket: Ticket = {
-      id: newTicketId(),
+      id: this.newTicketId(),
       status: "running",
       paused: false,
       pauseGate: undefined,
@@ -111,9 +110,11 @@ export class TicketStore {
         ticket,
         ticket.outcomes.every((o) => o!.status === "ok")
           ? "completed"
-          : ticket.outcomes.some((o) => o!.status === "ok")
-            ? "completed"
-            : "failed",
+          : ticket.outcomes.every((o) => o!.status === "cancelled")
+            ? "cancelled"
+            : ticket.outcomes.some((o) => o!.status === "ok")
+              ? "completed"
+              : "failed",
       );
     }
   }

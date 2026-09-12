@@ -155,7 +155,9 @@ describe("delegate dispatch contract", () => {
     async () => {
       // v1 evidence: concurrency.test.ts mapConcurrentByModel bound tests.
       // The session agent dir is the test cwd, so delegate.json there is the
-      // user-global config a real Pi process would read.
+      // user-global config a real Pi process would read. Read-only tools keep
+      // the tasks out of shared-write serialization so the concurrency
+      // limiter is what is actually measured.
       session = await openDelegateBoundary();
       const subagents = await installSubagentModel(session);
       writeFileSync(
@@ -178,11 +180,139 @@ describe("delegate dispatch contract", () => {
         tasks: [0, 1, 2].map((n) => ({
           prompt: `task ${n}`,
           model: subagents.spec,
+          tools: ["read"],
         })),
       });
 
       expect(result.isError).toBe(false);
       expect(maxActive).toBe(1);
+    },
+  );
+
+  test(
+    "a later call re-reads the configured bound, both lower and higher",
+    async () => {
+      // The limit is per-call configuration: a coordinator must honour a
+      // bound that changes between calls, in either direction, regardless of
+      // how many permits are active or queued when it is applied.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      writeFileSync(
+        join(session.cwd, "delegate.json"),
+        JSON.stringify({ maxConcurrent: 1 }),
+      );
+
+      let active = 0;
+      let maxActive = 0;
+      const gated: FauxResponseFactory = async () => {
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        await new Promise((r) => setTimeout(r, 20));
+        active -= 1;
+        return fauxAssistantMessage("done");
+      };
+
+      subagents.respond([gated, gated, gated]);
+      await callDelegate(session, {
+        tasks: [0, 1, 2].map((n) => ({
+          prompt: `low ${n}`,
+          model: subagents.spec,
+          tools: ["read"],
+        })),
+      });
+      expect(maxActive).toBe(1);
+
+      writeFileSync(
+        join(session.cwd, "delegate.json"),
+        JSON.stringify({ maxConcurrent: 2 }),
+      );
+      active = 0;
+      maxActive = 0;
+      subagents.respond([gated, gated, gated, gated]);
+      await callDelegate(session, {
+        tasks: [0, 1, 2, 3].map((n) => ({
+          prompt: `high ${n}`,
+          model: subagents.spec,
+          tools: ["read"],
+        })),
+      });
+      expect(maxActive).toBe(2);
+    },
+  );
+
+  test(
+    "a per-model concurrency bound serializes tasks on that model",
+    async () => {
+      // SPEC: concurrency limits are global and per-model. A model-scoped
+      // bound of 1 must hold even when the global bound allows more.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      writeFileSync(
+        join(session.cwd, "delegate.json"),
+        JSON.stringify({
+          maxConcurrent: 3,
+          concurrency: { models: { "delegate-faux/faux-1": 1 } },
+        }),
+      );
+
+      let active = 0;
+      let maxActive = 0;
+      const gated: FauxResponseFactory = async () => {
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        await new Promise((r) => setTimeout(r, 25));
+        active -= 1;
+        return fauxAssistantMessage("done");
+      };
+      subagents.respond([gated, gated, gated]);
+
+      const result = await callDelegate(session, {
+        tasks: [0, 1, 2].map((n) => ({
+          prompt: `task ${n}`,
+          model: subagents.spec,
+          tools: ["read"],
+        })),
+      });
+      expect(result.isError).toBe(false);
+      expect(maxActive).toBe(1);
+      expect(subagents.state.callCount).toBe(3);
+    },
+  );
+
+  test(
+    "with-parent-transcript prepends the parent conversation to the task context",
+    async () => {
+      // SPEC: context "with-parent-transcript" gives the subagent the parent
+      // conversation as context. The transcript must contain this session's
+      // own user/assistant text, without parent tools or extensions.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+
+      let sawParentTranscript = false;
+      const inspect: FauxResponseFactory = async (context) => {
+        const firstUser = context.messages.find(
+          (m) => m.role === "user",
+        );
+        const text = JSON.stringify(firstUser);
+        sawParentTranscript =
+          text.includes("parent-session") &&
+          text.includes("delegate contract call");
+        return fauxAssistantMessage("CONTEXT-SEEN");
+      };
+      subagents.respond([inspect]);
+
+      const result = await callDelegate(session, {
+        tasks: [
+          {
+            prompt: "look back",
+            model: subagents.spec,
+            context: "with-parent-transcript",
+          },
+        ],
+      });
+      expect(result.isError).toBe(false);
+      expect(result.text).toContain("CONTEXT-SEEN");
+      expect(sawParentTranscript).toBe(true);
     },
   );
 });

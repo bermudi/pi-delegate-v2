@@ -57,6 +57,10 @@ V1 is evidence for behavior, never a design source. When consulting it:
 
 ## Constraints
 
+- No module-level mutable application state. Runtime state must have an
+  explicit owner and lifetime (e.g. `TicketStore`, `AdmissionController`,
+  the extension closure). Immutable constants and stateless helpers are
+  fine.
 - Until a subsystem is implemented it fails loudly. Scaffold errors and
   scaffold output are not the contract — `SPEC.md` is.
 - Do not extend the scaffold to force a migrated test green; let it fail

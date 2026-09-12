@@ -175,6 +175,11 @@ function validateTasks(tasks: readonly TaskInput[]): void {
         `${where}: workspace "${task.workspace}" is one-shot and cannot be combined with sessionId or resumeFrom.`,
       );
     }
+    if (task.workspace !== undefined && task.workspace !== "shared") {
+      fail(
+        `${where}: workspace "${task.workspace}" is not implemented yet; use workspace "shared" or omit the field.`,
+      );
+    }
     if (task.resumeFrom !== undefined) {
       if (!isAbsolute(task.resumeFrom) || !task.resumeFrom.endsWith(".jsonl")) {
         fail(

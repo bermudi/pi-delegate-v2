@@ -1,8 +1,9 @@
 import { existsSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import { relative, resolve } from "node:path";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 import { execFileSync } from "node:child_process";
 import {
+  buildSessionContext,
   createAgentSession,
   DefaultResourceLoader,
   SessionManager,
@@ -69,23 +70,72 @@ export function canonicalPath(path: string): string {
   }
 }
 
+const GIT_TIMEOUT_MS = 5_000;
+
+function isWithin(directory: string, candidate: string): boolean {
+  const rel = relative(directory, candidate);
+  return (
+    rel === "" ||
+    (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel))
+  );
+}
+
 /**
- * The scope a task's writes can reach. Inside a Git worktree the top-level is
- * the reservation root (writes anywhere in it overlap); outside Git the cwd
- * itself is. Git discovery failure falls back to the physical cwd.
+ * The scopes a task's writes can reach. Inside a Git worktree the top-level
+ * is the reservation root (writes anywhere in it overlap); outside Git the
+ * cwd itself is. An external `core.worktree` can put the top-level outside
+ * the physical cwd — then the cwd stays reachable and is a second root.
+ *
+ * Fails closed: only Git's explicit "not a repository" permits the cwd-only
+ * fallback. Git being unavailable, erroring, or returning an empty root is
+ * ambiguous scope — an error, not a narrower reservation. The probe runs
+ * with all `GIT_*` inherited redirects scrubbed so a polluted environment
+ * cannot shrink the discovered scope.
  */
-export function writeRootOf(cwd: string): string {
+export function writeRootsOf(cwd: string): readonly string[] {
+  const physicalCwd = canonicalPath(cwd);
+  const env = Object.fromEntries(
+    Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_")),
+  );
+  let top: string;
   try {
-    const top = execFileSync(
+    top = execFileSync(
       "git",
-      ["-C", cwd, "rev-parse", "--show-toplevel"],
-      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+      ["-C", physicalCwd, "rev-parse", "--show-toplevel"],
+      {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+        timeout: GIT_TIMEOUT_MS,
+        env: {
+          ...env,
+          LC_ALL: "C",
+          LANG: "C",
+          GIT_OPTIONAL_LOCKS: "0",
+          GIT_DISCOVERY_ACROSS_FILESYSTEM: "1",
+        },
+      },
     ).trim();
-    if (top) return canonicalPath(top);
-  } catch {
-    // Not a repository (or git unavailable): the physical cwd is the scope.
+  } catch (error) {
+    const stderr =
+      (error as { stderr?: Buffer | string }).stderr?.toString().trim() ?? "";
+    if (/not a git repository/i.test(stderr)) {
+      return [physicalCwd];
+    }
+    const detail =
+      stderr || (error instanceof Error ? error.message : String(error));
+    throw new Error(
+      `Could not safely determine the Git scope for '${physicalCwd}': ${detail}. ` +
+        `Refusing to admit shared-write tasks with an ambiguous write scope.`,
+    );
   }
-  return canonicalPath(cwd);
+  if (!top) {
+    throw new Error(
+      `Could not safely determine the Git scope for '${physicalCwd}': git returned an empty repository root. ` +
+        `Refusing to admit shared-write tasks with an ambiguous write scope.`,
+    );
+  }
+  const root = canonicalPath(top);
+  return isWithin(root, physicalCwd) ? [root] : [root, physicalCwd];
 }
 
 const GLOBAL_CONTEXT_FILES = new Set([
@@ -128,9 +178,71 @@ function resolveModel(
   return undefined;
 }
 
+/** Extract only text blocks from a Pi message content value. */
+function extractTextContent(
+  content: unknown,
+): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .filter(
+      (b): b is { type: "text"; text: string } =>
+        typeof b === "object" &&
+        b !== null &&
+        (b as { type?: string }).type === "text" &&
+        typeof (b as { text?: string }).text === "string",
+    )
+    .map((b) => b.text)
+    .join("");
+}
+
+/** Render the active parent conversation as compact context for a subagent. */
+function buildParentTranscript(env: HostEnvironment): string | undefined {
+  try {
+    const ctx = buildSessionContext(
+      env.ctx.sessionManager.getEntries(),
+      env.ctx.sessionManager.getLeafId(),
+    );
+    const lines: string[] = [];
+    for (const msg of ctx.messages) {
+      if (msg.role === "user" || msg.role === "assistant") {
+        const text = extractTextContent(msg.content).trim();
+        if (text) {
+          lines.push(msg.role === "user" ? `**User:** ${text}` : `**Assistant:** ${text}`);
+        }
+      }
+    }
+    return lines.length > 0 ? lines.join("\n\n") : undefined;
+  } catch (error) {
+    console.warn(
+      `[delegate] could not build the parent transcript for context "with-parent-transcript"; continuing without it:`,
+      error,
+    );
+    return undefined;
+  }
+}
+
+function wrapWithParentTranscript(transcript: string, prompt: string): string {
+  return [
+    "<parent-session>",
+    "The following is the conversation from the parent session.",
+    "Read this for context, then execute the task below.",
+    "Do not continue the parent conversation or respond to prior messages.",
+    "",
+    transcript,
+    "</parent-session>",
+    "",
+    "## Task",
+    prompt,
+  ].join("\n");
+}
+
+const RESUME_DEFAULT_PROMPT =
+  "Continue from where you left off. Pick up the task and keep going.";
+
 /**
  * Resolve validated task inputs into executable tasks: agent profile, model,
- * tools, absolute cwd, and the shared-write reservation root. Everything
+ * tools, absolute cwd, and the shared-write reservation roots. Everything
  * that can fail is resolved here, before admission and before execution.
  */
 export function resolveTasks(
@@ -146,6 +258,13 @@ export function resolveTasks(
     // The host may not expose its active tool list; the default profile
     // then falls back to the standard writer set below.
   }
+
+  const needsParentContext = tasks.some(
+    (task) => task.context === "with-parent-transcript",
+  );
+  const parentTranscript = needsParentContext
+    ? buildParentTranscript(env)
+    : undefined;
 
   return tasks.map((task, index) => {
     const where = `tasks[${index}]${task.id ? ` (id '${task.id}')` : ""}`;
@@ -186,10 +305,15 @@ export function resolveTasks(
     const reserves =
       (workspace === "shared" && isWriter(tools)) || workspace === "isolated";
 
+    let prompt = task.prompt ?? (task.resumeFrom ? RESUME_DEFAULT_PROMPT : "");
+    if (task.context === "with-parent-transcript" && parentTranscript) {
+      prompt = wrapWithParentTranscript(parentTranscript, prompt);
+    }
+
     return {
       index,
       id: task.id ?? `task-${index + 1}`,
-      prompt: task.prompt ?? "",
+      prompt,
       agent: task.agent ?? "inline",
       cwd: canonicalPath(cwd),
       model,
@@ -201,7 +325,7 @@ export function resolveTasks(
       resumeFrom: task.resumeFrom,
       deadlineMs: task.deadlineMs,
       workspace,
-      writeRoot: reserves ? writeRootOf(cwd) : undefined,
+      writeRoots: reserves ? writeRootsOf(cwd) : undefined,
     } satisfies ResolvedTask;
   });
 }

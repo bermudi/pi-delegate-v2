@@ -104,6 +104,33 @@ describe("regression: failure propagation and retries", () => {
   );
 
   test(
+    "the deadline budget is shared across attempts and the retry backoff",
+    async () => {
+      // SPEC: deadlineMs is one wall-clock budget covering attempts and
+      // backoff, not a fresh budget per attempt. deadlineMs (100) is shorter
+      // than the retry backoff, so the second attempt must never start.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      subagents.respond([
+        fauxAssistantMessage("", {
+          stopReason: "error",
+          errorMessage: "connection reset by peer",
+        }),
+        fauxAssistantMessage("SHOULD-NOT-REACH"),
+      ]);
+
+      const result = await callDelegate(session, {
+        tasks: [
+          { prompt: "flaky", model: subagents.spec, deadlineMs: 100 },
+        ],
+      });
+      expect(result.text).toMatch(/deadline/i);
+      expect(result.text).not.toContain("SHOULD-NOT-REACH");
+      expect(subagents.state.callCount).toBe(1);
+    },
+  );
+
+  test(
     "batch validation failure starts no tasks at all",
     async () => {
       // SPEC: invalid mode combinations and unresolved references fail the

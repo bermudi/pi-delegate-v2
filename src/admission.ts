@@ -7,10 +7,20 @@ export function rootsOverlap(a: string, b: string): boolean {
   return a.startsWith(b + sep) || b.startsWith(a + sep);
 }
 
+/**
+ * Environment redirects that would make a child `bash` invocation see a
+ * different repository than the one admission reserved. The probe in
+ * `writeRootsOf` scrubs them, but the child's shell still inherits them, so
+ * a bash-capable multi-writer batch cannot be verified safely while they
+ * are set.
+ */
+const GIT_REDIRECTS = ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"] as const;
+
 interface Reservation {
   readonly root: string;
   readonly owner: string;
   readonly kind: "shared" | "isolated";
+  readonly taskIndex: number;
 }
 
 export interface AdmissionGrant {
@@ -19,8 +29,13 @@ export interface AdmissionGrant {
    * overlapping shared writers serialize in task order.
    */
   readonly predecessors: ReadonlyMap<number, number>;
-  /** Release every reservation taken by this call. */
-  readonly release: () => void;
+  /**
+   * Release every reservation taken by this call. Task indexes in `retain`
+   * keep their reservations and busy-session marks: those tasks could not
+   * be confirmed quiescent, so their roots stay protected for the life of
+   * the process.
+   */
+  readonly release: (retain?: ReadonlySet<number>) => void;
 }
 
 /**
@@ -32,14 +47,33 @@ export interface AdmissionGrant {
  */
 export class AdmissionController {
   private readonly reservations: Reservation[] = [];
-  private readonly busySessions = new Map<string, string>();
+  private readonly busySessions = new Map<string, { owner: string; taskIndex: number }>();
 
   /**
    * Check then reserve. Throws an actionable error on any conflict; on
    * success the caller owns the reservations until `release()`.
    */
   admit(tasks: readonly ResolvedTask[], owner: string): AdmissionGrant {
-    const reserving = tasks.filter((task) => task.writeRoot !== undefined);
+    const reserving = tasks.filter((task) => task.writeRoots !== undefined);
+
+    // Inherited Git redirects: a scrubbed probe can still name the real
+    // repository root, but a child bash tool would run under the redirect.
+    // Multi-writer batches fail closed rather than trust a narrowed scope.
+    const sharedWriters = reserving.filter(
+      (task) => task.workspace === "shared",
+    );
+    const redirects = GIT_REDIRECTS.filter(
+      (name) => process.env[name] !== undefined,
+    );
+    if (
+      sharedWriters.length >= 2 &&
+      redirects.length > 0 &&
+      sharedWriters.some((task) => task.tools.includes("bash"))
+    ) {
+      throw new Error(
+        `Could not safely verify a bash-capable shared-write batch while ${redirects.join(", ")} redirects Git repository context.`,
+      );
+    }
 
     // Within-call: group reserving tasks by root overlap (connected
     // components, union-find). Mixed shared/isolated groups reject.
@@ -51,9 +85,13 @@ export class AdmissionController {
       }
       return i;
     };
+    const overlaps = (
+      a: readonly string[],
+      b: readonly string[],
+    ): boolean => a.some((ra) => b.some((rb) => rootsOverlap(ra, rb)));
     for (let i = 0; i < reserving.length; i++) {
       for (let j = i + 1; j < reserving.length; j++) {
-        if (rootsOverlap(reserving[i]!.writeRoot!, reserving[j]!.writeRoot!)) {
+        if (overlaps(reserving[i]!.writeRoots!, reserving[j]!.writeRoots!)) {
           parent[find(i)] = find(j);
         }
       }
@@ -68,9 +106,9 @@ export class AdmissionController {
     for (const group of groups.values()) {
       const kinds = new Set(group.map((task) => task.workspace));
       if (kinds.size > 1) {
-        const roots = [...new Set(group.map((task) => task.writeRoot))].join(
-          ", ",
-        );
+        const roots = [
+          ...new Set(group.flatMap((task) => task.writeRoots!)),
+        ].join(", ");
         throw new Error(
           `Conflicting workspaces: shared and isolated tasks in one call overlap at ${roots}. Split them into separate calls.`,
         );
@@ -86,7 +124,7 @@ export class AdmissionController {
     // Cross-call: no reserving task may overlap another owner's reservation.
     for (const task of reserving) {
       for (const reservation of this.reservations) {
-        if (rootsOverlap(task.writeRoot!, reservation.root)) {
+        if (task.writeRoots!.some((root) => rootsOverlap(root, reservation.root))) {
           throw new Error(
             `Task ${task.id} conflicts with ${reservation.kind === "isolated" ? "an isolated" : "a shared"} write already running in ${reservation.root} (owner: ${reservation.owner}). Wait for it to finish or use a different cwd.`,
           );
@@ -98,40 +136,49 @@ export class AdmissionController {
     for (const task of tasks) {
       if (task.sessionId === undefined) continue;
       const holder = this.busySessions.get(task.sessionId);
-      if (holder !== undefined && holder !== owner) {
+      if (holder !== undefined && holder.owner !== owner) {
         throw new Error(
-          `Session '${task.sessionId}' is busy running work for ${holder}; wait for it to finish or close the session first.`,
+          `Session '${task.sessionId}' is busy running work for ${holder.owner}; wait for it to finish or close the session first.`,
         );
       }
     }
 
     // Reserve.
-    const taken: Reservation[] = reserving.map((task) => ({
-      root: task.writeRoot!,
-      owner,
-      kind: task.workspace === "isolated" ? ("isolated" as const) : ("shared" as const),
-    }));
+    const taken: Reservation[] = reserving.flatMap((task) =>
+      task.writeRoots!.map((root) => ({
+        root,
+        owner,
+        kind: task.workspace === "isolated" ? ("isolated" as const) : ("shared" as const),
+        taskIndex: task.index,
+      })),
+    );
     this.reservations.push(...taken);
     const heldSessions = tasks
       .filter((task) => task.sessionId !== undefined)
-      .map((task) => task.sessionId!);
-    for (const sessionId of heldSessions) {
-      this.busySessions.set(sessionId, owner);
+      .map((task) => ({ sessionId: task.sessionId!, taskIndex: task.index }));
+    for (const held of heldSessions) {
+      this.busySessions.set(held.sessionId, {
+        owner,
+        taskIndex: held.taskIndex,
+      });
     }
 
     let released = false;
     return {
       predecessors,
-      release: () => {
+      release: (retain?: ReadonlySet<number>) => {
         if (released) return;
         released = true;
         for (const reservation of taken) {
+          if (retain?.has(reservation.taskIndex)) continue;
           const index = this.reservations.indexOf(reservation);
           if (index >= 0) this.reservations.splice(index, 1);
         }
-        for (const sessionId of heldSessions) {
-          if (this.busySessions.get(sessionId) === owner) {
-            this.busySessions.delete(sessionId);
+        for (const held of heldSessions) {
+          if (retain?.has(held.taskIndex)) continue;
+          const current = this.busySessions.get(held.sessionId);
+          if (current?.owner === owner) {
+            this.busySessions.delete(held.sessionId);
           }
         }
       },

@@ -89,9 +89,11 @@ gaps.
   mechanics.
 - **Covered now:** configured bound (`delegate.json` `maxConcurrent`) limits
   simultaneous subagent work (measured through the faux provider's live call
-  tracking).
-- **Gap:** per-model/per-provider limits; abort-of-queued behavior; dynamic
-  limit changes.
+  tracking); the bound is re-read per call in both directions; a per-model
+  bound (`concurrency.models`) serializes below the global limit; a task
+  cancelled while queued behind the bound never reaches the provider.
+- **Gap:** per-provider limit variants; abort-of-queued while parked behind
+  a serialized writer.
 
 ### Async tickets
 
@@ -121,10 +123,15 @@ gaps.
   cancellation (not provider-error text); completed writes survive.
 - **Internal:** quiescence-barrier internals, unwind budgets, settle-path
   plumbing.
-- **Covered now:** cancel preview/force and retained results.
-- **Gap:** parent-abort and deadline/stall causes (need in-flight abort and
+- **Covered now:** cancel preview/force and retained results; a task
+  cancelled while queued behind the concurrency bound never starts; a task
+  cancelled while paused between model turns does not start another
+  provider call; a mid-stream abort is a structured cancellation, not an
+  error, and no extra turn starts.
+- **Gap:** parent-abort and stall causes (need in-flight abort and
   wall-clock control at the boundary); quarantine visibility after unsafe
-  cancellation.
+  cancellation; cancellation landing during child-session creation (no
+  deterministic boundary seam for it).
 
 ### Pause / resume
 
@@ -156,11 +163,12 @@ gaps.
 - **Internal:** pool map/locks, config cloning, quarantine registry, session
   file bookkeeping.
 - **Covered now:** missing-transcript `resumeFrom` error; a `sessionId` held
-  by a running ticket rejects conflicting reuse.
+  by a running ticket rejects conflicting reuse; `resumeFrom` without a
+  prompt rehydrates the transcript and sends the default continuation
+  instruction (live test with a real `.jsonl` fixture).
 - **Pending (migrated):** pool + list + continuation; close then fresh;
   frozen-config rejection.
 - **Gap:** eviction after cancelled/stalled/deadline-exceeded runs;
-  `resumeFrom` happy path (needs a real `.jsonl` transcript fixture);
   shutdown cleanup; usage recorded for ordinary failures on pooled sessions.
 
 ### Admission and shared writes
@@ -178,10 +186,15 @@ gaps.
 - **Internal:** `findSharedWriteConflicts` grouping internals, canonical-path
   helpers.
 - **Covered now:** same-call writer serialization order; cross-call
-  rejection against a running ticket; shared + isolated same-call rejection.
+  rejection against a running ticket; shared + isolated same-call rejection;
+  unimplemented `scratch`/`isolated` values fail loudly before any provider
+  call; an inherited `GIT_DIR` redirect fails closed for a bash-capable
+  multi-writer batch; the scope probe runs with `GIT_*` scrubbed so a bogus
+  redirect cannot shrink the reserved scope.
 - **Gap:** read-only + writer parallelism allowed; unknown-but-real tools
-  treated as mutating; operator bypass warning surfaces; scratch suggestion
-  in rejection prose.
+  treated as mutating; symlink canonicalization; external `core.worktree`
+  dual-root reservation; operator bypass warning surfaces; scratch
+  suggestion in rejection prose.
 
 ### Scratch workspaces
 
@@ -228,9 +241,12 @@ gaps.
   timing.
 - **Covered now:** transient retry to success; model-attributable no-retry +
   model hint; serialized successor after predecessor failure; batch
-  validation starts nothing.
-- **Gap:** retry-count visibility in results; stall/deadline structured
-  outcomes vs retries.
+  validation starts nothing; the `deadlineMs` budget is shared across
+  attempts and the retry backoff (a deadline shorter than the backoff
+  prevents the second attempt entirely).
+- **Gap:** retry-count visibility in results; stall structured outcomes;
+  no-retry-after-side-effects (needs a mutating tool before a transient
+  failure).
 
 ### Telemetry and observable events
 
@@ -313,6 +329,26 @@ Promoted to live tests: all of `dispatch.test.ts` (6), `tickets.test.ts`
 
 Still pending (later tranches): session pooling/close/frozen config;
 scratch discard; isolated apply and conflict retention.
+
+## Fourth tranche (adversarial correctness review)
+
+Public-boundary regression tests added for defects found in review:
+
+- `tests/regression/cancellation.test.ts` — queued-behind-bound cancellation
+  never reaches the provider; paused-between-turns cancellation starts no
+  further call; mid-stream abort is a cancellation, not an error.
+- `tests/contract/dispatch.test.ts` — the configured bound now actually
+  limits (read-only tools keep writers out of serialization); the bound is
+  re-read per call in both directions; a `concurrency.models` per-model
+  bound serializes below the global limit; `with-parent-transcript`
+  prepends the parent conversation.
+- `tests/contract/workspaces.test.ts` — unimplemented `scratch`/`isolated`
+  fail loudly; `GIT_DIR` redirect + bash-capable multi-writer batch fails
+  closed; the Git scope probe scrubs inherited `GIT_*`.
+- `tests/regression/failure-propagation.test.ts` — `deadlineMs` is one
+  wall-clock budget across attempts and backoff.
+- `tests/contract/sessions.test.ts` — `resumeFrom` without a prompt sends
+  the default continuation instruction over the rehydrated transcript.
 
 ## Next contract slices
 

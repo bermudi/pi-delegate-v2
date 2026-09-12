@@ -23,8 +23,12 @@ export interface ResolvedTask {
   readonly resumeFrom: string | undefined;
   readonly deadlineMs: number | undefined;
   readonly workspace: Workspace;
-  /** Canonical shared-write root when this task can mutate, else undefined. */
-  readonly writeRoot: string | undefined;
+  /**
+   * Canonical write-scope roots when this task can mutate, else undefined.
+   * Usually a single root; an external `core.worktree` keeps the physical
+   * cwd reachable beside the Git top-level, so both are listed.
+   */
+  readonly writeRoots: readonly string[] | undefined;
 }
 
 export type TaskStatus = "ok" | "failed" | "cancelled";
@@ -38,6 +42,12 @@ export interface TaskOutcome {
   readonly error?: string;
   readonly retries: number;
   readonly usage?: Usage;
+  /**
+   * True when the task's session could not be confirmed quiescent and was
+   * left undisposed. Callers must keep its reservations alive — work may
+   * still be mutating shared roots.
+   */
+  readonly quarantined?: boolean;
 }
 
 export type TicketStatus = "running" | "completed" | "failed" | "cancelled";
@@ -90,24 +100,33 @@ export class Deferred {
   }
 }
 
-/** Minimal counting semaphore with a mutable limit. */
+/**
+ * Minimal counting semaphore with a mutable limit. `active` counts granted
+ * permits; grants are issued only while `active < limit`, so raising the
+ * limit wakes queued waiters and lowering it simply stops new grants until
+ * releases bring usage under the new bound.
+ */
 export class Semaphore {
-  private available: number;
+  private active = 0;
+  private limit: number;
   private readonly queue: (() => void)[] = [];
-  constructor(private limit: number) {
-    this.available = limit;
+  constructor(limit: number) {
+    this.limit = Math.max(1, Math.floor(limit));
   }
   setLimit(limit: number): void {
     this.limit = Math.max(1, Math.floor(limit));
     this.drain();
   }
   async acquire(): Promise<() => void> {
-    if (this.available > 0) {
-      this.available -= 1;
+    if (this.active < this.limit) {
+      this.active += 1;
       return this.releaser();
     }
     return new Promise<() => void>((resolve) => {
-      this.queue.push(() => resolve(this.releaser()));
+      this.queue.push(() => {
+        this.active += 1;
+        resolve(this.releaser());
+      });
     });
   }
   private releaser(): () => void {
@@ -115,13 +134,12 @@ export class Semaphore {
     return () => {
       if (released) return;
       released = true;
-      this.available += 1;
+      this.active -= 1;
       this.drain();
     };
   }
   private drain(): void {
-    while (this.available > 0 && this.queue.length > 0) {
-      this.available -= 1;
+    while (this.active < this.limit && this.queue.length > 0) {
       this.queue.shift()!();
     }
   }
