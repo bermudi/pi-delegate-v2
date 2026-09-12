@@ -7,6 +7,7 @@ import type { HostEnvironment } from "./host.ts";
 import { Semaphore } from "./types.ts";
 import type { TicketStore } from "./tickets.ts";
 import type {
+  ExecutionHandle,
   ResolvedTask,
   TaskOutcome,
   Ticket,
@@ -149,14 +150,38 @@ export class DispatchCoordinator {
       options.signal,
       ticket?.cancellation.signal,
     );
+    // Once the worker's true outcome has landed it must not be overwritten
+    // by a provisional one — worker truth is strictly better information.
+    let workerTruthRecorded = false;
     const record = (outcome: TaskOutcome) => {
+      if (workerTruthRecorded) return;
       outcomes[task.index] = outcome;
-      ticket?.executions.delete(task.index);
       if (ticket) {
         // The store owns lifecycle; recording can settle the ticket but
         // never un-settles it.
         this.tickets.recordOutcome(ticket, outcome);
       }
+    };
+    /**
+     * The worker's true settlement, independent of the caller-visible one.
+     * The live handle is dropped at real quiescence — a provisional
+     * (cancelled-before-confirmed) outcome leaves the worker reachable for
+     * a later, stronger abort. When the true outcome differs from what was
+     * recorded, it replaces it for visibility — never the ticket status —
+     * and confirmed quiescence releases the retained reservation.
+     */
+    const onWorkerSettled = (
+      handle: ExecutionHandle,
+      late: TaskOutcome | undefined,
+    ) => {
+      if (ticket?.executions.get(task.index) === handle) {
+        ticket.executions.delete(task.index);
+      }
+      if (late === undefined) return;
+      workerTruthRecorded = true;
+      outcomes[task.index] = late;
+      if (ticket) this.tickets.recordOutcome(ticket, late);
+      if (!late.quarantined) grant.releaseRetained(task.index);
     };
 
     // Queued tasks hold no execution resources: pause first, then wait for a
@@ -208,8 +233,12 @@ export class DispatchCoordinator {
             waitWhilePaused: (runSignal) =>
               ticket ? this.waitWhilePaused(ticket, runSignal ?? signal) : Promise.resolve(),
           };
-          const outcome = await runTask(task, controls, loaders, (handle) =>
-            ticket?.executions.set(task.index, handle),
+          const outcome = await runTask(
+            task,
+            controls,
+            loaders,
+            (handle) => ticket?.executions.set(task.index, handle),
+            onWorkerSettled,
           );
           record(outcome);
           return;

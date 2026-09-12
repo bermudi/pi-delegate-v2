@@ -68,7 +68,11 @@ export interface Ticket {
   readonly cancellation: AbortController;
   /** Resolves when the ticket reaches a terminal status. */
   readonly settledGate: Deferred;
-  /** Resolves when all task work (incl. post-cancel stragglers) has wound down. */
+  /**
+   * Resolves when every task has a caller-visible outcome. Quarantined
+   * workers may still be winding down — this is caller settlement, not
+   * confirmed quiescence.
+   */
   readonly finishedGate: Deferred;
   readonly waiters: Set<() => void>;
   /** Live executions by task index, for cooperative abort. */
@@ -76,7 +80,12 @@ export interface Ticket {
 }
 
 export interface ExecutionHandle {
-  /** Cooperative abort of in-flight model/tool work. Resolves when quiescent. */
+  /**
+   * Cooperative abort of in-flight model/tool work. The promise resolves
+   * only if the worker confirms quiescence — it may never resolve when a
+   * provider or tool ignores cancellation, so nothing caller-visible may
+   * block on it.
+   */
   abort(reason: string): Promise<void>;
 }
 

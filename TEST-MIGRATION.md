@@ -127,11 +127,19 @@ gaps.
   cancelled while queued behind the concurrency bound never starts; a task
   cancelled while paused between model turns does not start another
   provider call; a mid-stream abort is a structured cancellation, not an
-  error, and no extra turn starts.
+  error, and no extra turn starts. Caller settlement is decoupled from
+  worker wind-down: a forced cancel settles while a gated provider keeps
+  cleanup blocked, a sync call returns a structured outcome when its
+  deadline fires against a non-cooperative worker, conflicting work
+  rejects while the quarantined worker may still mutate, and the
+  reservation releases only after quiescence is actually confirmed.
 - **Gap:** parent-abort and stall causes (need in-flight abort and
-  wall-clock control at the boundary); quarantine visibility after unsafe
-  cancellation; cancellation landing during child-session creation (no
-  deterministic boundary seam for it).
+  wall-clock control at the boundary); a worker whose abort is delivered
+  but then completes "ok" anyway (the faux provider always honors a
+  tripped signal once its gate releases, so the boundary cannot produce a
+  late success — the abortReason guard is what keeps it cancelled);
+  cancellation landing during child-session creation (no deterministic
+  boundary seam for it).
 
 ### Pause / resume
 
@@ -349,6 +357,36 @@ Public-boundary regression tests added for defects found in review:
   wall-clock budget across attempts and backoff.
 - `tests/contract/sessions.test.ts` — `resumeFrom` without a prompt sends
   the default continuation instruction over the rehydrated transcript.
+
+## Fifth tranche (caller settlement vs worker quiescence)
+
+The investigation confirmed a real indefinite-settlement defect: Pi's
+`session.abort()` waits for `waitForIdle()`, and the agent loop's
+provider-stream and tool awaits do not race the abort signal — so a
+non-cooperative provider/tool left `prompt()` pending forever and a
+synchronous dispatch never returned (proven by a test that timed out at 5s
+on the pre-fix implementation; it now returns at the task's deadline).
+
+The lifecycle now separates three concepts in `TaskExecution`:
+
+- **caller settlement** (`result()`): resolves with the true outcome when
+  the run winds down, or a provisional cancelled/deadline outcome the
+  moment cancellation is requested — never blocked on cleanup;
+- **worker truth** (`settled()`): resolves only when `prompt()` +
+  `waitForIdle()` actually settle — confirmed quiescence;
+- **resource eligibility**: provisional outcomes are `quarantined`, so the
+  grant retains their reservations at call end; when `settled()` later
+  confirms quiescence (`quarantined: false`), `grant.releaseRetained`
+  frees them. A worker that never settles keeps them for process life.
+
+New regression tests in `tests/regression/cancellation.test.ts`:
+
+- forced cancel settles while a gated provider blocks cleanup, conflicting
+  work rejects during quarantine, the reservation releases only after the
+  worker demonstrably winds down, and the ticket stays cancelled;
+- a sync call returns a structured deadline outcome while the worker is
+  still gated, holds the reservation during quarantine, and admits the
+  same scope once quiescence is confirmed.
 
 ## Next contract slices
 

@@ -16,12 +16,15 @@ function completedCount(ticket: Ticket): number {
 
 function taskSection(outcome: TaskOutcome): string {
   const head = `### Task ${outcome.id} — ${outcome.status === "ok" ? "completed" : outcome.status}`;
+  const quarantined = outcome.quarantined
+    ? "\n(worker termination unconfirmed — its write scope stays reserved)"
+    : "";
   if (outcome.status === "ok") {
-    return `${head}\n${outcome.output ?? ""}`;
+    return `${head}\n${outcome.output ?? ""}${quarantined}`;
   }
   const detail = outcome.error ?? "no output";
   const partial = outcome.output ? `\n${outcome.output}` : "";
-  return `${head}\n${detail}${partial}`;
+  return `${head}\n${detail}${partial}${quarantined}`;
 }
 
 /** Poll/wait view of one ticket. Poll is observational — never mutates. */

@@ -17,10 +17,11 @@ import {
   RETRY_DELAY_MS,
   sleep,
 } from "./retry.ts";
-import type {
-  ExecutionHandle,
-  ResolvedTask,
-  TaskOutcome,
+import {
+  Deferred,
+  type ExecutionHandle,
+  type ResolvedTask,
+  type TaskOutcome,
 } from "./types.ts";
 
 /** Cooperative controls the coordinator hands to each task run. */
@@ -45,6 +46,13 @@ export interface AttemptResult {
    * Its write reservations must stay held; retrying is unsafe.
    */
   readonly quarantined: boolean;
+}
+
+function abortedSignal(signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.resolve();
+  return new Promise((resolve) =>
+    signal.addEventListener("abort", () => resolve(), { once: true }),
+  );
 }
 
 function log(context: string, error: unknown): void {
@@ -138,6 +146,19 @@ function preferredReason(
  * continuations remain. Disposal happens exactly once, in run()'s finally:
  * abort() alone is not proof of quiescence because a prompt in preflight
  * has not registered its run yet, and a run can still start afterward.
+ *
+ * Two settlements are kept distinct:
+ *
+ * - result() is the caller-visible settlement. It resolves with the true
+ *   outcome when the run winds down, or with a provisional cancelled /
+ *   deadline outcome as soon as cancellation is requested — a provider or
+ *   tool that ignores the abort signal must not hold the caller. A
+ *   provisional outcome is quarantined: termination is unconfirmed, so the
+ *   worker's reservations stay held.
+ * - settled() is the worker truth: it resolves only when the run actually
+ *   wound down (prompt() and waitForIdle() settled), confirming quiescence.
+ *   Its outcome may then release a retained reservation; it can never be a
+ *   success after cancellation.
  */
 export class TaskExecution implements ExecutionHandle {
   private session: AgentSession | undefined;
@@ -145,6 +166,9 @@ export class TaskExecution implements ExecutionHandle {
   private finished = false;
   private disposed = false;
   private quarantined = false;
+  private hadSideEffects = false;
+  /** Resolves the moment cancellation is requested, however it arrives. */
+  private readonly abortRequested = new Deferred();
   private readonly done: Promise<AttemptResult>;
 
   constructor(
@@ -156,17 +180,28 @@ export class TaskExecution implements ExecutionHandle {
   }
 
   result(): Promise<AttemptResult> {
+    return Promise.race([
+      this.done,
+      this.abortRequested.promise.then(() => this.provisionalOutcome()),
+    ]);
+  }
+
+  settled(): Promise<AttemptResult> {
     return this.done;
   }
 
   /**
-   * Cooperative abort: record the cause and ask the session to idle. Never
-   * disposes — a prompt in preflight registers no run yet, so session.abort()
-   * can return while a run is about to start; the agent_start listener in
-   * run() kills such late runs and run()'s finally disposes.
+   * Cooperative abort: record the cause, mark caller settlement due, and ask
+   * the session to idle. abortRequested resolves before the session is
+   * touched — session.abort() waits for quiescence and may never settle when
+   * the provider or a tool ignores the signal. Never disposes — a prompt in
+   * preflight registers no run yet, so session.abort() can return while a
+   * run is about to start; the agent_start listener in run() kills such
+   * late runs and run()'s finally disposes.
    */
   async abort(reason: string): Promise<void> {
     this.abortReason = preferredReason(this.abortReason, reason);
+    this.abortRequested.resolve();
     const session = this.session;
     if (!session || this.finished) return;
     try {
@@ -177,6 +212,33 @@ export class TaskExecution implements ExecutionHandle {
       this.quarantined = true;
       log(`abort of task ${this.task.id} failed; session left undisposed`, error);
     }
+  }
+
+  /**
+   * The outcome the caller sees when cancellation was requested before the
+   * worker confirmed it stopped. Honest about uncertainty: quarantined is
+   * always set, and partial output reflects what is already on the record.
+   */
+  private provisionalOutcome(): AttemptResult {
+    const session = this.session;
+    const partial = session
+      ? lastAssistantText(session)
+      : { text: "" };
+    if (this.abortReason === "deadline") {
+      return {
+        status: "failed",
+        output: partial.text || undefined,
+        error: `deadline exceeded after ${this.task.deadlineMs}ms`,
+        hadSideEffects: this.hadSideEffects,
+        quarantined: true,
+      };
+    }
+    return {
+      status: "cancelled",
+      output: partial.text || undefined,
+      hadSideEffects: this.hadSideEffects,
+      quarantined: true,
+    };
   }
 
   private disposeSession(): void {
@@ -191,10 +253,12 @@ export class TaskExecution implements ExecutionHandle {
 
   private async run(loader: DefaultResourceLoader): Promise<AttemptResult> {
     let session: AgentSession | undefined;
-    // Tracked outside try so a prompt() that throws after a mutating tool
-    // ran still reports its side effects and can never be retried.
-    let hadSideEffects = false;
+    const onAbort = () => void this.abort("cancelled");
+    this.controls.signal.addEventListener("abort", onAbort, { once: true });
     try {
+      // An abort already delivered (or landing during session creation)
+      // resolves caller settlement even if creation never returns.
+      if (this.controls.signal.aborted) void this.abort("cancelled");
       session = await createSubagentSession(this.task, this.controls.env, loader);
       this.session = session;
       // A cancellation that landed during session creation found no session
@@ -249,19 +313,16 @@ export class TaskExecution implements ExecutionHandle {
           event.type === "tool_execution_end" &&
           SIDE_EFFECT_TOOLS.has(event.toolName)
         ) {
-          hadSideEffects = true;
+          this.hadSideEffects = true;
         }
       });
 
-      const onAbort = () => void this.abort("cancelled");
-      this.controls.signal.addEventListener("abort", onAbort, { once: true });
       try {
         await session.prompt(this.task.prompt, {
           expandPromptTemplates: false,
         });
         await session.waitForIdle();
       } finally {
-        this.controls.signal.removeEventListener("abort", onAbort);
         unsubscribe();
       }
 
@@ -273,7 +334,7 @@ export class TaskExecution implements ExecutionHandle {
           output: text || undefined,
           error: `deadline exceeded after ${this.task.deadlineMs}ms`,
           usage,
-          hadSideEffects,
+          hadSideEffects: this.hadSideEffects,
           quarantined: this.quarantined,
         };
       }
@@ -282,7 +343,7 @@ export class TaskExecution implements ExecutionHandle {
           status: "cancelled",
           output: text || undefined,
           usage,
-          hadSideEffects,
+          hadSideEffects: this.hadSideEffects,
           quarantined: this.quarantined,
         };
       }
@@ -295,7 +356,7 @@ export class TaskExecution implements ExecutionHandle {
             ? `${error} — ${MODEL_SWAP_HINT}`
             : error,
           usage,
-          hadSideEffects,
+          hadSideEffects: this.hadSideEffects,
           quarantined: this.quarantined,
         };
       }
@@ -303,7 +364,7 @@ export class TaskExecution implements ExecutionHandle {
         status: "ok",
         output: text,
         usage,
-        hadSideEffects,
+        hadSideEffects: this.hadSideEffects,
         quarantined: this.quarantined,
       };
     } catch (error) {
@@ -311,24 +372,25 @@ export class TaskExecution implements ExecutionHandle {
         return {
           status: "failed",
           error: `deadline exceeded after ${this.task.deadlineMs}ms`,
-          hadSideEffects,
+          hadSideEffects: this.hadSideEffects,
           quarantined: this.quarantined,
         };
       }
       if (this.abortReason || this.controls.isAborted()) {
         return {
           status: "cancelled",
-          hadSideEffects,
+          hadSideEffects: this.hadSideEffects,
           quarantined: this.quarantined,
         };
       }
       return {
         status: "failed",
         error: error instanceof Error ? error.message : String(error),
-        hadSideEffects,
+        hadSideEffects: this.hadSideEffects,
         quarantined: this.quarantined,
       };
     } finally {
+      this.controls.signal.removeEventListener("abort", onAbort);
       this.finished = true;
       // A quarantined session may still be mutating; leave it undisposed.
       if (!this.quarantined) this.disposeSession();
@@ -361,6 +423,10 @@ export async function runTask(
   controls: RunControls,
   loaders: Map<string, Promise<DefaultResourceLoader>>,
   onExecution?: (handle: ExecutionHandle) => void,
+  onWorkerSettled?: (
+    handle: ExecutionHandle,
+    late: TaskOutcome | undefined,
+  ) => void,
 ): Promise<TaskOutcome> {
   let retries = 0;
   let usage: Usage | undefined;
@@ -397,7 +463,19 @@ export async function runTask(
       loaderPromise = loader.reload().then(() => loader);
       loaders.set(key, loaderPromise);
     }
-    const loader = await loaderPromise;
+    const loader = await Promise.race([
+      loaderPromise,
+      abortedSignal(controls.signal).then(() => undefined),
+    ]);
+    if (loader === undefined) {
+      void loaderPromise.catch(() => undefined);
+      last = {
+        status: "cancelled",
+        hadSideEffects: false,
+        quarantined: last.quarantined,
+      };
+      break;
+    }
 
     const execution = new TaskExecution(task, controls, loader);
     onExecution?.(execution);
@@ -408,12 +486,45 @@ export async function runTask(
         Math.max(0, deadlineAt - Date.now()),
       );
     }
+    const usageBeforeAttempt = usage;
+    let recorded: AttemptResult;
     try {
-      last = await execution.result();
+      recorded = await execution.result();
     } finally {
       if (timer !== undefined) clearTimeout(timer);
     }
+    last = recorded;
     usage = addUsage(usage, last.usage);
+
+    // Worker truth is independent of caller settlement: every attempt's
+    // real settlement drops its live handle, and when result() reported a
+    // provisional outcome the true outcome still arrives — for visibility
+    // and, once quiescence is confirmed, reservation release.
+    void execution
+      .settled()
+      .then((real) => {
+        onWorkerSettled?.(
+          execution,
+          real === recorded
+            ? undefined
+            : {
+                index: task.index,
+                id: task.id,
+                status:
+                  controls.isAborted() && real.status !== "ok"
+                    ? "cancelled"
+                    : real.status,
+                output: real.output,
+                error: real.error,
+                retries,
+                usage: addUsage(usageBeforeAttempt, real.usage),
+                quarantined: real.quarantined || undefined,
+              },
+        );
+      })
+      .catch((error: unknown) => {
+        log(`late settlement of task ${task.id} failed to propagate`, error);
+      });
 
     if (last.status !== "failed" || controls.isAborted()) break;
     if (retries + 1 >= MAX_TASK_ATTEMPTS || !canRetryWholeTask(task, last)) break;

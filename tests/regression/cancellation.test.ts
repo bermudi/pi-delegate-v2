@@ -152,6 +152,129 @@ test(
 );
 
 test(
+  "forced cancel settles while worker cleanup is blocked; the reservation releases only after confirmed quiescence",
+  async () => {
+    // v1 evidence: quiescence-barrier regressions — cancellation must be
+    // caller-visible even when worker termination cannot be confirmed, and
+    // quarantined resources stay reserved until safety is proven.
+    //
+    // The faux provider's gated factory ignores the abort signal while it
+    // waits: session.abort()'s waitForIdle cannot settle until release().
+    session = await openDelegateBoundary();
+    const subagents = await installSubagentModel(session);
+
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const gated: FauxResponseFactory = async () => {
+      await gate;
+      return fauxAssistantMessage("LATE-OUTPUT");
+    };
+    subagents.respond([gated, fauxAssistantMessage("AFTER-QUARANTINE")]);
+
+    const dispatched = await callDelegate(session, {
+      tasks: [{ prompt: "hold", model: subagents.spec, tools: ["write"] }],
+      async: true,
+    });
+    const ticket = ticketIdOf(dispatched.text);
+
+    // Wait until the provider call is definitely in flight: callCount is
+    // bumped synchronously inside the faux stream function.
+    const deadline = Date.now() + 5000;
+    while (subagents.state.callCount === 0 && Date.now() < deadline) {
+      await new Promise((r) => setImmediate(r));
+    }
+    expect(subagents.state.callCount).toBe(1);
+
+    const cancelled = await callDelegate(session, {
+      ticketAction: "cancel",
+      ticket,
+      force: true,
+    });
+    expect(cancelled.isError).toBe(false);
+    expect(cancelled.text).toMatch(/cancel/i);
+
+    // While the worker may still mutate, conflicting work rejects.
+    const rejected = await callDelegate(session, {
+      tasks: [{ prompt: "conflict", model: subagents.spec, tools: ["write"] }],
+    });
+    expect(rejected.isError).toBe(true);
+    expect(rejected.text).toMatch(/conflict|running|overlap|active/i);
+
+    // Confirmed quiescence: the gate releases, the provider sees the abort,
+    // the run winds down, and the reservation is released — proven by the
+    // same dispatch now being admitted. The intervening wait round-trip
+    // drains the worker's microtask cascade before this call is admitted.
+    release();
+    const settled = await callDelegate(session, {
+      ticketAction: "wait",
+      ticket,
+      timeoutMs: 5000,
+    });
+    expect(settled.text).toMatch(/cancelled/i);
+    // The late worker outcome can never turn cancellation into success.
+    expect(settled.text).not.toMatch(/— (completed|ok)/i);
+
+    const admitted = await callDelegate(session, {
+      tasks: [{ prompt: "after", model: subagents.spec, tools: ["write"] }],
+    });
+    expect(admitted.isError).toBe(false);
+    expect(admitted.text).toContain("AFTER-QUARANTINE");
+  },
+);
+
+test(
+  "a sync call returns a structured outcome instead of hanging when the worker cannot be confirmed stopped",
+  async () => {
+    // v1 evidence: unwind-budget regressions — a synchronous dispatch must
+    // not wait forever on unconfirmed worker termination. The task's own
+    // deadline is the deterministic trigger (the harness cannot interrupt an
+    // in-flight tool call); the gated factory keeps session.abort() pending.
+    session = await openDelegateBoundary();
+    const subagents = await installSubagentModel(session);
+
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const gated: FauxResponseFactory = async () => {
+      await gate;
+      return fauxAssistantMessage("TOO-LATE");
+    };
+    subagents.respond([gated, fauxAssistantMessage("AFTER-QUARANTINE")]);
+
+    const result = await callDelegate(session, {
+      tasks: [
+        {
+          prompt: "hang",
+          model: subagents.spec,
+          tools: ["write"],
+          deadlineMs: 500,
+        },
+      ],
+    });
+    // The call returned at all: settlement did not wait for cleanup. The
+    // provider call is still gated (callCount proves it was in flight), so
+    // the worker's termination is genuinely unconfirmed.
+    expect(result.text).toMatch(/deadline|cancel/i);
+    expect(subagents.state.callCount).toBe(1);
+
+    // The abandoned worker may still mutate: conflicting work rejects.
+    const rejected = await callDelegate(session, {
+      tasks: [{ prompt: "conflict", model: subagents.spec, tools: ["write"] }],
+    });
+    expect(rejected.isError).toBe(true);
+    expect(rejected.text).toMatch(/conflict|running|overlap|active/i);
+
+    // Releasing the gate lets the worker wind down; only then does the
+    // reservation release. The poll round-trip drains its microtasks first.
+    release();
+    const admitted = await callDelegate(session, {
+      tasks: [{ prompt: "after", model: subagents.spec, tools: ["write"] }],
+    });
+    expect(admitted.isError).toBe(false);
+    expect(admitted.text).toContain("AFTER-QUARANTINE");
+  },
+);
+
+test(
   "aborting mid-stream is a cancellation, not an error, and no extra turn starts",
   async () => {
     session = await openDelegateBoundary();

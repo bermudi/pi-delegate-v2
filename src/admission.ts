@@ -32,10 +32,17 @@ export interface AdmissionGrant {
   /**
    * Release every reservation taken by this call. Task indexes in `retain`
    * keep their reservations and busy-session marks: those tasks could not
-   * be confirmed quiescent, so their roots stay protected for the life of
-   * the process.
+   * be confirmed quiescent, so their roots stay protected until
+   * `releaseRetained` observes confirmed quiescence — or for the life of
+   * the process if it never comes.
    */
   readonly release: (retain?: ReadonlySet<number>) => void;
+  /**
+   * Release the reservations retained for one task. Only meaningful after
+   * that task's worker has been confirmed quiescent; calling it earlier
+   * would un-protect roots that may still be mutating.
+   */
+  readonly releaseRetained: (taskIndex: number) => void;
 }
 
 /**
@@ -164,23 +171,34 @@ export class AdmissionController {
     }
 
     let released = false;
+    const allIndexes = new Set(tasks.map((task) => task.index));
+    const releaseIndexes = (indexes: ReadonlySet<number>): void => {
+      for (const reservation of taken) {
+        if (!indexes.has(reservation.taskIndex)) continue;
+        const index = this.reservations.indexOf(reservation);
+        if (index >= 0) this.reservations.splice(index, 1);
+      }
+      for (const held of heldSessions) {
+        if (!indexes.has(held.taskIndex)) continue;
+        const current = this.busySessions.get(held.sessionId);
+        if (current?.owner === owner) {
+          this.busySessions.delete(held.sessionId);
+        }
+      }
+    };
     return {
       predecessors,
       release: (retain?: ReadonlySet<number>) => {
         if (released) return;
         released = true;
-        for (const reservation of taken) {
-          if (retain?.has(reservation.taskIndex)) continue;
-          const index = this.reservations.indexOf(reservation);
-          if (index >= 0) this.reservations.splice(index, 1);
-        }
-        for (const held of heldSessions) {
-          if (retain?.has(held.taskIndex)) continue;
-          const current = this.busySessions.get(held.sessionId);
-          if (current?.owner === owner) {
-            this.busySessions.delete(held.sessionId);
-          }
-        }
+        releaseIndexes(
+          retain === undefined
+            ? allIndexes
+            : new Set([...allIndexes].filter((index) => !retain.has(index))),
+        );
+      },
+      releaseRetained: (taskIndex: number) => {
+        releaseIndexes(new Set([taskIndex]));
       },
     };
   }
