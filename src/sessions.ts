@@ -80,17 +80,15 @@ export interface SessionSettle {
   readonly entry: PooledSession | undefined;
   readonly task: ResolvedTask;
   readonly session: AgentSession;
-  readonly outcome:
-    | {
-        readonly status: TaskStatus;
-        /** Whether session.prompt() was actually reached this run. */
-        readonly prompted: boolean;
-        /** True when the run ended on its deadline budget. */
-        readonly deadline: boolean;
-        /** Worker quiescence could not be confirmed; never dispose. */
-        readonly quarantined: boolean;
-      }
-    | undefined;
+  readonly outcome: {
+    readonly status: TaskStatus;
+    /** Whether session.prompt() was attempted this run. */
+    readonly prompted: boolean;
+    /** True when the run ended on its deadline budget. */
+    readonly deadline: boolean;
+    /** Worker quiescence could not be confirmed; never dispose. */
+    readonly quarantined: boolean;
+  };
 }
 
 /**
@@ -184,18 +182,17 @@ export class SessionPool {
         this.dispose(session, sessionId);
       }
     };
-    const dispose = () => {
-      if (!outcome?.quarantined) this.dispose(session, sessionId);
-    };
+    const dispose = () => this.dispose(session, sessionId);
 
+    // Unconfirmed worker state outranks everything, including shutdown:
+    // never reusable, never disposed — it may still be mutating.
+    if (outcome.quarantined) {
+      evict();
+      return;
+    }
     if (this.closed) {
       evict();
       dispose();
-      return;
-    }
-    // Unknown or unconfirmed worker state: never reusable, never disposed.
-    if (outcome === undefined || outcome.quarantined) {
-      evict();
       return;
     }
     if (outcome.status === "ok" && outcome.prompted) {
@@ -225,8 +222,8 @@ export class SessionPool {
       return;
     }
     if (entry !== undefined) {
-      // Cancelled/deadline before prompting leaves the session intact.
-      // Ordinary failure keeps it reusable. Anything else evicts it.
+      // Cancellation or a deadline before prompting leaves the session
+      // intact. Ordinary failure keeps it reusable. Anything else evicts it.
       if (!outcome.prompted) {
         keep();
         return;
@@ -269,27 +266,31 @@ export class SessionPool {
    * A busy session is running work — closing it would race that run's state
    * updates, so it rejects.
    */
-  async close(sessionId: string, busy: boolean): Promise<string> {
+  close(sessionId: string, busy: boolean): string {
     const entry = this.entries.get(sessionId);
     if (entry === undefined) {
       if (busy) {
         throw new Error(
-          `Session '${sessionId}' is busy running work; wait for it to finish before closing.`,
+          `Session '${sessionId}' is running work; it cannot be closed while a task owns it ` +
+            `(its termination may also be unconfirmed). Wait for the work to finish or cancel the owning ticket.`,
         );
       }
       throw new Error(`No live session named '${sessionId}'.`);
     }
     if (busy || entry.checkedOut) {
       throw new Error(
-        `Session '${sessionId}' is busy running work; wait for it to finish before closing.`,
+        `Session '${sessionId}' is running work; it cannot be closed while a task owns it. ` +
+          `Wait for the work to finish or cancel the owning ticket.`,
       );
     }
     this.entries.delete(sessionId);
-    try {
-      await entry.session.abort();
-    } catch (error) {
+    // The entry is already removed, so ordering is safe: request an abort
+    // (no-op on an idle session) without awaiting — abort() waits for
+    // quiescence, which a stuck session could withhold forever — then
+    // dispose.
+    entry.session.abort().catch((error: unknown) => {
       log(`abort on close of session '${sessionId}' failed`, error);
-    }
+    });
     this.dispose(entry.session, sessionId);
     return `Session '${sessionId}' closed.`;
   }
@@ -332,17 +333,17 @@ export interface SessionRpcResult {
 }
 
 /** sessionAction RPCs against the pool. */
-export async function handleSessionRpc(
+export function handleSessionRpc(
   call: { action: "list" | "close"; sessionId: string | undefined },
   pool: SessionPool,
   admission: AdmissionController,
-): Promise<SessionRpcResult> {
+): SessionRpcResult {
   if (call.action === "list") {
     return { text: pool.list(), isError: false };
   }
   const sessionId = call.sessionId!;
   try {
-    const text = await pool.close(sessionId, admission.isSessionBusy(sessionId));
+    const text = pool.close(sessionId, admission.isSessionBusy(sessionId));
     return { text, isError: false };
   } catch (error) {
     return {

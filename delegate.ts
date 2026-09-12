@@ -299,7 +299,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
           };
         }
         if (call.mode === "session") {
-          const result = await handleSessionRpc(call, sessions, admission);
+          const result = handleSessionRpc(call, sessions, admission);
           return {
             content: [{ type: "text" as const, text: result.text }],
             details: {

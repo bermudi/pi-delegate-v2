@@ -184,6 +184,9 @@ function validateTasks(tasks: readonly TaskInput[]): void {
       ids.add(task.id);
     }
     if (task.sessionId !== undefined) {
+      if (task.sessionId.trim() === "") {
+        fail(`${where}: sessionId must be a non-empty string.`);
+      }
       if (sessionIds.has(task.sessionId)) {
         fail(
           `Duplicate sessionId '${task.sessionId}'; a session cannot run two tasks at once.`,

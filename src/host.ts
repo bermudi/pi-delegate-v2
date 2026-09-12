@@ -335,9 +335,10 @@ export function resolveTasks(
  * workers: no extensions, no user-global context files. One-shot tasks use
  * an in-memory transcript; a `sessionId` task needs a durable session file
  * to be poolable (a `resumeFrom` transcript already is one), so it gets a
- * file under `<agentDir>/delegate-sessions/`. The session streams through
- * the parent session's model runtime so provider registrations and auth
- * are inherited.
+ * file under `<agentDir>/delegate-sessions/`. Evicted or failed sessions
+ * leave their transcripts on disk as the recovery record for `resumeFrom`.
+ * The session streams through the parent session's model runtime so
+ * provider registrations and auth are inherited.
  */
 export async function createSubagentSession(
   task: ResolvedTask,

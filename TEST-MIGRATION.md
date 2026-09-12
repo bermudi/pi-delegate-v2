@@ -181,13 +181,16 @@ gaps.
   file bookkeeping.
 - **Covered now:** pool + list + continuation on reuse; `close` removes and
   a later call starts fresh; frozen-config mismatch rejects with an
-  actionable error; missing-transcript `resumeFrom` error; a `sessionId`
-  held by a running ticket rejects conflicting reuse; `resumeFrom` without
-  a prompt rehydrates the transcript and sends the default continuation
-  instruction (live test with a real `.jsonl` fixture).
-- **Gap:** eviction after cancelled/stalled/deadline-exceeded runs;
-  shutdown cleanup; usage recorded for ordinary failures on pooled
-  sessions; close of a busy or missing session.
+  actionable error; a pooled session cancelled mid-reuse is evicted and the
+  next call starts fresh (busy `close` also rejected in-flight); `close` on
+  an unknown session errors; missing-transcript `resumeFrom` error; a
+  `sessionId` held by a running ticket rejects conflicting reuse;
+  `resumeFrom` without a prompt rehydrates the transcript and sends the
+  default continuation instruction (live test with a real `.jsonl`
+  fixture); empty `sessionId` rejected.
+- **Gap:** eviction after stalled/deadline-exceeded runs; shutdown cleanup;
+  usage recorded for ordinary failures on pooled sessions; pre-prompt
+  deadline leaving the session intact.
 
 ### Admission and shared writes
 

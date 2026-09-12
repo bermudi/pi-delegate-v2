@@ -163,7 +163,7 @@ export class AdmissionController {
       const holder = this.busySessions.get(task.sessionId);
       if (holder !== undefined && holder.owner !== owner) {
         throw new Error(
-          `Session '${task.sessionId}' is busy running work for ${holder.owner}; wait for it to finish or close the session first.`,
+          `Session '${task.sessionId}' is busy running work for ${holder.owner}; wait for it to finish or cancel the owning ticket.`,
         );
       }
     }

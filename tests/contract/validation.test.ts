@@ -99,6 +99,15 @@ describe("delegate validation contract", () => {
     },
   );
 
+  test("rejects an empty sessionId with an actionable error", async () => {
+    session = await openDelegateBoundary();
+    const result = await callDelegate(session, {
+      tasks: [{ prompt: "x", sessionId: "" }],
+    });
+    expect(result.isError).toBe(true);
+    expect(result.text).toMatch(/sessionId|non-empty|empty/i);
+  });
+
   test("rejects non-positive deadlines with an actionable error", async () => {
     // v1 evidence: schema.test.ts "rejects non-positive deadlineMs".
     session = await openDelegateBoundary();

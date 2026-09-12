@@ -190,7 +190,7 @@ export class TaskExecution implements ExecutionHandle {
   private hadSideEffects = false;
   /** The pooled session this run checked out, when the task reused one. */
   private poolEntry: PooledSession | undefined;
-  /** True once session.prompt() was actually reached this run. */
+  /** True once session.prompt() was attempted this run. */
   private prompted = false;
   /** Resolves the moment cancellation is requested, however it arrives. */
   private readonly abortRequested = new Deferred();
@@ -307,6 +307,7 @@ export class TaskExecution implements ExecutionHandle {
 
   private async run(loader: DefaultResourceLoader): Promise<AttemptResult> {
     let session: AgentSession | undefined;
+    let usageBefore: Usage | undefined;
     const onAbort = () => void this.abort("cancelled");
     this.controls.signal.addEventListener("abort", onAbort, { once: true });
     try {
@@ -380,7 +381,7 @@ export class TaskExecution implements ExecutionHandle {
         }
       });
 
-      const usageBefore = usageOf(session);
+      usageBefore = usageOf(session);
       try {
         this.prompted = true;
         await session.prompt(this.task.prompt, {
@@ -434,10 +435,17 @@ export class TaskExecution implements ExecutionHandle {
         quarantined: this.quarantined,
       };
     } catch (error) {
+      // A throw after prompt() consumed tokens still owes the caller the
+      // attempt's usage — a kept pooled session must account for it.
+      const usage =
+        session !== undefined && usageBefore !== undefined
+          ? diffUsage(usageOf(session), usageBefore)
+          : undefined;
       if (this.abortReason === "deadline") {
         return {
           status: "failed",
           error: `deadline exceeded after ${this.task.deadlineMs}ms`,
+          usage,
           hadSideEffects: this.hadSideEffects,
           quarantined: this.quarantined,
         };
@@ -445,6 +453,7 @@ export class TaskExecution implements ExecutionHandle {
       if (this.abortReason || this.controls.isAborted()) {
         return {
           status: "cancelled",
+          usage,
           hadSideEffects: this.hadSideEffects,
           quarantined: this.quarantined,
         };
@@ -452,6 +461,7 @@ export class TaskExecution implements ExecutionHandle {
       return {
         status: "failed",
         error: error instanceof Error ? error.message : String(error),
+        usage,
         hadSideEffects: this.hadSideEffects,
         quarantined: this.quarantined,
       };

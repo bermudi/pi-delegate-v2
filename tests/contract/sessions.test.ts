@@ -10,6 +10,7 @@ import {
   callDelegate,
   installSubagentModel,
   openDelegateBoundary,
+  ticketIdOf,
 } from "../support/pi-boundary.ts";
 
 describe("delegate session contract", () => {
@@ -124,6 +125,115 @@ describe("delegate session contract", () => {
       // error is a v2 formatting choice.
       expect(mismatched.text).toMatch(/conv|session/i);
       expect(mismatched.text).toMatch(/frozen|mismatch|incompatible|tools/i);
+    },
+  );
+
+  test(
+    "a cancelled run evicts the pooled session and a later call starts fresh",
+    async () => {
+      // INVARIANTS: a pooled session cancelled after prompting MUST be
+      // evicted; reuse must not observe its conversation. v1 evidence:
+      // pool.test eviction after cancelled runs.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+
+      subagents.respond([fauxAssistantMessage("POOLED")]);
+      const first = await callDelegate(session, {
+        tasks: [
+          {
+            prompt: "remember EVICT-MARKER",
+            sessionId: "conv",
+            model: subagents.spec,
+          },
+        ],
+      });
+      expect(first.isError).toBe(false);
+
+      // Reuse the pooled session with a gated provider; cancel only once the
+      // second stream has demonstrably started (callCount is incremented at
+      // stream entry), so the eviction under test is a prompted run.
+      let release!: () => void;
+      const gate = new Promise<void>((r) => (release = r));
+      subagents.respond([
+        async () => {
+          await gate;
+          return fauxAssistantMessage("never");
+        },
+      ]);
+      const created = await callDelegate(session, {
+        tasks: [
+          { prompt: "more work", sessionId: "conv", model: subagents.spec },
+        ],
+        async: true,
+      });
+      for (let i = 0; i < 200 && subagents.state.callCount < 2; i++) {
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      expect(subagents.state.callCount).toBe(2);
+
+      // A live session mid-run is busy: close must refuse to race it.
+      const closedBusy = await callDelegate(session, {
+        sessionAction: "close",
+        sessionId: "conv",
+      });
+      expect(closedBusy.isError).toBe(true);
+      expect(closedBusy.text).toMatch(/conv|running|busy/i);
+
+      const ticket = ticketIdOf(created.text);
+      const cancelled = await callDelegate(session, {
+        ticketAction: "cancel",
+        ticket,
+        force: true,
+      });
+      expect(cancelled.text).toMatch(/cancel/i);
+
+      // Let the gated worker wind down; the busy mark frees and the pool
+      // entry clears only on confirmed quiescence (the provisional outcome
+      // is replaced once "unconfirmed" disappears from the ticket view).
+      release();
+      for (let i = 0; i < 200; i++) {
+        const view = await callDelegate(session, {
+          ticketAction: "poll",
+          ticket,
+        });
+        if (view.text.includes("### Task") && !view.text.includes("unconfirmed")) {
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 25));
+      }
+
+      const listed = await callDelegate(session, { sessionAction: "list" });
+      expect(listed.text).not.toContain("conv");
+
+      const inspect: FauxResponseFactory = (context) =>
+        fauxAssistantMessage(
+          JSON.stringify(context).includes("EVICT-MARKER")
+            ? "CONTINUED"
+            : "FRESH",
+        );
+      subagents.respond([inspect]);
+      const reused = await callDelegate(session, {
+        tasks: [
+          { prompt: "again", sessionId: "conv", model: subagents.spec },
+        ],
+      });
+      expect(reused.isError).toBe(false);
+      expect(reused.text).toContain("FRESH");
+    },
+  );
+
+  test(
+    "close on an unknown session reports the miss",
+    async () => {
+      // SPEC: close removes the named session; a nonexistent one is an
+      // actionable error, not a silent no-op.
+      session = await openDelegateBoundary();
+      const result = await callDelegate(session, {
+        sessionAction: "close",
+        sessionId: "ghost",
+      });
+      expect(result.isError).toBe(true);
+      expect(result.text).toMatch(/ghost|no live session/i);
     },
   );
 
