@@ -35,6 +35,7 @@ function taskSection(outcome: TaskOutcome): string {
 export function ticketView(ticket: Ticket): string {
   const lines = [
     `Ticket "${ticket.id}": ${statusWord(ticket)} — ${completedCount(ticket)}/${ticket.totalTasks} tasks completed.`,
+    ...ticket.notices,
   ];
   for (const outcome of ticket.outcomes) {
     if (outcome) lines.push("", taskSection(outcome));
@@ -89,6 +90,7 @@ export class TicketStore {
       // Isolated batches settle only after reconciliation has annotated the
       // outcomes — a terminal ticket must already show applied/conflict state.
       holdSettlement: tasks.some((task) => task.workspace === "isolated"),
+      notices: [],
       settledGate: new Deferred(),
       finishedGate: new Deferred(),
       waiters: new Set(),

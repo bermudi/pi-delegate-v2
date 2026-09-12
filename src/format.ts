@@ -1,4 +1,27 @@
-import type { TaskIntegration, TaskOutcome } from "./types.ts";
+import type { ResolvedTask, TaskIntegration, TaskOutcome } from "./types.ts";
+
+/**
+ * One advisory line per serialized shared-writer group: which tasks, which
+ * write scope, and the isolated-workspace remedy. The notice exists so the
+ * caller learns that independent same-repo work can run in parallel — a
+ * serialized batch is the expensive way to discover that.
+ */
+export function serializedNotices(
+  tasks: readonly ResolvedTask[],
+  groups: readonly { tasks: readonly number[]; roots: readonly string[] }[],
+): string[] {
+  return groups.map((group) => {
+    const names = group.tasks
+      .map((index) => `'${tasks[index]?.id ?? `task-${index + 1}`}'`)
+      .join(", ");
+    const roots = group.roots.join(", ");
+    return (
+      `Notice — serialized writers: ${names} share write scope '${roots}' and ` +
+      `will run one at a time in this order. If they are independent edits, ` +
+      `workspace "isolated" runs them in parallel and merges in task order.`
+    );
+  });
+}
 
 function statusWord(outcome: TaskOutcome): string {
   return outcome.status === "ok" ? "completed" : outcome.status;

@@ -42,6 +42,7 @@ describe("delegate public tool contract", () => {
         "ticket",
         "ticketAction",
         "timeoutMs",
+        "workspace",
       ].sort(),
     );
     expect(Object.keys(taskFields).sort()).toEqual(
@@ -80,6 +81,11 @@ describe("delegate public tool contract", () => {
     ]);
     expect(objectOf(top.sessionAction).enum).toEqual(["close", "list"]);
     expect(objectOf(fields.workspace).enum).toEqual([
+      "shared",
+      "scratch",
+      "isolated",
+    ]);
+    expect(objectOf(top.workspace).enum).toEqual([
       "shared",
       "scratch",
       "isolated",
@@ -124,6 +130,9 @@ describe("delegate public tool contract", () => {
       { ticket: "ticket-1" },
       { force: true },
       { timeoutMs: 1 },
+      { ticketAction: "poll", workspace: "isolated" },
+      { sessionAction: "list", workspace: "isolated" },
+      { tasks: [{ prompt: "x" }], sessionId: "s" },
     ];
 
     for (const arguments_ of invalidCalls) {

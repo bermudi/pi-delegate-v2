@@ -21,13 +21,14 @@ task starts.
 ### Dispatch
 
 ```ts
-delegate({ tasks: [task, ...], async?: boolean })
+delegate({ tasks: [task, ...], async?: boolean, workspace?: "shared" | "scratch" | "isolated" })
 ```
 
 Dispatch is synchronous by default. `async: true` applies to the whole batch,
 returns a ticket immediately, and later auto-delivers the batch result.
 Synchronous results preserve task input order and include aggregate usage when
-the Pi host supports it.
+the Pi host supports it. A top-level `workspace` is the default for every task
+that does not name its own.
 
 A task accepts:
 
@@ -62,7 +63,9 @@ instructions are not inherited. Provider extensions are disabled except for
 the verified, provider-scoped allowlist.
 
 Tasks run concurrently subject to global and per-model limits. Overlapping
-same-call shared writers serialize in task order. Overlap with active work, or
+same-call shared writers serialize in task order, and the result names the
+serialized tasks and scope with the `isolated` remedy — independent same-repo
+edits are meant to run in parallel worktrees. Overlap with active work, or
 between shared and isolated work, rejects the whole call before execution.
 
 ### Workspaces

@@ -433,6 +433,27 @@ between baseline capture and reconciliation; `gitInit` now creates an
 initial commit since isolated baselines require `HEAD`. The
 unimplemented-modes test now covers only `scratch`.
 
+Steering additions in the same tranche (observed failure: a five-task
+same-repo shared batch serialized into an hour-plus pipeline when the
+tasks were independent and `isolated` was the right call):
+
+- A batch-level `workspace` field defaults every task that does not name
+  its own — `delegate({ workspace: "isolated", tasks: [...] })` is the
+  one-field spelling of parallel same-repo edits. It is rejected when
+  orphaned on ticket/session operations.
+- Schema descriptions and the help manual now carry the decision rule:
+  `shared` serializes overlapping same-repo writers in task order;
+  `isolated` runs independent edits in parallel and merges in order.
+- Admission exposes `serialized` groups on the grant; results prepend a
+  notice naming the serialized tasks and scope with the isolated remedy
+  (sync: live `onUpdate` frame plus the final result; async: ticket
+  creation text and poll/wait views).
+
+New live tests: the serialization test asserts the notice and remedy; a
+batch-default test proves parallel isolated execution and source
+reconciliation; an override test proves a task-level `shared` still wins
+and therefore rejects against isolated siblings.
+
 A fresh-context review pass then hardened the lifecycle edges:
 
 - `runOne` can no longer reject: a `runTask` throw is converted to a failed
@@ -454,7 +475,9 @@ A fresh-context review pass then hardened the lifecycle edges:
 - The artifact root is excluded from baseline snapshots when it lives
   inside the source tree, so retained artifacts and live worktrees cannot
   leak into a baseline or a later proposal.
-- Cleanup no longer issues `update-ref -d` for never-created proposal refs.
+- Top-level `sessionId` combined with `tasks` is rejected instead of
+  silently ignored; cleanup no longer issues `update-ref -d` for
+  never-created proposal refs.
 
 ## Next contract slices
 

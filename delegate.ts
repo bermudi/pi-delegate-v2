@@ -12,7 +12,10 @@ import {
 import { AdmissionController, type AdmissionGrant } from "./src/admission.ts";
 import { loadDelegateConfig } from "./src/config.ts";
 import { DispatchCoordinator } from "./src/coordinator.ts";
-import { formatDispatchResult } from "./src/format.ts";
+import {
+  formatDispatchResult,
+  serializedNotices,
+} from "./src/format.ts";
 import { hostEnvironment, resolveTasks } from "./src/host.ts";
 import { prepareIsolated, type IsolatedPlan } from "./src/isolated.ts";
 import { handleTicketRpc, TicketStore } from "./src/tickets.ts";
@@ -79,7 +82,8 @@ const taskSchema = Type.Object(
     ),
     workspace: Type.Optional(
       stringEnum(["shared", "scratch", "isolated"], {
-        description: "Workspace behavior.",
+        description:
+          "shared/scratch/isolated. 'shared' edits the tree; writers in one repo run one at a time in task order. 'isolated' runs each task in a private Git worktree — same-repo edits run in parallel and merge in order. 'scratch' not implemented.",
       }),
     ),
   },
@@ -115,6 +119,12 @@ const argumentsSchema = Type.Object(
       Type.Array(taskSchema, {
         minItems: 0,
         description: "Tasks to run; omit or pass [] for help.",
+      }),
+    ),
+    workspace: Type.Optional(
+      stringEnum(["shared", "scratch", "isolated"], {
+        description:
+          "Default workspace for every task lacking its own. 'isolated' = parallel same-repo edits.",
       }),
     ),
   },
@@ -213,7 +223,17 @@ Delegate runs subagent tasks synchronously or as an asynchronous ticket.
   key), \`agent\` (named profile), \`cwd\`, \`systemPrompt\`, \`context\`,
   \`model\`, \`tools\` (\`*\`/\`ro\` groups or names), \`thinking\`,
   \`deadlineMs\`, \`sessionId\`, \`resumeFrom\`, \`workspace\`
-  (shared/scratch/isolated).
+  (shared/scratch/isolated). A top-level \`workspace\` is the batch default.
+
+## Workspaces
+- \`shared\` (default): the task edits the caller's tree directly. Writers
+  whose scope overlaps in one call run one at a time, in task order — each
+  sees its predecessor's changes. Use it for dependent edits.
+- \`isolated\`: each task works in a detached Git worktree; successful
+  changes merge into the source in task order. Independent edits to the
+  same repository run in parallel — much faster than shared for
+  independent work. Cannot use \`sessionId\` or \`resumeFrom\`.
+- \`scratch\`: not implemented yet.
 
 ## Tickets
 - \`ticketAction: "poll"\` — status of one \`ticket\`, or all tickets when the
@@ -242,11 +262,11 @@ export default function delegateExtension(api: ExtensionAPI): void {
       name: "delegate",
       label: "Delegate to Subagents",
       description:
-        "Run subagent tasks. Sync returns results; async returns a ticket; tasks:[] shows help.",
+        "Run subagent tasks. Sync returns results; async returns a ticket; tasks:[] shows help. Same-repo writers serialize under 'shared'; workspace 'isolated' runs independent edits in parallel.",
       parameters: argumentsSchema,
       prepareArguments,
 
-      async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+      async execute(_toolCallId, params, signal, onUpdate, ctx) {
         // pi's ToolDefinition types params via the `typebox` v1 package while
         // this schema is built with @sinclair/typebox 0.34; the v1 Static
         // resolves Unsafe enum fields to unknown, so re-assert our own Static.
@@ -280,6 +300,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
           let grant: AdmissionGrant | undefined;
           try {
             grant = admission.admit(tasks, ticket.id);
+            ticket.notices = serializedNotices(tasks, grant.serialized);
             const plan = await prepareIsolated(
               tasks,
               join(env.agentDir, "delegate-isolated"),
@@ -322,7 +343,10 @@ export default function delegateExtension(api: ExtensionAPI): void {
                 type: "text" as const,
                 text:
                   `Ticket "${ticket.id}" created: ${tasks.length} task(s) running in the background.\n` +
-                  `Check progress with delegate({ ticketAction: "poll", ticket: "${ticket.id}" }).`,
+                  `Check progress with delegate({ ticketAction: "poll", ticket: "${ticket.id}" }).` +
+                  (ticket.notices.length > 0
+                    ? `\n${ticket.notices.join("\n")}`
+                    : ""),
               },
             ],
             details: {
@@ -336,6 +360,15 @@ export default function delegateExtension(api: ExtensionAPI): void {
 
         callSeq += 1;
         const grant = admission.admit(tasks, `call-${callSeq}`);
+        // Surface same-call serialization immediately — a serialized batch of
+        // independent writers is the expensive way to learn about "isolated".
+        const notices = serializedNotices(tasks, grant.serialized);
+        if (notices.length > 0) {
+          onUpdate?.({
+            content: [{ type: "text" as const, text: notices.join("\n") }],
+            details: {},
+          });
+        }
         let plan: IsolatedPlan | undefined;
         try {
           plan = await prepareIsolated(
@@ -370,7 +403,12 @@ export default function delegateExtension(api: ExtensionAPI): void {
         );
         return {
           content: [
-            { type: "text" as const, text: formatDispatchResult(result.outcomes) },
+            {
+              type: "text" as const,
+              text:
+                (notices.length > 0 ? `${notices.join("\n")}\n\n` : "") +
+                formatDispatchResult(result.outcomes),
+            },
           ],
           details: {
             mode: "dispatch" as const,

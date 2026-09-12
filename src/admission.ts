@@ -30,6 +30,14 @@ export interface AdmissionGrant {
    */
   readonly predecessors: ReadonlyMap<number, number>;
   /**
+   * Groups of same-call shared writers that serialize, in task order, with
+   * the write roots they overlap on — the evidence for advisory notices.
+   */
+  readonly serialized: readonly {
+    tasks: readonly number[];
+    roots: readonly string[];
+  }[];
+  /**
    * Release every reservation taken by this call. Task indexes in `retain`
    * keep their reservations and busy-session marks: those tasks could not
    * be confirmed quiescent, so their roots stay protected until
@@ -109,6 +117,8 @@ export class AdmissionController {
     });
 
     const predecessors = new Map<number, number>();
+    const serialized: { tasks: readonly number[]; roots: readonly string[] }[] =
+      [];
     for (const group of groups.values()) {
       const kinds = new Set(group.map((task) => task.workspace));
       if (kinds.size > 1) {
@@ -124,6 +134,10 @@ export class AdmissionController {
         for (let i = 1; i < group.length; i++) {
           predecessors.set(group[i]!.index, group[i - 1]!.index);
         }
+        serialized.push({
+          tasks: group.map((task) => task.index),
+          roots: [...new Set(group.flatMap((task) => task.writeRoots!))],
+        });
       }
     }
 
@@ -187,6 +201,7 @@ export class AdmissionController {
     };
     return {
       predecessors,
+      serialized,
       release: (retain?: ReadonlySet<number>) => {
         if (released) return;
         released = true;

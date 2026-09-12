@@ -90,6 +90,117 @@ describe("delegate workspace and shared-write contract", () => {
         "start:second",
         "end:second",
       ]);
+      // The result surfaces the serialization and the parallel alternative:
+      // silent hour-long serial batches are the failure mode this prevents.
+      expect(result.text).toMatch(/serialized/i);
+      expect(result.text).toMatch(/isolated/);
+    },
+  );
+
+  test(
+    "a batch-level workspace applies to every task without its own",
+    async () => {
+      // Top-level workspace is the ergonomic path to parallel same-repo
+      // edits: set once, every task runs isolated.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      const dir = tempDir();
+      gitInit(dir);
+
+      let active = 0;
+      let maxActive = 0;
+      // A barrier, not a timing sample: each worker's first provider call
+      // blocks until both arrive, so maxActive === 2 proves the calls were
+      // actually concurrent rather than merely observed overlapping.
+      let releaseBoth!: () => void;
+      const both = new Promise<void>((resolve) => {
+        releaseBoth = resolve;
+      });
+      // Responses are a global FIFO across parallel workers, so dispatch on
+      // the prompt instead of assuming call order: the first turn writes the
+      // file its task named; the turn after a tool result finishes.
+      const writeForPrompt: FauxResponseFactory = async (context) => {
+        if (context.messages.some((m) => m.role === "toolResult")) {
+          return fauxAssistantMessage("DONE");
+        }
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        if (active === 2) releaseBoth();
+        // Bounded: a serialization regression fails the assertion below
+        // instead of deadlocking the test.
+        await Promise.race([both, new Promise((r) => setTimeout(r, 3000))]);
+        active -= 1;
+        const file = JSON.stringify(context.messages).includes("x.txt")
+          ? "x.txt"
+          : "y.txt";
+        return fauxAssistantMessage([
+          fauxToolCall("write", { path: file, content: file }),
+        ]);
+      };
+      subagents.respond([
+        writeForPrompt,
+        writeForPrompt,
+        writeForPrompt,
+        writeForPrompt,
+      ]);
+
+      const result = await callDelegate(session, {
+        workspace: "isolated",
+        tasks: [
+          {
+            prompt: "write x.txt",
+            cwd: dir,
+            model: subagents.spec,
+            tools: ["write"],
+          },
+          {
+            prompt: "write y.txt",
+            cwd: dir,
+            model: subagents.spec,
+            tools: ["write"],
+          },
+        ],
+      });
+      expect(result.isError).toBe(false);
+      // Isolated tasks run in parallel and reconcile into the source.
+      expect(maxActive).toBe(2);
+      expect(result.text).toMatch(/applied_unverified/);
+      expect(readFileSync(join(dir, "x.txt"), "utf8")).toBe("x.txt");
+      expect(readFileSync(join(dir, "y.txt"), "utf8")).toBe("y.txt");
+    },
+  );
+
+  test(
+    "a task-level workspace overrides the batch default",
+    async () => {
+      // Batch default is isolated; the task that names shared keeps it —
+      // so the same-repo overlap is a mixed-workspace rejection.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      const dir = tempDir();
+      gitInit(dir);
+
+      const result = await callDelegate(session, {
+        workspace: "isolated",
+        tasks: [
+          {
+            prompt: "shared task",
+            cwd: dir,
+            model: subagents.spec,
+            tools: ["write"],
+            workspace: "shared",
+          },
+          {
+            prompt: "defaulted task",
+            cwd: dir,
+            model: subagents.spec,
+            tools: ["write"],
+          },
+        ],
+      });
+      expect(result.isError).toBe(true);
+      expect(result.text).toMatch(/isolated|shared|overlap|conflict/i);
+      expect(subagents.state.callCount).toBe(0);
     },
   );
 

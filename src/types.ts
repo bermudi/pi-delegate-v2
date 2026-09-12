@@ -97,6 +97,11 @@ export interface Ticket {
    * the terminal view includes integration results.
    */
   holdSettlement: boolean;
+  /**
+   * Advisory notices attached at dispatch (e.g. same-call shared writers
+   * serializing); rendered at the top of ticket views.
+   */
+  notices: string[];
   /** Resolves when the ticket reaches a terminal status. */
   readonly settledGate: Deferred;
   /**

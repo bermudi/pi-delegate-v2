@@ -46,6 +46,8 @@ export interface RawArguments {
   readonly ticket?: string;
   readonly force?: boolean;
   readonly timeoutMs?: number;
+  /** Batch-level workspace default; a task's own `workspace` wins. */
+  readonly workspace?: "shared" | "scratch" | "isolated";
   readonly tasks?: TaskInput[];
 }
 
@@ -75,6 +77,11 @@ export function validateCall(args: RawArguments): ValidatedCall {
     if (args.sessionId !== undefined) {
       fail(
         `ticketAction cannot be combined with sessionId; sessionId is only valid for sessionAction close or a task.`,
+      );
+    }
+    if (args.workspace !== undefined) {
+      fail(
+        `ticketAction cannot be combined with workspace; workspace is a dispatch field.`,
       );
     }
     const action = args.ticketAction;
@@ -107,6 +114,11 @@ export function validateCall(args: RawArguments): ValidatedCall {
         `sessionAction cannot be combined with ticket, force, or timeoutMs.`,
       );
     }
+    if (args.workspace !== undefined) {
+      fail(
+        `sessionAction cannot be combined with workspace; workspace is a dispatch field.`,
+      );
+    }
     if (args.sessionAction === "close" && args.sessionId === undefined) {
       fail(`sessionAction "close" requires a sessionId.`);
     }
@@ -130,15 +142,33 @@ export function validateCall(args: RawArguments): ValidatedCall {
     fail(`timeoutMs is valid only with ticketAction "wait".`);
   }
 
+  if (hasTasks && args.sessionId !== undefined) {
+    fail(
+      `sessionId is a task field or belongs to sessionAction "close"; move it into a task or drop it.`,
+    );
+  }
+
   if (!hasTasks) {
     if (args.async === true) {
       fail(`async dispatch requires at least one task.`);
     }
+    if (args.workspace !== undefined) {
+      fail(`workspace requires at least one task; it is a dispatch field.`);
+    }
     return { mode: "help" };
   }
 
-  validateTasks(tasks);
-  return { mode: "dispatch", tasks, async: args.async === true };
+  // The batch-level workspace is a default: tasks that name their own keep it.
+  const effectiveTasks =
+    args.workspace === undefined
+      ? tasks
+      : tasks.map((task) =>
+          task.workspace === undefined
+            ? { ...task, workspace: args.workspace }
+            : task,
+        );
+  validateTasks(effectiveTasks);
+  return { mode: "dispatch", tasks: effectiveTasks, async: args.async === true };
 }
 
 /** Batch-level checks over normalized tasks; all run before any task starts. */
