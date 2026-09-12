@@ -64,21 +64,20 @@ export class AdmissionController {
     const reserving = tasks.filter((task) => task.writeRoots !== undefined);
 
     // Inherited Git redirects: a scrubbed probe can still name the real
-    // repository root, but a child bash tool would run under the redirect.
-    // Multi-writer batches fail closed rather than trust a narrowed scope.
-    const sharedWriters = reserving.filter(
-      (task) => task.workspace === "shared",
-    );
+    // repository root, but a child bash tool would run under the redirect —
+    // and the isolated machinery itself drives Git, so it needs the same
+    // protection. Multi-writer batches fail closed rather than trust a
+    // narrowed scope.
     const redirects = GIT_REDIRECTS.filter(
       (name) => process.env[name] !== undefined,
     );
     if (
-      sharedWriters.length >= 2 &&
+      reserving.length >= 2 &&
       redirects.length > 0 &&
-      sharedWriters.some((task) => task.tools.includes("bash"))
+      reserving.some((task) => task.tools.includes("bash"))
     ) {
       throw new Error(
-        `Could not safely verify a bash-capable shared-write batch while ${redirects.join(", ")} redirects Git repository context.`,
+        `Could not safely verify a bash-capable multi-writer batch while ${redirects.join(", ")} redirects Git repository context.`,
       );
     }
 

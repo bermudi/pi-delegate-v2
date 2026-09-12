@@ -1,3 +1,4 @@
+import { integrationLines } from "./format.ts";
 import type { TaskOutcome, Ticket, TicketStatus } from "./types.ts";
 import { Deferred } from "./types.ts";
 import type { ResolvedTask } from "./types.ts";
@@ -19,12 +20,15 @@ function taskSection(outcome: TaskOutcome): string {
   const quarantined = outcome.quarantined
     ? "\n(worker termination unconfirmed — its write scope stays reserved)"
     : "";
+  const integration = outcome.integration
+    ? `\n${integrationLines(outcome.integration).join("\n")}`
+    : "";
   if (outcome.status === "ok") {
-    return `${head}\n${outcome.output ?? ""}${quarantined}`;
+    return `${head}\n${outcome.output ?? ""}${quarantined}${integration}`;
   }
   const detail = outcome.error ?? "no output";
   const partial = outcome.output ? `\n${outcome.output}` : "";
-  return `${head}\n${detail}${partial}${quarantined}`;
+  return `${head}\n${detail}${partial}${quarantined}${integration}`;
 }
 
 /** Poll/wait view of one ticket. Poll is observational — never mutates. */
@@ -82,6 +86,9 @@ export class TicketStore {
       tasks,
       createdAt: Date.now(),
       cancellation: new AbortController(),
+      // Isolated batches settle only after reconciliation has annotated the
+      // outcomes — a terminal ticket must already show applied/conflict state.
+      holdSettlement: tasks.some((task) => task.workspace === "isolated"),
       settledGate: new Deferred(),
       finishedGate: new Deferred(),
       waiters: new Set(),
@@ -107,19 +114,32 @@ export class TicketStore {
   /** Record a task outcome. Never changes a terminal ticket's status. */
   recordOutcome(ticket: Ticket, outcome: TaskOutcome): void {
     ticket.outcomes[outcome.index] = outcome;
-    if (ticket.status !== "running") return;
-    if (ticket.outcomes.every((recorded) => recorded !== undefined)) {
-      this.settle(
-        ticket,
-        ticket.outcomes.every((o) => o!.status === "ok")
-          ? "completed"
-          : ticket.outcomes.every((o) => o!.status === "cancelled")
-            ? "cancelled"
-            : ticket.outcomes.some((o) => o!.status === "ok")
-              ? "completed"
-              : "failed",
-      );
-    }
+    this.maybeSettle(ticket);
+  }
+
+  private maybeSettle(ticket: Ticket): void {
+    if (ticket.status !== "running" || ticket.holdSettlement) return;
+    if (!ticket.outcomes.every((recorded) => recorded !== undefined)) return;
+    this.settle(
+      ticket,
+      ticket.outcomes.every((o) => o!.status === "ok")
+        ? "completed"
+        : ticket.outcomes.every((o) => o!.status === "cancelled")
+          ? "cancelled"
+          : ticket.outcomes.some((o) => o!.status === "ok")
+            ? "completed"
+            : "failed",
+    );
+  }
+
+  /**
+   * Lift the settlement hold after post-run reconciliation: the ticket can
+   * now reach its terminal status with the finalized outcomes on record.
+   * A ticket already settled by cancellation is unaffected.
+   */
+  releaseSettlement(ticket: Ticket): void {
+    ticket.holdSettlement = false;
+    this.maybeSettle(ticket);
   }
 
   /** The single owner of the terminal transition; idempotent. */

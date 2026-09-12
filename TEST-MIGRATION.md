@@ -204,7 +204,7 @@ gaps.
   helpers.
 - **Covered now:** same-call writer serialization order; cross-call
   rejection against a running ticket; shared + isolated same-call rejection;
-  unimplemented `scratch`/`isolated` values fail loudly before any provider
+  the unimplemented `scratch` value fails loudly before any provider
   call; an inherited `GIT_DIR` redirect fails closed for a bash-capable
   multi-writer batch; the scope probe runs with `GIT_*` scrubbed so a bogus
   redirect cannot shrink the reserved scope.
@@ -239,9 +239,9 @@ gaps.
   proposals with no changes leave nothing behind.
 - **Internal:** temporary-index strategy, private refs, patch representation,
   candidate-worktree mechanics.
-- **Pending (migrated):** ordered apply of two proposals with
-  `applied_unverified` wording; conflict retains artifacts without clobbering
-  a human edit while an independent proposal still applies.
+- **Covered now:** ordered apply of two proposals with `applied_unverified`
+  wording; conflict retains artifacts without clobbering a human edit while
+  an independent proposal still applies.
 - **Gap:** cancellation before apply retains proposals and applies nothing;
   binary/symlink/mode reconciliation; baseline-drift refusal; worker-process
   termination guarantees.
@@ -301,7 +301,7 @@ gaps.
 | `lifecycle.test.ts`/`dispatch.test.ts`: ordered sync results, sibling failure isolation, task-id echo, usage, async ticket return, concurrency bound | Contract | Pending tests in `tests/contract/dispatch.test.ts` |
 | `delegate.test.ts`/`pause.test.ts` ticket integration: roster, not-found, wait, timeout detach, cancel preview/force, retained results, pause/resume | Contract + Regression | Pending tests in `tests/contract/tickets.test.ts` |
 | `lifecycle.test.ts` pool/session tests: pooling, list, close, frozen config, `resumeFrom` errors, busy conflicts | Contract + Regression | Pending tests in `tests/contract/sessions.test.ts` |
-| `dispatch.test.ts`/`shared-write-safety.test.ts`/`workspace.test.ts`/`isolated-workspace.test.ts`: writer serialization, cross-call rejection, shared/isolated rejection, scratch discard, ordered apply, conflict retention | Contract + Regression | Pending tests in `tests/contract/workspaces.test.ts` |
+| `dispatch.test.ts`/`shared-write-safety.test.ts`/`workspace.test.ts`/`isolated-workspace.test.ts`: writer serialization, cross-call rejection, shared/isolated rejection, scratch discard, ordered apply, conflict retention | Contract + Regression | `tests/contract/workspaces.test.ts` (live; scratch discard pending) |
 | `lifecycle.test.ts` retry matrix and `dispatch.test.ts` serialized-successor | Regression | Pending tests in `tests/regression/failure-propagation.test.ts` |
 | All helper/private-state/rendering/internals tests (see per-subsystem "Internal" rows) | Internal | Not ported |
 
@@ -345,7 +345,7 @@ Promoted to live tests: all of `dispatch.test.ts` (6), `tickets.test.ts`
 `resumeFrom` + busy-ticket cases in `sessions.test.ts`.
 
 Still pending (later tranches): session pooling/close/frozen config;
-scratch discard; isolated apply and conflict retention.
+scratch discard.
 
 ## Fourth tranche (adversarial correctness review)
 
@@ -359,8 +359,8 @@ Public-boundary regression tests added for defects found in review:
   re-read per call in both directions; a `concurrency.models` per-model
   bound serializes below the global limit; `with-parent-transcript`
   prepends the parent conversation.
-- `tests/contract/workspaces.test.ts` — unimplemented `scratch`/`isolated`
-  fail loudly; `GIT_DIR` redirect + bash-capable multi-writer batch fails
+- `tests/contract/workspaces.test.ts` — unimplemented `scratch` fails
+  loudly; `GIT_DIR` redirect + bash-capable multi-writer batch fails
   closed; the Git scope probe scrubs inherited `GIT_*`.
 - `tests/regression/failure-propagation.test.ts` — `deadlineMs` is one
   wall-clock budget across attempts and backoff.
@@ -396,6 +396,65 @@ New regression tests in `tests/regression/cancellation.test.ts`:
 - a sync call returns a structured deadline outcome while the worker is
   still gated, holds the reservation during quarantine, and admits the
   same scope once quiescence is confirmed.
+
+## Sixth tranche (isolated workspaces)
+
+`src/isolated.ts` implements `workspace: "isolated"` end to end. Each call
+captures one synthetic baseline commit per Git source root — tracked,
+deleted, and untracked content snapshot via a temporary index, so the
+user's real index and branch never move — then runs each task in a
+detached worktree created from that baseline. After execution, successful
+workers' trees are snapshotted to private refs and full `--binary` patch
+files under `<agentDir>/delegate-isolated/<batch>/`, and reconciliation
+applies each accepted proposal to the source in task order via
+`git apply --check` + `git apply --binary`. Per-proposal application means
+a drifted/conflicting proposal is retained with its ref/patch/worktree
+while later independent proposals still apply; an aborted or failed apply
+restores expected pre-apply content from the pre-image and preserves
+recovery artifacts. Cancellation before source apply retains proposals
+instead of applying them; quarantined workers are discarded (never
+snapshotted) and their worktrees/refs are retained until quiescence is
+confirmed, with deferred cleanup through `releaseRetained`.
+
+Lifecycle wiring: `delegate.ts` admits reservations, prepares workspaces,
+then runs the coordinator with a `finalize` hook so reconciliation
+completes inside the reservation window; tickets hold caller-visible
+settlement (`holdSettlement`) until reconcile finishes while forced
+cancellation still settles immediately — its proposals are then retained,
+never applied. `TaskOutcome.integration` records per-task
+`applied_unverified` / `conflict` / `retained` / `discarded` /
+`no_changes` / `apply_failed` detail rendered in both the sync result
+block and ticket views.
+
+Promoted to live tests: ordered reconciliation and conflict retention in
+`tests/contract/workspaces.test.ts`. The conflict test gates the first
+worker's provider response so the source drift lands deterministically
+between baseline capture and reconciliation; `gitInit` now creates an
+initial commit since isolated baselines require `HEAD`. The
+unimplemented-modes test now covers only `scratch`.
+
+A fresh-context review pass then hardened the lifecycle edges:
+
+- `runOne` can no longer reject: a `runTask` throw is converted to a failed
+  outcome — quarantined only when a worker session may exist (a loader
+  rejection is provably pre-worker). `Promise.all` cannot reject while
+  siblings still run, `finalize` always executes, and reservations are
+  never released mid-write by a sibling fault.
+- Serialized successors now gate on the predecessor's *confirmed*
+  quiescence, not its caller-visible record — a provisional quarantined
+  predecessor may still be mutating the shared root.
+- `markGroupFailure` no longer rewrites already-terminal integrations
+  (`applied_unverified`, `discarded`) as `apply_failed`.
+- Aborted `--check`/snapshot operations report `retained`, not a
+  source-drift `conflict` or `apply_failed`.
+- An empty chain delta (identical earlier proposal) is `applied_unverified`
+  — `git apply` rejects empty input.
+- Apply rollback restores only the delta's touched paths, not the
+  proposal's whole file list.
+- The artifact root is excluded from baseline snapshots when it lives
+  inside the source tree, so retained artifacts and live worktrees cannot
+  leak into a baseline or a later proposal.
+- Cleanup no longer issues `update-ref -d` for never-created proposal refs.
 
 ## Next contract slices
 

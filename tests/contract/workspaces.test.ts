@@ -26,9 +26,11 @@ import {
 import { pendingTest } from "../support/pending.ts";
 
 function gitInit(dir: string): void {
-  execSync("git init -q && git config user.email t@t && git config user.name t", {
-    cwd: dir,
-  });
+  // An initial commit is required: isolated baselines are built on HEAD.
+  execSync(
+    "git init -q && git config user.email t@t && git config user.name t && git commit -qm init --allow-empty",
+    { cwd: dir },
+  );
 }
 
 describe("delegate workspace and shared-write contract", () => {
@@ -175,7 +177,7 @@ describe("delegate workspace and shared-write contract", () => {
       const dir = tempDir();
       gitInit(dir);
 
-      for (const workspace of ["scratch", "isolated"]) {
+      for (const workspace of ["scratch"]) {
         const result = await callDelegate(session, {
           tasks: [
             {
@@ -333,7 +335,7 @@ describe("delegate workspace and shared-write contract", () => {
     },
   );
 
-  pendingTest(
+  test(
     "isolated proposals reconcile into the source in task order",
     async () => {
       // v1 evidence: isolated-workspace.test.ts "captures dirty and untracked
@@ -344,17 +346,36 @@ describe("delegate workspace and shared-write contract", () => {
       const dir = tempDir();
       gitInit(dir);
 
+      // Pre-dispatch source state the baseline must carry without touching
+      // the user's index: a dirty tracked edit, an untracked file, and a
+      // staged-but-uncommitted index entry.
+      writeFileSync(join(dir, "tracked.txt"), "committed");
+      execSync("git add -A && git commit -qm add-tracked", { cwd: dir });
+      writeFileSync(join(dir, "tracked.txt"), "dirty-edit");
+      writeFileSync(join(dir, "untracked.txt"), "untracked");
+      writeFileSync(join(dir, "staged.txt"), "staged");
+      execSync("git add staged.txt", { cwd: dir });
+
       const fileA = join(dir, "a.txt");
       const fileB = join(dir, "b.txt");
+      // Responses are a global FIFO across parallel workers: dispatch on the
+      // prompt so either worker can win either step.
+      const writeForPrompt: FauxResponseFactory = async (context) => {
+        if (context.messages.some((m) => m.role === "toolResult")) {
+          return fauxAssistantMessage("DONE");
+        }
+        const file = JSON.stringify(context.messages).includes("a.txt")
+          ? "a.txt"
+          : "b.txt";
+        return fauxAssistantMessage([
+          fauxToolCall("write", { path: file, content: file }),
+        ]);
+      };
       subagents.respond([
-        fauxAssistantMessage([
-          fauxToolCall("write", { path: "a.txt", content: "A" }),
-        ]),
-        fauxAssistantMessage("A-DONE"),
-        fauxAssistantMessage([
-          fauxToolCall("write", { path: "b.txt", content: "B" }),
-        ]),
-        fauxAssistantMessage("B-DONE"),
+        writeForPrompt,
+        writeForPrompt,
+        writeForPrompt,
+        writeForPrompt,
       ]);
 
       const result = await callDelegate(session, {
@@ -378,12 +399,26 @@ describe("delegate workspace and shared-write contract", () => {
       expect(result.isError).toBe(false);
       // A clean application is applied_unverified, never a correctness claim.
       expect(result.text).toMatch(/applied_unverified/);
-      expect(readFileSync(fileA, "utf8")).toBe("A");
-      expect(readFileSync(fileB, "utf8")).toBe("B");
+      expect(readFileSync(fileA, "utf8")).toBe("a.txt");
+      expect(readFileSync(fileB, "utf8")).toBe("b.txt");
+      // The dirty edit and untracked file survive reconciliation, and the
+      // user's index still holds exactly what they staged — the baseline
+      // machinery never touched it.
+      expect(readFileSync(join(dir, "tracked.txt"), "utf8")).toBe(
+        "dirty-edit",
+      );
+      expect(readFileSync(join(dir, "untracked.txt"), "utf8")).toBe(
+        "untracked",
+      );
+      expect(
+        execSync("git diff --cached --name-only", { cwd: dir })
+          .toString()
+          .trim(),
+      ).toBe("staged.txt");
     },
   );
 
-  pendingTest(
+  test(
     "a conflicting isolated proposal is retained, not silently applied or lost",
     async () => {
       // v1 evidence: isolated-workspace.test.ts "keeps a conflicting proposal
@@ -397,22 +432,37 @@ describe("delegate workspace and shared-write contract", () => {
       writeFileSync(target, "original");
       execSync("git add -A && git commit -qm init", { cwd: dir });
 
-      subagents.respond([
-        fauxAssistantMessage([
+      // The first provider call is gated: once it is streaming, preparation
+      // has finished and the baseline is captured, so the human edit below
+      // is a genuine mid-flight drift. Whichever worker calls first gets the
+      // gated response — the file outcomes are identical either way.
+      let workerStarted!: () => void;
+      const started = new Promise<void>((resolve) => {
+        workerStarted = resolve;
+      });
+      let releaseWorker!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        releaseWorker = resolve;
+      });
+      const gatedConflictWrite: FauxResponseFactory = async () => {
+        workerStarted();
+        await gate;
+        return fauxAssistantMessage([
           fauxToolCall("write", {
             path: "conflict.txt",
             content: "worker-change",
           }),
-        ]),
-        fauxAssistantMessage("WROTE"),
-        // Second worker does not touch conflict.txt.
+        ]);
+      };
+      subagents.respond([
+        gatedConflictWrite,
         fauxAssistantMessage([
           fauxToolCall("write", { path: "ok.txt", content: "ok" }),
         ]),
-        fauxAssistantMessage("OK-DONE"),
+        fauxAssistantMessage("DONE"),
+        fauxAssistantMessage("DONE"),
       ]);
 
-      // The human edits the same file mid-flight — the baseline moved.
       const dispatched = callDelegate(session, {
         tasks: [
           {
@@ -431,7 +481,10 @@ describe("delegate workspace and shared-write contract", () => {
           },
         ],
       });
+      await started;
+      // The human edits the same file mid-flight — the baseline moved.
       writeFileSync(target, "human-change");
+      releaseWorker();
       const result = await dispatched;
 
       // The independent proposal still applied; the conflicting one did not

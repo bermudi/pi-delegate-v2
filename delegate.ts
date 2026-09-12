@@ -1,3 +1,4 @@
+import { join } from "node:path";
 import {
   Type,
   type SchemaOptions,
@@ -8,11 +9,12 @@ import {
   defineTool,
   type ExtensionAPI,
 } from "@earendil-works/pi-coding-agent";
-import { AdmissionController } from "./src/admission.ts";
+import { AdmissionController, type AdmissionGrant } from "./src/admission.ts";
 import { loadDelegateConfig } from "./src/config.ts";
 import { DispatchCoordinator } from "./src/coordinator.ts";
 import { formatDispatchResult } from "./src/format.ts";
 import { hostEnvironment, resolveTasks } from "./src/host.ts";
+import { prepareIsolated, type IsolatedPlan } from "./src/isolated.ts";
 import { handleTicketRpc, TicketStore } from "./src/tickets.ts";
 import { validateCall } from "./src/validation.ts";
 
@@ -275,10 +277,33 @@ export default function delegateExtension(api: ExtensionAPI): void {
 
         if (call.async) {
           const ticket = tickets.create(tasks);
+          let grant: AdmissionGrant | undefined;
           try {
-            const grant = admission.admit(tasks, ticket.id);
+            grant = admission.admit(tasks, ticket.id);
+            const plan = await prepareIsolated(
+              tasks,
+              join(env.agentDir, "delegate-isolated"),
+            );
             void coordinator
-              .run(tasks, { env, config, grant, ticket })
+              .run(plan?.tasks ?? tasks, {
+                env,
+                config,
+                grant,
+                ticket,
+                finalize: plan
+                  ? (outcomes) =>
+                      plan.reconcile(outcomes, {
+                        shouldApplySource: () =>
+                          !ticket.cancellation.signal.aborted,
+                        retainedReason:
+                          "The ticket was cancelled before source application.",
+                        signal: ticket.cancellation.signal,
+                      })
+                  : undefined,
+                onWorkerQuiesced: plan
+                  ? (taskIndex) => plan.cleanupWorker(taskIndex)
+                  : undefined,
+              })
               .then(() => undefined)
               .catch((error: unknown) => {
                 tickets.settle(ticket, "failed");
@@ -287,6 +312,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
                 );
               });
           } catch (error) {
+            grant?.release();
             tickets.remove(ticket.id);
             throw error;
           }
@@ -310,11 +336,34 @@ export default function delegateExtension(api: ExtensionAPI): void {
 
         callSeq += 1;
         const grant = admission.admit(tasks, `call-${callSeq}`);
-        const result = await coordinator.run(tasks, {
+        let plan: IsolatedPlan | undefined;
+        try {
+          plan = await prepareIsolated(
+            tasks,
+            join(env.agentDir, "delegate-isolated"),
+            signal,
+          );
+        } catch (error) {
+          grant.release();
+          throw error;
+        }
+        const result = await coordinator.run(plan?.tasks ?? tasks, {
           env,
           config,
           grant,
           signal,
+          finalize: plan
+            ? (outcomes) =>
+                plan.reconcile(outcomes, {
+                  shouldApplySource: () => !signal?.aborted,
+                  retainedReason:
+                    "The call was aborted before source application.",
+                  signal,
+                })
+            : undefined,
+          onWorkerQuiesced: plan
+            ? (taskIndex) => plan.cleanupWorker(taskIndex)
+            : undefined,
         });
         const allFailed = result.outcomes.every(
           (outcome) => outcome.status !== "ok",

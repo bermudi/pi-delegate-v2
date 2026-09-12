@@ -33,6 +33,29 @@ export interface ResolvedTask {
 
 export type TaskStatus = "ok" | "failed" | "cancelled";
 
+/** How an isolated task's proposal ended up relative to the source tree. */
+export type IntegrationStatus =
+  | "applied_unverified"
+  | "conflict"
+  | "retained"
+  | "no_changes"
+  | "discarded"
+  | "apply_failed";
+
+export interface TaskIntegration {
+  readonly status: IntegrationStatus;
+  /** Why a proposal was retained or discarded, when not obvious. */
+  readonly reason?: string;
+  readonly proposedFiles: readonly string[];
+  readonly appliedFiles: readonly string[];
+  readonly conflicts?: readonly { path: string; reason: string }[];
+  /** Recovery pointers for proposals that were not cleanly applied. */
+  readonly baselineRef?: string;
+  readonly proposalRef?: string;
+  readonly patchPath?: string;
+  readonly worktreePath?: string;
+}
+
 export interface TaskOutcome {
   readonly index: number;
   readonly id: string;
@@ -42,6 +65,8 @@ export interface TaskOutcome {
   readonly error?: string;
   readonly retries: number;
   readonly usage?: Usage;
+  /** Isolated-workspace reconciliation result, when the task ran isolated. */
+  readonly integration?: TaskIntegration;
   /**
    * True when the task's session could not be confirmed quiescent and was
    * left undisposed. Callers must keep its reservations alive — work may
@@ -66,6 +91,12 @@ export interface Ticket {
   readonly createdAt: number;
   /** Aborts in-flight executions when force-cancelled. */
   readonly cancellation: AbortController;
+  /**
+   * When true, recorded outcomes never settle the ticket — an explicit
+   * `releaseSettlement` is required after post-run reconciliation lands, so
+   * the terminal view includes integration results.
+   */
+  holdSettlement: boolean;
   /** Resolves when the ticket reaches a terminal status. */
   readonly settledGate: Deferred;
   /**
