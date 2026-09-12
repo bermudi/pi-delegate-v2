@@ -1,0 +1,37 @@
+{
+  "name": "pi-delegate-v2",
+  "devDependencies": {
+    "@earendil-works/pi-agent-core": "0.84.2",
+    "@earendil-works/pi-ai": "0.84.2",
+    "@earendil-works/pi-coding-agent": "0.84.2",
+    "@earendil-works/pi-tui": "0.84.2",
+    "@marcfargas/pi-test-harness": "0.6.1",
+    "@types/bun": "1.4.0",
+    "typescript": "5.9.3"
+  },
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@sinclair/typebox": "0.34.52"
+  },
+  "patchedDependencies": {
+    "@marcfargas/pi-test-harness@0.6.1": "patches/@marcfargas%2Fpi-test-harness@0.6.1.patch"
+  },
+  "version": "0.0.0",
+  "pi": {
+    "extensions": [
+      "./delegate.ts"
+    ]
+  },
+  "files": [
+    "delegate.ts",
+    "README.md"
+  ],
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.84.2"
+  }
+}
