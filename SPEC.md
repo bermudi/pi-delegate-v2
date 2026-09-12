@@ -1,8 +1,9 @@
 # Delegate v2 behavioral specification
 
 This document describes the user-visible contract to carry forward from
-`pi-delegate` v1. Internal module names and data structures are not part of the
-contract.
+`pi-delegate` v1. It specifies outcomes, not how v2 must produce them. V1
+modules, algorithms, state machines, timers, storage layouts, and cleanup
+mechanisms are explicitly not requirements.
 
 ## Operations
 
@@ -125,7 +126,8 @@ fail the whole call with an actionable error and no started tasks.
 
 ## Sessions, retries, and cancellation
 
-A successful task with `sessionId` keeps a live process-local conversation.
+A successful task with `sessionId` keeps a live conversation for the lifetime
+of the host process.
 Later calls with that ID serialize and continue it. Its cwd, tools, thinking,
 model, base prompt, and provider-extension configuration are frozen; incompatible
 reuse is rejected. `resumeFrom` rehydrates a durable transcript and may then be
@@ -134,8 +136,7 @@ pooled under a new `sessionId`.
 Transient whole-task failures may retry. Model/account failures do not blindly
 retry on the same model and provide a different-model recovery hint.
 
-Stall timeouts measure inactivity; deadlines measure wall-clock time. Both use
-cooperative cancellation. Delegate waits for the session to become safely
-quiescent before returning ownership, or quarantines it if cancelled unwind
-cannot be proven safe.
-
+Stall timeouts measure inactivity; deadlines measure wall-clock time.
+Cancellation does not promise rollback or immediate termination. Delegate does
+not reuse or clean up resources while they may still mutate state; resources
+whose safety cannot be established remain unavailable.

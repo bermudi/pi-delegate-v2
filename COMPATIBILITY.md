@@ -4,7 +4,13 @@
 
 This is the v2 rewrite boundary extracted from v1's README, schemas, ADR,
 context glossary, and tests. “Preserve” means callers and operators can rely on
-the semantic behavior, not identical prose, temporary paths, or rendering.
+the semantic outcome.
+
+V1 implementation details are explicitly non-binding. Its module boundaries,
+algorithms, event-loop heuristics, timeout constants, lock structure, ticket
+state machinery, temporary-index strategy, worktree/ref/patch representation,
+database layout, and test seams do not become v2 requirements merely because
+they were necessary in v1.
 
 Any departure from the preserve list is a deliberate breaking change and needs
 release notes and migration guidance; it must not arrive as rewrite drift.
@@ -31,7 +37,7 @@ release notes and migration guidance; it must not arrive as rewrite drift.
 
 - Input-ordered sync results, bounded global/per-model concurrency, cooperative
   cancellation, retry accounting, and compaction-inclusive usage accounting.
-- Live process-local sessions keyed by `sessionId`; durable recovery through
+- Live host-lifetime sessions keyed by `sessionId`; durable recovery through
   explicit `.jsonl` `resumeFrom`, not automatic pool recovery after restart.
 - Frozen session configuration, same-ID serialization, insert-on-success,
   explicit close, and parent-shutdown cleanup.
@@ -51,7 +57,8 @@ release notes and migration guidance; it must not arrive as rewrite drift.
 - Isolated preservation of dirty/untracked baseline state and the user's
   branch/index; task-order, all-or-nothing application; retained conflict and
   cancellation artifacts; `applied_unverified` wording.
-- The quiescence and quarantine guarantees in `INVARIANTS.md`.
+- The safe-reuse, safe-cleanup, and quarantine outcomes in `INVARIANTS.md`;
+  v1's quiescence-barrier algorithm is not preserved.
 
 ### Signals and data
 
@@ -68,7 +75,15 @@ release notes and migration guidance; it must not arrive as rewrite drift.
 The rewrite may change without compatibility ceremony:
 
 - module boundaries, internal interfaces, types, data structures, dependency
-  injection, and concurrency implementation;
+  injection, locking, scheduling, and concurrency implementation;
+- cancellation detection, completion proofs, cleanup strategy, retry machinery,
+  and all internal timeout values, provided the documented outcomes hold;
+- ticket state representation, transition ownership, busy tracking, retention
+  implementation, and delivery plumbing;
+- session materialization and pooling architecture, including the v1
+  policy/materialization module seam, provided reuse behavior remains compatible;
+- isolated-workspace mechanics, including whether v2 uses temporary indexes,
+  detached worktrees, refs, patches, or another recoverable transactional design;
 - generated bundle layout and build plumbing;
 - Pi-version adapters and host-compatibility checks;
 - TUI component structure, refresh strategy, and non-semantic visual details;
@@ -77,9 +92,38 @@ The rewrite may change without compatibility ceremony:
 - exact error/help/status prose, provided it stays actionable and does not lose
   a semantic distinction;
 - telemetry tables and storage internals, provided existing data is migrated or
-  explicitly versioned rather than silently lost.
+  explicitly versioned rather than silently lost;
+- tests and test seams. V1 tests are evidence for behavior, not an API that v2
+  must reproduce.
 
 This contract does **not** pre-authorize changed defaults, removed normalization,
 weaker cancellation or workspace guarantees, different ticket delivery,
 different session persistence, or a broader extension trust boundary. Those
 would be intentional public API changes, not implementation freedom.
+
+## Test migration policy
+
+Do **not** port the v1 test suite wholesale. Its regression knowledge is useful;
+its decomposition is not a v2 contract. Before reimplementation, classify each
+v1 test by purpose:
+
+1. **Contract tests** cover behavior promised by `SPEC.md`: accepted calls,
+   validation, results, sessions, tickets, workspaces, usage, and other
+   caller-visible effects. Reimplement these against v2's public tool boundary.
+2. **Regression tests** reproduce a real failure that could violate the public
+   contract or an invariant. Preserve the scenario and expected outcome, but
+   reimplement it through the public boundary rather than carrying over v1
+   fixtures, mocks, call sequences, or helper assumptions.
+3. **Internal tests** exist only to validate a v1 helper, module boundary,
+   intermediate representation, private state transition, or decomposition.
+   Delete them. Add new internal tests only when v2's own design warrants them.
+
+Tests should assert observable results and effects: returned tool content,
+ticket/session behavior, filesystem state, preserved user Git state, resource
+availability, emitted usage, and actionable failure. They should not assert
+which v1 helper was called, the shape of private state, exact internal event
+ordering, or a particular cleanup/reconciliation mechanism.
+
+The old suite is a source catalogue for discovering cases, not code to copy and
+not a coverage target. Similar test counts, file names, fixtures, and line
+coverage are explicitly not compatibility goals.

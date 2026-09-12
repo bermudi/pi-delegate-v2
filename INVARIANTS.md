@@ -1,30 +1,35 @@
 # Delegate v2 invariants
 
-These are safety properties, not implementation suggestions.
+These are externally meaningful safety properties, not a prescription for
+recreating v1. References to v1 mechanisms—including event counters,
+quiescence barriers, locks, controllers, indexes, temporary Git indexes,
+private refs, worktrees, and timeout constants—are intentionally absent. V2 may
+use any design that makes these properties true and testable.
 
 ## Cancellation and quiescence
 
 - A session MUST NOT be returned to the pool, disposed, or have its workspace
   removed while provider, tool, compaction, or extension continuation work may
   still mutate it.
-- Normal completion MUST wait until the session is idle, non-compacting, and
-  event-quiet across multiple event-loop turns. `prompt()` completion or one
-  quiet turn is not sufficient.
-- Healthy quiescence waits MUST remain unbounded; the inactivity watchdog is
-  responsible for wedged work.
-- Cancelled unwind MUST be bounded (v1 default: 30 seconds). On expiry it MUST
-  report abandonment and quarantine the session/workspace.
-- Events or continuations appearing after cancellation MUST trigger another
-  abort. Failed safety checks MUST NOT authorize cleanup.
+- Apparent request completion MUST NOT be treated as proof that deferred
+  provider, tool, compaction, or extension work has stopped.
+- Healthy long-running cleanup MUST NOT be misclassified as cancellation merely
+  because it exceeds an internal fixed duration.
+- Cancelled work MUST eventually produce a caller-visible outcome even when
+  termination cannot be confirmed. In that case its resources remain
+  quarantined.
+- Work that restarts or continues after cancellation MUST remain cancelled and
+  MUST NOT make its resources eligible for reuse. Failed safety checks MUST NOT
+  authorize cleanup.
 - Cancellation is cooperative. It MUST NOT claim to stop subprocesses or roll
   back completed side effects.
 - Cancellation cause precedence is parent abort, then deadline, then stall.
 
 ## Session reuse
 
-- One lock per `sessionId` MUST cover acquire, execution, settlement, and
-  commit. Same-ID calls serialize; different IDs may proceed concurrently.
-- Pool checkout MUST NOT itself mutate stats or pool state.
+- Same-ID calls MUST serialize across acquisition, execution, and final state
+  update; different IDs may proceed concurrently. No particular locking
+  strategy is required.
 - A pooled session's cwd, tools, thinking, model, base prompt, and provider
   extension configuration MUST be frozen. Tool comparison is order-independent.
   Explicitly incompatible reuse MUST fail.
@@ -36,28 +41,29 @@ These are safety properties, not implementation suggestions.
 - Ordinary provider/task failure on an existing pooled session remains
   reusable and its attempt usage is recorded.
 - A late materialization after cancellation MUST NOT be prompted or pooled.
-- Shutdown MUST reject new inserts, abort active sessions, wait behind their
-  locks, attempt every cleanup, and surface aggregate cleanup failures.
+- Shutdown MUST reject new reusable sessions, request termination of active
+  sessions, avoid racing their state updates, attempt every cleanup, and surface
+  cleanup failures.
 - Scratch and isolated workspaces MUST remain one-shot and MUST NOT support
   pooling or transcript resume.
 
 ## Ticket state
 
-- Ticket terminal transition—status, completion time, error, and busy-index
-  removal—MUST have one idempotent owner.
-- Running and cancelling tickets remain busy; terminal tickets do not.
-- Forced cancellation transitions through `cancelling`; ordinary completion of
-  the workers settles it as `cancelled`.
+- Ticket terminal state MUST be internally consistent and idempotent regardless
+  of racing completion, cancellation, and shutdown.
+- Running and cancelling tickets remain unavailable for conflicting work;
+  terminal tickets do not.
+- After forced cancellation begins, later worker completion MUST NOT turn the
+  ticket into a successful completion.
 - Shutdown cancellation settles immediately, resolves waiters, and performs no
   follow-up delivery.
-- Terminal ticket status MUST NOT imply worker cleanup is complete.
-  `workersSettled: false` is valid during unwind.
-- Poll formatting MUST NOT cache an incomplete terminal snapshot; late worker
-  results must become visible.
+- A terminal cancellation response MUST NOT falsely imply that unsafe worker
+  cleanup has completed. Later safe-to-expose results must remain visible.
 - Delivery failure MUST NOT undo settlement or make results unpollable.
 - Wait timeout or caller abort MUST detach only that waiter.
 - Pause is orthogonal to lifecycle: a paused ticket remains running and retains
-  busy entries, slots, sessions, deadlines, and workspace reservations.
+  its sessions, deadlines, workspace reservations, and protection against
+  conflicting work.
 
 ## Shared writes
 
@@ -66,8 +72,8 @@ These are safety properties, not implementation suggestions.
 - `read`, `grep`, `find`, `ls`, and `web_search` are read-only for admission;
   unknown tools are mutating.
 - Same-call overlapping shared writers MUST serialize in task order. A
-  predecessor failure MUST still release its successor. Waiting happens before
-  global-slot acquisition.
+  predecessor failure MUST still allow its successor to run. Serialization
+  MUST NOT consume scarce execution capacity while no task can execute.
 - Overlap with another active sync/async dispatch or quarantined task MUST
   reject, not queue. Shared/isolated overlap MUST reject.
 - Inherited Git redirection with bash-capable multiple writers MUST fail closed.
@@ -79,23 +85,23 @@ These are safety properties, not implementation suggestions.
 ## Isolated application
 
 - Preparation MUST capture tracked, deleted, and untracked dirty baseline state
-  with a temporary index, without changing the user's branch or index.
-- Workers MUST run in detached worktrees. Processes rooted there MUST terminate
-  before snapshot and reconciliation.
-- Every successful proposal MUST be backed by a private ref and full patch
-  before reconciliation.
-- Proposals MUST reconcile in task order through disposable candidates. Each
-  proposal is all-or-nothing; predecessor conflict MUST NOT prevent later
-  independent proposals from being considered.
-- Source apply MUST first revalidate the baseline and MUST use a temporary
-  index. A failed apply MUST restore the baseline and preserve partial recovery
-  artifacts when needed.
-- Conflicts and cancellation before source apply MUST retain recoverable refs,
-  patches, and worktrees. Cancellation MUST NOT apply accepted proposals.
+  without changing the user's branch or index.
+- Each worker MUST be isolated from other workers' ordinary relative writes.
+  Worker activity MUST terminate before its output is accepted for application.
+- Every successful proposal MUST have a durable recovery representation before
+  reconciliation.
+- Proposals MUST reconcile in task order. Each proposal is all-or-nothing;
+  predecessor conflict MUST NOT prevent later independent proposals from being
+  considered.
+- Source apply MUST first verify that its baseline assumptions still hold and
+  MUST leave the user's index and branch unchanged. A failed apply MUST restore
+  the baseline and preserve recovery artifacts when needed.
+- Conflicts and cancellation before source apply MUST retain discoverable,
+  recoverable proposal artifacts. Cancellation MUST NOT apply accepted
+  proposals.
 - An abandoned worker MUST be discarded, never snapshotted or applied, and its
   cleanup MUST wait for safety confirmation.
 - Source reservations persist through preparation, execution, reconciliation,
   and worker cleanup.
 - A clean apply is `applied_unverified`; it MUST NOT assert semantic correctness
   or successful tests.
-
