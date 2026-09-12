@@ -3,6 +3,17 @@
 This is a specification-first rewrite. Read `SPEC.md`, `INVARIANTS.md`, and
 `COMPATIBILITY.md` before implementation work.
 
+## Consulting v1
+
+The v1 repository is a behavioral oracle, not an architectural template.
+
+When consulting v1:
+- extract externally observable behavior, invariants, and regression scenarios;
+- do not copy its module boundaries, internal APIs, abstractions, globals,
+  state machines, test seams, algorithms, or fixtures without independently
+  justifying them for v2;
+- migrated tests should test v2 through its public boundary whenever possible.
+
 ## Tests
 
 - Do not copy the v1 suite or its architecture.
