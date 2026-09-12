@@ -11,7 +11,6 @@ import {
   installSubagentModel,
   openDelegateBoundary,
 } from "../support/pi-boundary.ts";
-import { pendingTest } from "../support/pending.ts";
 
 describe("delegate session contract", () => {
   let session: TestSession | undefined;
@@ -21,7 +20,7 @@ describe("delegate session contract", () => {
     session = undefined;
   });
 
-  pendingTest(
+  test(
     "a sessionId task pools a live session, lists it, and continues it on reuse",
     async () => {
       // v1 evidence: lifecycle.test.ts "task with sessionId creates pooled
@@ -58,7 +57,7 @@ describe("delegate session contract", () => {
     },
   );
 
-  pendingTest(
+  test(
     "close removes the named session and a later call starts fresh",
     async () => {
       // v1 evidence: lifecycle.test.ts "close action tears down pooled
@@ -94,7 +93,7 @@ describe("delegate session contract", () => {
     },
   );
 
-  pendingTest(
+  test(
     "reusing a sessionId with incompatible frozen configuration is rejected",
     async () => {
       // v1 evidence: lifecycle.test.ts "session config mismatch rejects with

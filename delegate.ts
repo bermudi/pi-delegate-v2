@@ -18,6 +18,7 @@ import {
 } from "./src/format.ts";
 import { hostEnvironment, resolveTasks } from "./src/host.ts";
 import { prepareIsolated, type IsolatedPlan } from "./src/isolated.ts";
+import { handleSessionRpc, SessionPool } from "./src/sessions.ts";
 import { handleTicketRpc, TicketStore } from "./src/tickets.ts";
 import { validateCall } from "./src/validation.ts";
 
@@ -72,7 +73,10 @@ const taskSchema = Type.Object(
       ),
     ),
     sessionId: Type.Optional(
-      Type.String({ description: "Live reusable-session key." }),
+      Type.String({
+        description:
+          "Key for a live reusable session; later calls with the same id continue it. Its configuration is frozen at first use.",
+      }),
     ),
     resumeFrom: Type.Optional(
       Type.String({ description: "Absolute session transcript path." }),
@@ -247,15 +251,24 @@ Delegate runs subagent tasks synchronously or as an asynchronous ticket.
   paused ticket stays live and keeps its reservations.
 
 ## Sessions
-- \`sessionAction: "list"\` lists named sessions; \`sessionAction: "close"\`
+- A task with \`sessionId\` keeps its session live after it finishes; a later
+  call with the same id continues that conversation. The session's cwd,
+  tools, thinking, model, and base prompt are frozen at first use —
+  incompatible reuse is rejected.
+- \`sessionAction: "list"\` lists live sessions; \`sessionAction: "close"\`
   with \`sessionId\` closes one.
 `;
 
 export default function delegateExtension(api: ExtensionAPI): void {
   const tickets = new TicketStore();
   const admission = new AdmissionController();
+  const sessions = new SessionPool();
   const coordinator = new DispatchCoordinator(tickets);
   let callSeq = 0;
+
+  api.on("session_shutdown", () => {
+    sessions.shutdown();
+  });
 
   api.registerTool(
     defineTool<typeof argumentsSchema, DelegateDetails>({
@@ -286,14 +299,22 @@ export default function delegateExtension(api: ExtensionAPI): void {
           };
         }
         if (call.mode === "session") {
-          throw new Error(
-            `Delegate v2 session operations are not implemented yet (sessionAction "${call.action}").`,
-          );
+          const result = await handleSessionRpc(call, sessions, admission);
+          return {
+            content: [{ type: "text" as const, text: result.text }],
+            details: {
+              mode: "session" as const,
+              action: call.action,
+              sessionId: call.sessionId,
+            },
+            isError: result.isError,
+          };
         }
 
         const env = hostEnvironment(ctx, () => api.getActiveTools());
         const config = loadDelegateConfig(ctx);
         const tasks = resolveTasks(call.tasks, env);
+        sessions.validateReuse(tasks);
 
         if (call.async) {
           const ticket = tickets.create(tasks);
@@ -310,6 +331,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
                 env,
                 config,
                 grant,
+                sessions,
                 ticket,
                 finalize: plan
                   ? (outcomes) =>
@@ -384,6 +406,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
           env,
           config,
           grant,
+          sessions,
           signal,
           finalize: plan
             ? (outcomes) =>

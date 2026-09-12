@@ -1,6 +1,6 @@
 import { existsSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { execFileSync } from "node:child_process";
 import {
   buildSessionContext,
@@ -332,9 +332,12 @@ export function resolveTasks(
 
 /**
  * Create a subagent session for one resolved task. Subagents are headless
- * workers: no extensions, no user-global context files, in-memory transcript.
- * The session streams through the parent session's model runtime so provider
- * registrations and auth are inherited.
+ * workers: no extensions, no user-global context files. One-shot tasks use
+ * an in-memory transcript; a `sessionId` task needs a durable session file
+ * to be poolable (a `resumeFrom` transcript already is one), so it gets a
+ * file under `<agentDir>/delegate-sessions/`. The session streams through
+ * the parent session's model runtime so provider registrations and auth
+ * are inherited.
  */
 export async function createSubagentSession(
   task: ResolvedTask,
@@ -343,7 +346,12 @@ export async function createSubagentSession(
 ): Promise<AgentSession> {
   const sessionManager = task.resumeFrom
     ? SessionManager.open(task.resumeFrom)
-    : SessionManager.inMemory(task.cwd);
+    : task.sessionId !== undefined
+      ? SessionManager.create(
+          task.cwd,
+          join(env.agentDir, "delegate-sessions"),
+        )
+      : SessionManager.inMemory(task.cwd);
   const { session } = await createAgentSession({
     cwd: task.cwd,
     agentDir: env.agentDir,

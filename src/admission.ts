@@ -64,6 +64,11 @@ export class AdmissionController {
   private readonly reservations: Reservation[] = [];
   private readonly busySessions = new Map<string, { owner: string; taskIndex: number }>();
 
+  /** True while a live call or ticket holds this sessionId. */
+  isSessionBusy(sessionId: string): boolean {
+    return this.busySessions.has(sessionId);
+  }
+
   /**
    * Check then reserve. Throws an actionable error on any conflict; on
    * success the caller owns the reservations until `release()`.

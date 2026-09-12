@@ -179,14 +179,15 @@ gaps.
   usage; late materialization after cancellation is never prompted or pooled.
 - **Internal:** pool map/locks, config cloning, quarantine registry, session
   file bookkeeping.
-- **Covered now:** missing-transcript `resumeFrom` error; a `sessionId` held
-  by a running ticket rejects conflicting reuse; `resumeFrom` without a
-  prompt rehydrates the transcript and sends the default continuation
+- **Covered now:** pool + list + continuation on reuse; `close` removes and
+  a later call starts fresh; frozen-config mismatch rejects with an
+  actionable error; missing-transcript `resumeFrom` error; a `sessionId`
+  held by a running ticket rejects conflicting reuse; `resumeFrom` without
+  a prompt rehydrates the transcript and sends the default continuation
   instruction (live test with a real `.jsonl` fixture).
-- **Pending (migrated):** pool + list + continuation; close then fresh;
-  frozen-config rejection.
 - **Gap:** eviction after cancelled/stalled/deadline-exceeded runs;
-  shutdown cleanup; usage recorded for ordinary failures on pooled sessions.
+  shutdown cleanup; usage recorded for ordinary failures on pooled
+  sessions; close of a busy or missing session.
 
 ### Admission and shared writes
 
@@ -300,7 +301,7 @@ gaps.
 | `schema.test.ts`/`task-resolution.test.ts`: semantic validation (duplicates, deadlines, workspace conflicts, mode mixing, unknown agent, required fields) | Contract | Pending tests in `tests/contract/validation.test.ts` |
 | `lifecycle.test.ts`/`dispatch.test.ts`: ordered sync results, sibling failure isolation, task-id echo, usage, async ticket return, concurrency bound | Contract | Pending tests in `tests/contract/dispatch.test.ts` |
 | `delegate.test.ts`/`pause.test.ts` ticket integration: roster, not-found, wait, timeout detach, cancel preview/force, retained results, pause/resume | Contract + Regression | Pending tests in `tests/contract/tickets.test.ts` |
-| `lifecycle.test.ts` pool/session tests: pooling, list, close, frozen config, `resumeFrom` errors, busy conflicts | Contract + Regression | Pending tests in `tests/contract/sessions.test.ts` |
+| `lifecycle.test.ts` pool/session tests: pooling, list, close, frozen config, `resumeFrom` errors, busy conflicts | Contract + Regression | Live tests in `tests/contract/sessions.test.ts` |
 | `dispatch.test.ts`/`shared-write-safety.test.ts`/`workspace.test.ts`/`isolated-workspace.test.ts`: writer serialization, cross-call rejection, shared/isolated rejection, scratch discard, ordered apply, conflict retention | Contract + Regression | `tests/contract/workspaces.test.ts` (live; scratch discard pending) |
 | `lifecycle.test.ts` retry matrix and `dispatch.test.ts` serialized-successor | Regression | Pending tests in `tests/regression/failure-propagation.test.ts` |
 | All helper/private-state/rendering/internals tests (see per-subsystem "Internal" rows) | Internal | Not ported |
@@ -344,8 +345,7 @@ Promoted to live tests: all of `dispatch.test.ts` (6), `tickets.test.ts`
 (3 pending), the first three `workspaces.test.ts` admission cases, and the
 `resumeFrom` + busy-ticket cases in `sessions.test.ts`.
 
-Still pending (later tranches): session pooling/close/frozen config;
-scratch discard.
+Still pending (later tranches): scratch discard.
 
 ## Fourth tranche (adversarial correctness review)
 
@@ -479,16 +479,57 @@ A fresh-context review pass then hardened the lifecycle edges:
   silently ignored; cleanup no longer issues `update-ref -d` for
   never-created proposal refs.
 
+## Seventh tranche (pooled sessions)
+
+`src/sessions.ts` implements `sessionId` pooling, `sessionAction` RPCs, and
+shutdown. The pool is owned by the extension closure; admission's
+busy-session marks already serialize same-ID calls across acquisition,
+execution, and state update, so no second locking layer exists.
+
+- **Checkout/reuse:** `TaskExecution` checks the pool before creating a
+  session. A hit means no creation and no pre-prompt abort — the session is
+  quiescent by definition. The between-turn pause hook
+  (`prepareNextTurnWithContext`) is restored at run end so a reused session
+  carries no stale controls, and per-run usage is diffed against the
+  session's cumulative stats.
+- **Durable transcripts:** `sessionId` tasks create a file-backed
+  `SessionManager` under `<agentDir>/delegate-sessions/`; `resumeFrom`
+  transcripts are already durable. Insert-on-success requires the file to
+  exist.
+- **Frozen config:** cwd, tools (order-independent), thinking, model, and
+  base prompt are compared against the resolved task. `validateReuse` runs
+  before admission so a mismatch fails the whole call; `checkout`
+  re-verifies so a close-and-recreate race degrades to a task failure.
+  `resumeFrom` on an already-live sessionId rejects.
+- **Settle policy:** ok+prompted keeps/inserts; prompted cancel or deadline
+  evicts; pre-prompt cancel/deadline leaves the session intact; ordinary
+  failure keeps a pooled session reusable; quarantined sessions are evicted
+  but never disposed.
+- **RPC:** `list` shows live entries (running marked); `close` rejects
+  busy/missing sessions, otherwise removes, aborts, and disposes.
+- **Shutdown:** `session_shutdown` closes the pool to new reuse, requests
+  termination of checked-out sessions (their runs own disposal through
+  settle), disposes idle ones, and logs every cleanup failure.
+
+Promoted to live tests: pool + list + continuation, close-then-fresh, and
+frozen-config rejection in `tests/contract/sessions.test.ts`; the
+tool-boundary scaffold assertion now expects the real `list` roster.
+
 ## Next contract slices
 
-1. Complete mode exclusivity and actionable validation failures.
-2. Batch-before-start validation and input-ordered results.
-3. Ticket lifecycle, wait, cancellation, pause, and leaf-aware delivery.
-4. Persistent session reuse, frozen configuration, close, and shutdown.
-5. Shared-write admission and same-call serialization.
-6. Scratch discard and isolated all-or-nothing application.
-7. Cancellation safety and unavailable/quarantined resources.
-8. Usage and telemetry privacy.
+Done: mode exclusivity and validation failures; batch-before-start
+validation and input-ordered results; ticket lifecycle, wait, cancellation,
+and pause; persistent session reuse, frozen configuration, close, and
+shutdown; shared-write admission and same-call serialization; isolated
+all-or-nothing application; cancellation safety and quarantine.
+
+Remaining:
+
+1. Scratch discard (one pending contract test).
+2. Leaf-aware delivery after session-tree navigation (needs harness-level
+   session-tree control).
+3. Usage and telemetry privacy.
+4. The per-subsystem **Gap** entries above.
 
 Each slice should add only the public test driver capabilities it needs. Tests
 must not introduce public exports solely to reach private v2 state.

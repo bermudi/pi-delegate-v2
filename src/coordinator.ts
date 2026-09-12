@@ -4,6 +4,7 @@ import type { AdmissionGrant } from "./admission.ts";
 import { modelConcurrencyLimit, type DelegateConfig } from "./config.ts";
 import { runTask, type RunControls } from "./execution.ts";
 import type { HostEnvironment } from "./host.ts";
+import type { SessionPool } from "./sessions.ts";
 import { Deferred, Semaphore } from "./types.ts";
 import type { TicketStore } from "./tickets.ts";
 import type {
@@ -99,6 +100,7 @@ export class DispatchCoordinator {
       env: HostEnvironment;
       config: DelegateConfig;
       grant: AdmissionGrant;
+      sessions: SessionPool;
       signal?: AbortSignal;
       ticket?: Ticket;
       finalize?: (
@@ -185,6 +187,7 @@ export class DispatchCoordinator {
     options: {
       env: HostEnvironment;
       config: DelegateConfig;
+      sessions: SessionPool;
       signal?: AbortSignal;
       ticket?: Ticket;
       onWorkerQuiesced?: (taskIndex: number) => Promise<void>;
@@ -311,6 +314,7 @@ export class DispatchCoordinator {
             }
             const controls: RunControls = {
               env: options.env,
+              sessions: options.sessions,
               signal,
               isAborted: () => signal.aborted,
               waitWhilePaused: (runSignal) =>

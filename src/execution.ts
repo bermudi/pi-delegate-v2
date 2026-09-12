@@ -17,6 +17,7 @@ import {
   RETRY_DELAY_MS,
   sleep,
 } from "./retry.ts";
+import type { PooledSession, SessionPool } from "./sessions.ts";
 import {
   Deferred,
   type ExecutionHandle,
@@ -27,6 +28,8 @@ import {
 /** Cooperative controls the coordinator hands to each task run. */
 export interface RunControls {
   readonly env: HostEnvironment;
+  /** The sessionId pool; owns pooled-session custody after each run. */
+  readonly sessions: SessionPool;
   /** Block while the owning ticket is paused; resolves early on abort. */
   readonly waitWhilePaused: (signal?: AbortSignal) => Promise<void>;
   /** Whether this run's work has been cancelled or its deadline fired. */
@@ -75,6 +78,24 @@ function usageOf(session: AgentSession): Usage {
       cacheRead: 0,
       cacheWrite: 0,
       total: stats.cost,
+    },
+  };
+}
+
+/** Per-run usage: getSessionStats() is cumulative for pooled sessions. */
+function diffUsage(after: Usage, before: Usage): Usage {
+  return {
+    input: after.input - before.input,
+    output: after.output - before.output,
+    cacheRead: after.cacheRead - before.cacheRead,
+    cacheWrite: after.cacheWrite - before.cacheWrite,
+    totalTokens: after.totalTokens - before.totalTokens,
+    cost: {
+      input: after.cost.input - before.cost.input,
+      output: after.cost.output - before.cost.output,
+      cacheRead: after.cost.cacheRead - before.cost.cacheRead,
+      cacheWrite: after.cost.cacheWrite - before.cost.cacheWrite,
+      total: after.cost.total - before.cost.total,
     },
   };
 }
@@ -167,6 +188,10 @@ export class TaskExecution implements ExecutionHandle {
   private disposed = false;
   private quarantined = false;
   private hadSideEffects = false;
+  /** The pooled session this run checked out, when the task reused one. */
+  private poolEntry: PooledSession | undefined;
+  /** True once session.prompt() was actually reached this run. */
+  private prompted = false;
   /** Resolves the moment cancellation is requested, however it arrives. */
   private readonly abortRequested = new Deferred();
   private readonly done: Promise<AttemptResult>;
@@ -176,7 +201,10 @@ export class TaskExecution implements ExecutionHandle {
     private readonly controls: RunControls,
     loader: DefaultResourceLoader,
   ) {
-    this.done = this.run(loader);
+    this.done = this.run(loader).then((outcome) => {
+      this.settleSession(outcome);
+      return outcome;
+    });
   }
 
   result(): Promise<AttemptResult> {
@@ -251,6 +279,32 @@ export class TaskExecution implements ExecutionHandle {
     }
   }
 
+  /**
+   * Session custody at run end. A sessionId task's session belongs to the
+   * pool: it decides keep/evict/dispose from the outcome (insert-on-success,
+   * evict after a prompted cancel or deadline, keep through ordinary
+   * failure and pre-prompt cancellation). Other sessions are disposed here
+   * unless quarantined.
+   */
+  private settleSession(outcome: AttemptResult): void {
+    const session = this.session;
+    if (this.task.sessionId === undefined || session === undefined) {
+      if (!this.quarantined) this.disposeSession();
+      return;
+    }
+    this.controls.sessions.settle({
+      entry: this.poolEntry,
+      task: this.task,
+      session,
+      outcome: {
+        status: outcome.status,
+        prompted: this.prompted,
+        deadline: this.abortReason === "deadline",
+        quarantined: this.quarantined,
+      },
+    });
+  }
+
   private async run(loader: DefaultResourceLoader): Promise<AttemptResult> {
     let session: AgentSession | undefined;
     const onAbort = () => void this.abort("cancelled");
@@ -259,16 +313,23 @@ export class TaskExecution implements ExecutionHandle {
       // An abort already delivered (or landing during session creation)
       // resolves caller settlement even if creation never returns.
       if (this.controls.signal.aborted) void this.abort("cancelled");
-      session = await createSubagentSession(this.task, this.controls.env, loader);
+      this.poolEntry = this.controls.sessions.checkout(this.task);
+      session =
+        this.poolEntry?.session ??
+        (await createSubagentSession(this.task, this.controls.env, loader));
       this.session = session;
       // A cancellation that landed during session creation found no session
-      // to abort; honor it now — the session must never be prompted.
+      // to abort; honor it now — the session must never be prompted. A
+      // checked-out pooled session is quiescent by definition: it is simply
+      // handed back, un-prompted.
       if (this.abortReason !== undefined || this.controls.isAborted()) {
-        try {
-          await session.abort();
-        } catch (error) {
-          this.quarantined = true;
-          log(`abort during setup of task ${this.task.id} failed`, error);
+        if (this.poolEntry === undefined) {
+          try {
+            await session.abort();
+          } catch (error) {
+            this.quarantined = true;
+            log(`abort during setup of task ${this.task.id} failed`, error);
+          }
         }
         if (this.abortReason === "deadline") {
           return {
@@ -287,7 +348,9 @@ export class TaskExecution implements ExecutionHandle {
 
       // Pause gate between model turns: when the ticket is paused, a turn
       // that produced tool calls parks before the next provider request. A
-      // naturally final turn (no tool results) never parks.
+      // naturally final turn (no tool results) never parks. The hook is
+      // restored when the run ends so a pooled session is reusable under a
+      // later call's controls.
       const child = session;
       const agent = child.agent;
       const previous = agent.prepareNextTurnWithContext;
@@ -317,17 +380,20 @@ export class TaskExecution implements ExecutionHandle {
         }
       });
 
+      const usageBefore = usageOf(session);
       try {
+        this.prompted = true;
         await session.prompt(this.task.prompt, {
           expandPromptTemplates: false,
         });
         await session.waitForIdle();
       } finally {
         unsubscribe();
+        agent.prepareNextTurnWithContext = previous;
       }
 
       const { text, stopReason, errorMessage } = lastAssistantText(session);
-      const usage = usageOf(session);
+      const usage = diffUsage(usageOf(session), usageBefore);
       if (this.abortReason === "deadline") {
         return {
           status: "failed",
@@ -392,8 +458,6 @@ export class TaskExecution implements ExecutionHandle {
     } finally {
       this.controls.signal.removeEventListener("abort", onAbort);
       this.finished = true;
-      // A quarantined session may still be mutating; leave it undisposed.
-      if (!this.quarantined) this.disposeSession();
     }
   }
 }
