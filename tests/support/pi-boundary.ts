@@ -43,19 +43,38 @@ export async function callDelegate(
   session: TestSession,
   arguments_: Record<string, unknown>,
 ): Promise<ToolResultRecord> {
+  return callDelegateDetached(session, arguments_);
+}
+
+/**
+ * Fire a delegate call without awaiting it inline: the returned promise
+ * resolves with the tool result once the surrounding `session.run` settles.
+ * This lets a test interrupt the in-flight call through the raw session —
+ * e.g. `(session.session as AgentSession).abort()` — which the harness's
+ * awaited `run` API cannot express.
+ */
+export function callDelegateDetached(
+  session: TestSession,
+  arguments_: Record<string, unknown>,
+): Promise<ToolResultRecord> {
   const previousResults = session.events.toolResultsFor("delegate").length;
   callSequence += 1;
 
-  await session.run(
-    when(`delegate contract call ${callSequence}`, [
-      calls("delegate", arguments_),
-      says("done"),
-    ]),
-  );
-
-  const result = session.events.toolResultsFor("delegate")[previousResults];
-  if (!result) throw new Error("delegate call produced no tool result");
-  return result;
+  return session
+    .run(
+      when(`delegate contract call ${callSequence}`, [
+        calls("delegate", arguments_),
+        says("done"),
+      ]),
+    )
+    .then(() => {
+      const result =
+        session.events.toolResultsFor("delegate")[previousResults];
+      if (!result) {
+        throw new Error("delegate call produced no tool result");
+      }
+      return result;
+    });
 }
 
 export function objectOf(

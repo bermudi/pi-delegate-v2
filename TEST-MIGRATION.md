@@ -22,6 +22,10 @@ copy its fixtures, mocks, call graph, or intermediate assertions.
   meaningfully** against the scaffold's not-implemented boundary. Promote a
   pending test to `test` when its subsystem lands — or earlier, if its
   assertions already hold (two were promoted in the second tranche).
+- `callDelegateDetached` (`tests/support/pi-boundary.ts`) fires a delegate
+  call without awaiting it inline, so a test can interrupt the in-flight
+  call through the raw `AgentSession` the harness exposes
+  (`session.session.abort()`) — the awaited `run` API cannot express this.
 - `installSubagentModel` (`tests/support/pi-boundary.ts`) registers pi-ai's
   built-in `faux` provider on the test session's `modelRuntime`, giving tasks
   a provider-free model selectable through the public `model` task field.
@@ -74,10 +78,11 @@ gaps.
 - **Internal:** `formatCompletedTask`/`formatFailedTask` rendering, header
   markers, `fmt*`/`trunc*` helpers, touched-file extraction helpers.
 - **Covered now:** ordered results; sibling failure isolation; task-id echo;
-  aggregate usage on the tool result.
-- **Gap:** parent-abort of a sync call (harness cannot yet interrupt an
-  in-flight tool call); deadline/stall outcomes visible in result text;
-  overlap warnings on results.
+  aggregate usage on the tool result; parent-abort of an in-flight sync call
+  settles as a structured cancellation (asserted in the cancellation
+  regression suite via `callDelegateDetached` + raw-session `abort()`).
+- **Gap:** deadline/stall outcomes visible in result text; overlap warnings
+  on results.
 
 ### Multi-task / concurrent dispatch
 
@@ -133,8 +138,12 @@ gaps.
   deadline fires against a non-cooperative worker, conflicting work
   rejects while the quarantined worker may still mutate, and the
   reservation releases only after quiescence is actually confirmed.
-- **Gap:** parent-abort and stall causes (need in-flight abort and
-  wall-clock control at the boundary); a worker whose abort is delivered
+  Parent-abort of an in-flight sync call settles with the `cancelled` cause
+  (which outranks the task's unfired deadline) while the gated worker is
+  still held — proven by driving `session.session.abort()` on the raw
+  AgentSession mid-call.
+- **Gap:** the stall cause (needs wall-clock control at the boundary);
+  a worker whose abort is delivered
   but then completes "ok" anyway (the faux provider always honors a
   tripped signal once its gate releases, so the boundary cannot produce a
   late success — the abortReason guard is what keeps it cancelled);

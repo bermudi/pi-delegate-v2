@@ -16,8 +16,10 @@ import {
   fauxToolCall,
   type FauxResponseFactory,
 } from "@earendil-works/pi-ai";
+import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import {
   callDelegate,
+  callDelegateDetached,
   installSubagentModel,
   openDelegateBoundary,
   ticketIdOf,
@@ -265,6 +267,71 @@ test(
 
     // Releasing the gate lets the worker wind down; only then does the
     // reservation release. The poll round-trip drains its microtasks first.
+    release();
+    const admitted = await callDelegate(session, {
+      tasks: [{ prompt: "after", model: subagents.spec, tools: ["write"] }],
+    });
+    expect(admitted.isError).toBe(false);
+    expect(admitted.text).toContain("AFTER-QUARANTINE");
+  },
+);
+
+test(
+  "a parent abort during an in-flight sync dispatch settles as a cancellation, not a deadline or a hang",
+  async () => {
+    // v1 evidence: caller-abort regressions — the parent's abort reaches the
+    // tool through its execute signal and must settle with the parent-abort
+    // cause, which outranks deadline and stall.
+    //
+    // The harness's awaited run() cannot express an interruption, but it
+    // exposes the raw AgentSession: fire the call detached and abort() the
+    // session once the subagent's provider call is demonstrably in flight.
+    session = await openDelegateBoundary();
+    const subagents = await installSubagentModel(session);
+
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const gated: FauxResponseFactory = async () => {
+      await gate;
+      return fauxAssistantMessage("TOO-LATE");
+    };
+    subagents.respond([gated, fauxAssistantMessage("AFTER-QUARANTINE")]);
+
+    const pending = callDelegateDetached(session, {
+      tasks: [
+        {
+          prompt: "hang",
+          model: subagents.spec,
+          tools: ["write"],
+          deadlineMs: 60_000,
+        },
+      ],
+    });
+
+    const deadline = Date.now() + 5000;
+    while (subagents.state.callCount === 0 && Date.now() < deadline) {
+      await new Promise((r) => setImmediate(r));
+    }
+    expect(subagents.state.callCount).toBe(1);
+
+    await (session.session as AgentSession).abort();
+
+    const result = await pending;
+    // The abort outranks the (unfired) deadline: a structured cancellation,
+    // never the deadline path, and settlement did not wait on the still-
+    // gated worker.
+    expect(result.text).toMatch(/cancel/i);
+    expect(result.text).not.toMatch(/deadline/i);
+    expect(subagents.state.callCount).toBe(1);
+
+    // The worker's termination is still unconfirmed: its scope stays
+    // reserved until the gate releases and quiescence is proven.
+    const rejected = await callDelegate(session, {
+      tasks: [{ prompt: "conflict", model: subagents.spec, tools: ["write"] }],
+    });
+    expect(rejected.isError).toBe(true);
+    expect(rejected.text).toMatch(/conflict|running|overlap|active/i);
+
     release();
     const admitted = await callDelegate(session, {
       tasks: [{ prompt: "after", model: subagents.spec, tools: ["write"] }],
