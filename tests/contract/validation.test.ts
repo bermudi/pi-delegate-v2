@@ -4,7 +4,6 @@ import {
   callDelegate,
   openDelegateBoundary,
 } from "../support/pi-boundary.ts";
-import { pendingTest } from "../support/pending.ts";
 
 describe("delegate validation contract", () => {
   let session: TestSession | undefined;
@@ -66,7 +65,7 @@ describe("delegate validation contract", () => {
 
   // ── Semantic validation (pending: scaffold has no semantic pass yet) ─────
 
-  pendingTest(
+  test(
     "rejects duplicate task ids with an actionable error before any task starts",
     async () => {
       // v1 evidence: schema.test.ts task id validation; SPEC batch-before-start.
@@ -83,7 +82,7 @@ describe("delegate validation contract", () => {
     },
   );
 
-  pendingTest(
+  test(
     "rejects duplicate session ids in one batch before any task starts",
     async () => {
       // v1 evidence: task-resolution validateTasks duplicate-session checks.
@@ -100,7 +99,7 @@ describe("delegate validation contract", () => {
     },
   );
 
-  pendingTest("rejects non-positive deadlines with an actionable error", async () => {
+  test("rejects non-positive deadlines with an actionable error", async () => {
     // v1 evidence: schema.test.ts "rejects non-positive deadlineMs".
     session = await openDelegateBoundary();
     for (const deadlineMs of [0, -50]) {
@@ -113,7 +112,7 @@ describe("delegate validation contract", () => {
     }
   });
 
-  pendingTest(
+  test(
     "rejects one-shot workspaces combined with session persistence or resume",
     async () => {
       // v1 evidence: schema.test.ts "rejects scratch workspace with persistent
@@ -135,20 +134,23 @@ describe("delegate validation contract", () => {
     },
   );
 
-  pendingTest(
+  test(
     "rejects mixed-mode calls with an error naming the conflict",
     async () => {
       // v1 evidence: schema.test.ts mode matrix (ticket control combined with
       // tasks/sessionId/prompt; session precedence over tasks). SPEC: mixing
       // fields from different modes is an error before any task starts.
-      session = await openDelegateBoundary();
       for (const arguments_ of [
         { ticketAction: "poll", tasks: [{ prompt: "x" }] },
         { ticketAction: "wait", ticket: "t1", sessionId: "s1" },
         { sessionAction: "list", tasks: [{ prompt: "x" }] },
         { sessionAction: "close", sessionId: "s1", prompt: "x" },
       ]) {
-        const result = await callDelegate(session, arguments_);
+        // Fresh session per case: a schema-level rejection never runs
+        // tool.execute, and the harness dedupes the synthesized
+        // tool_execution_end record by a playbook toolCallId that repeats
+        // across runs on the same session.
+        const result = await call(arguments_);
         expect(result.isError).toBe(true);
         expect(result.text).not.toContain("not implemented");
         expect(result.text).not.toContain("Delegate Tool Manual");
@@ -172,7 +174,7 @@ describe("delegate validation contract", () => {
     },
   );
 
-  pendingTest("rejects a task with no prompt and no resume intent", async () => {
+  test("rejects a task with no prompt and no resume intent", async () => {
     // v1 evidence: lifecycle.test.ts "task without prompt (and not
     // close/list/resume) throws". SPEC: prompt is optional only with resumeFrom.
     session = await openDelegateBoundary();
@@ -184,7 +186,7 @@ describe("delegate validation contract", () => {
     expect(result.text).not.toContain("dispatch is not implemented");
   });
 
-  pendingTest(
+  test(
     "rejects an unknown agent with guidance toward valid profiles",
     async () => {
       // v1 evidence: delegate.test.ts "execute rejects unknown agents and
@@ -200,7 +202,7 @@ describe("delegate validation contract", () => {
     },
   );
 
-  pendingTest(
+  test(
     "ticket and session controls report which field they require",
     async () => {
       // v1 evidence: delegate.test.ts "cancel requires ticket ID",

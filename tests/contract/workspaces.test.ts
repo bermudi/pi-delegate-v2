@@ -1,4 +1,4 @@
-import { afterEach, describe, expect } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import {
   existsSync,
   mkdtempSync,
@@ -48,7 +48,7 @@ describe("delegate workspace and shared-write contract", () => {
     }
   });
 
-  pendingTest(
+  test(
     "overlapping shared writers in one call serialize in task order",
     async () => {
       // v1 evidence: dispatch.test.ts "serialized successor still runs after a
@@ -90,7 +90,7 @@ describe("delegate workspace and shared-write contract", () => {
     },
   );
 
-  pendingTest(
+  test(
     "a writer overlapping a still-running async ticket rejects the whole call",
     async () => {
       // v1 evidence: dispatch.test.ts "rejects a writer that overlaps a
@@ -131,7 +131,7 @@ describe("delegate workspace and shared-write contract", () => {
     },
   );
 
-  pendingTest(
+  test(
     "shared and isolated work overlapping in one call rejects before execution",
     async () => {
       // v1 evidence: dispatch.test.ts "mixed isolated and shared same-call

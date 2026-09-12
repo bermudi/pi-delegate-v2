@@ -1,4 +1,4 @@
-import { afterEach, describe, expect } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import type { TestSession } from "@marcfargas/pi-test-harness";
 import {
   fauxAssistantMessage,
@@ -126,7 +126,7 @@ describe("delegate session contract", () => {
     },
   );
 
-  pendingTest(
+  test(
     "resumeFrom with a nonexistent transcript fails with an actionable error",
     async () => {
       // v1 evidence: lifecycle.test.ts "resumeFrom with nonexistent file
@@ -148,7 +148,7 @@ describe("delegate session contract", () => {
     },
   );
 
-  pendingTest(
+  test(
     "a sessionId held by a running ticket rejects conflicting reuse",
     async () => {
       // v1 evidence: delegate.test.ts isSessionBusy tests (cancelling tickets

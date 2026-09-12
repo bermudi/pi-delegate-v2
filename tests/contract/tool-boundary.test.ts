@@ -137,17 +137,19 @@ describe("delegate public tool contract", () => {
   });
 
   test("does not misclassify selected ticket or session operations as help", async () => {
-    for (const arguments_ of [
-      { ticketAction: "poll" },
-      { sessionAction: "list" },
-    ]) {
-      session?.dispose();
-      session = await openDelegateBoundary();
-      const result = await callDelegate(session, arguments_);
+    // Ticket operations are implemented: a bare poll answers with the empty
+    // roster rather than the manual or an error.
+    session = await openDelegateBoundary();
+    const polled = await callDelegate(session, { ticketAction: "poll" });
+    expect(polled.isError).toBe(false);
+    expect(polled.text).not.toContain("Delegate Tool Manual");
 
-      expect(result.isError).toBe(true);
-      expect(result.text).toContain("not implemented");
-      expect(result.text).not.toContain("Delegate Tool Manual");
-    }
+    // Session operations remain unimplemented: loud failure, not help.
+    session?.dispose();
+    session = await openDelegateBoundary();
+    const listed = await callDelegate(session, { sessionAction: "list" });
+    expect(listed.isError).toBe(true);
+    expect(listed.text).toContain("not implemented");
+    expect(listed.text).not.toContain("Delegate Tool Manual");
   });
 });

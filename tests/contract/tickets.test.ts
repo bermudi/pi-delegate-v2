@@ -1,4 +1,4 @@
-import { afterEach, describe, expect } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import type { TestSession } from "@marcfargas/pi-test-harness";
 import {
   fauxAssistantMessage,
@@ -10,7 +10,6 @@ import {
   openDelegateBoundary,
   ticketIdOf,
 } from "../support/pi-boundary.ts";
-import { pendingTest } from "../support/pending.ts";
 
 /** A scripted subagent stream that blocks until `release` is invoked. */
 function gate() {
@@ -31,7 +30,7 @@ describe("delegate ticket contract", () => {
     session = undefined;
   });
 
-  pendingTest("poll with no tickets reports an empty roster", async () => {
+  test("poll with no tickets reports an empty roster", async () => {
     // v1 evidence: delegate.test.ts "poll with no tickets returns empty
     // message" and "includes a discovery hint".
     session = await openDelegateBoundary();
@@ -41,7 +40,7 @@ describe("delegate ticket contract", () => {
     expect(result.text).toMatch(/no|none|empty/i);
   });
 
-  pendingTest(
+  test(
     "poll, wait, cancel, pause, and resume report unknown tickets as not found",
     async () => {
       // v1 evidence: delegate.test.ts "poll with unknown ticket returns not
@@ -63,7 +62,7 @@ describe("delegate ticket contract", () => {
     },
   );
 
-  pendingTest(
+  test(
     "wait returns the settled result and the ticket stays pollable",
     async () => {
       // v1 evidence: delegate.test.ts "wait resolves when ticket completes",
@@ -100,7 +99,7 @@ describe("delegate ticket contract", () => {
     },
   );
 
-  pendingTest(
+  test(
     "a wait timeout detaches the waiter without cancelling background work",
     async () => {
       // v1 evidence: delegate.test.ts "wait timeout returns running status and
@@ -136,7 +135,7 @@ describe("delegate ticket contract", () => {
     },
   );
 
-  pendingTest(
+  test(
     "cancel without force previews and leaves the ticket running",
     async () => {
       // v1 evidence: delegate.test.ts "cancel without force returns a
@@ -169,7 +168,7 @@ describe("delegate ticket contract", () => {
     },
   );
 
-  pendingTest(
+  test(
     "forced cancellation settles the ticket and retains completed results",
     async () => {
       // v1 evidence: delegate.test.ts "cancel with force aborts a running
@@ -210,7 +209,7 @@ describe("delegate ticket contract", () => {
     },
   );
 
-  pendingTest(
+  test(
     "pause holds queued work, resume continues the same ticket",
     async () => {
       // v1 evidence: pause.test.ts "queued work parks without becoming active

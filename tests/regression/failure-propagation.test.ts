@@ -9,7 +9,6 @@ import {
   installSubagentModel,
   openDelegateBoundary,
 } from "../support/pi-boundary.ts";
-import { pendingTest } from "../support/pending.ts";
 
 describe("regression: failure propagation and retries", () => {
   let session: TestSession | undefined;
@@ -19,7 +18,7 @@ describe("regression: failure propagation and retries", () => {
     session = undefined;
   });
 
-  pendingTest(
+  test(
     "a transient subagent failure retries the task and reports success",
     async () => {
       // v1 evidence: lifecycle.test.ts "transient error → retry → success" and
@@ -43,7 +42,7 @@ describe("regression: failure propagation and retries", () => {
     },
   );
 
-  pendingTest(
+  test(
     "a model-attributable failure does not retry on the same model and suggests a model swap",
     async () => {
       // v1 evidence: lifecycle.test.ts "model-attributable error (usage limit)
@@ -69,7 +68,7 @@ describe("regression: failure propagation and retries", () => {
     },
   );
 
-  pendingTest(
+  test(
     "a serialized shared writer still runs after its predecessor fails",
     async () => {
       // v1 evidence: dispatch.test.ts "serialized successor still runs after

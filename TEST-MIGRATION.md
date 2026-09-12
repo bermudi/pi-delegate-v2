@@ -56,11 +56,11 @@ gaps.
 - **Covered now:** help for omitted/empty tasks; orphaned-field rejection;
   enum rejection; task-level control-field rejection; task-id charset;
   stringified/flat/tools recovery; ticket/session intent never folded into
-  tasks; flat fields never merged into an explicit task array.
-- **Pending:** duplicate task/session ids; non-positive `deadlineMs`;
-  scratch/isolated + `sessionId`/`resumeFrom`; mixed-mode conflict wording;
-  prompt-less task without resume; unknown agent guidance; required-field
-  messages for ticket/session RPC.
+  tasks; flat fields never merged into an explicit task array; duplicate
+  task/session ids; non-positive `deadlineMs`; scratch/isolated +
+  `sessionId`/`resumeFrom`; mixed-mode conflict errors; prompt-less task
+  without resume; unknown agent guidance; required-field messages for
+  ticket/session RPC.
 - **Gap:** model-reference resolution errors (unknown/unauthenticated model)
   and corrective-hint wording depth are unasserted.
 
@@ -73,8 +73,8 @@ gaps.
   alignment; partial output/usage/touched files preserved on failure.
 - **Internal:** `formatCompletedTask`/`formatFailedTask` rendering, header
   markers, `fmt*`/`trunc*` helpers, touched-file extraction helpers.
-- **Pending (migrated):** ordered results; sibling failure isolation; task-id
-  echo; aggregate usage on the tool result.
+- **Covered now:** ordered results; sibling failure isolation; task-id echo;
+  aggregate usage on the tool result.
 - **Gap:** parent-abort of a sync call (harness cannot yet interrupt an
   in-flight tool call); deadline/stall outcomes visible in result text;
   overlap warnings on results.
@@ -87,8 +87,9 @@ gaps.
   gated successor waits without holding a global slot.
 - **Internal:** `mapConcurrent*` helpers; `reconfigureGlobalConcurrency`
   mechanics.
-- **Pending (migrated):** configured bound limits simultaneous subagent work
-  (measured through the faux provider's live call tracking).
+- **Covered now:** configured bound (`delegate.json` `maxConcurrent`) limits
+  simultaneous subagent work (measured through the faux provider's live call
+  tracking).
 - **Gap:** per-model/per-provider limits; abort-of-queued behavior; dynamic
   limit changes.
 
@@ -102,8 +103,8 @@ gaps.
   timeout/abort detaches only that waiter; delivery failure never unsettles.
 - **Internal:** ticket id generation, TTL sweeping, roster/format string
   composition, busy-index internals, waiter plumbing.
-- **Pending (migrated):** empty roster; unknown-ticket handling for all
-  actions; wait-to-settlement; timeout detach; cancel preview vs force;
+- **Covered now:** empty roster; unknown-ticket handling for all actions;
+  wait-to-settlement; timeout detach; cancel preview vs force;
   cancelled-ticket retains completed results; pause/resume.
 - **Gap:** leaf-aware delivery after session-tree navigation (needs
   harness-level session-tree control); delivered-result suppression when a
@@ -120,7 +121,7 @@ gaps.
   cancellation (not provider-error text); completed writes survive.
 - **Internal:** quiescence-barrier internals, unwind budgets, settle-path
   plumbing.
-- **Pending (migrated):** cancel preview/force and retained results.
+- **Covered now:** cancel preview/force and retained results.
 - **Gap:** parent-abort and deadline/stall causes (need in-flight abort and
   wall-clock control at the boundary); quarantine visibility after unsafe
   cancellation.
@@ -134,8 +135,10 @@ gaps.
   inactivity while wall-clock deadlines still apply.
 - **Internal:** checkpoint machinery, `Agent.subscribe` gating, parked
   listener bookkeeping.
-- **Pending (migrated):** pause holds queued work; paused ticket remains
-  running; resume continues to settlement.
+- **Covered now:** pause holds queued work; paused ticket remains running;
+  resume continues to settlement. v2 gates queued tasks before slot
+  acquisition and parks between-turn continuations via the core
+  `prepareNextTurnWithContext` hook.
 - **Gap:** mid-turn pause semantics (current turn finishes); deadline-during-
   pause; pause unavailability on terminal tickets.
 
@@ -152,8 +155,10 @@ gaps.
   usage; late materialization after cancellation is never prompted or pooled.
 - **Internal:** pool map/locks, config cloning, quarantine registry, session
   file bookkeeping.
+- **Covered now:** missing-transcript `resumeFrom` error; a `sessionId` held
+  by a running ticket rejects conflicting reuse.
 - **Pending (migrated):** pool + list + continuation; close then fresh;
-  frozen-config rejection; missing-transcript error; busy-ticket conflict.
+  frozen-config rejection.
 - **Gap:** eviction after cancelled/stalled/deadline-exceeded runs;
   `resumeFrom` happy path (needs a real `.jsonl` transcript fixture);
   shutdown cleanup; usage recorded for ordinary failures on pooled sessions.
@@ -172,9 +177,8 @@ gaps.
   a predecessor failure does not block a serialized successor.
 - **Internal:** `findSharedWriteConflicts` grouping internals, canonical-path
   helpers.
-- **Pending (migrated):** same-call writer serialization order; cross-call
-  rejection against a running ticket (including no-work-started); shared +
-  isolated same-call rejection.
+- **Covered now:** same-call writer serialization order; cross-call
+  rejection against a running ticket; shared + isolated same-call rejection.
 - **Gap:** read-only + writer parallelism allowed; unknown-but-real tools
   treated as mutating; operator bypass warning surfaces; scratch suggestion
   in rejection prose.
@@ -222,9 +226,9 @@ gaps.
   the model-swap hint.
 - **Internal:** `isModelAttributableError`, retry-gating internals, backoff
   timing.
-- **Pending (migrated):** transient retry to success; model-attributable
-  no-retry + model hint; serialized successor after predecessor failure;
-  batch validation starts nothing.
+- **Covered now:** transient retry to success; model-attributable no-retry +
+  model hint; serialized successor after predecessor failure; batch
+  validation starts nothing.
 - **Gap:** retry-count visibility in results; stall/deadline structured
   outcomes vs retries.
 
@@ -236,7 +240,7 @@ gaps.
   meaningful.
 - **Internal:** SQLite layout, sweep cadence, record-once mechanics — all
   free to change; only privacy and outcome-meaning are contract.
-- **Pending (migrated):** aggregate usage present on the sync tool result.
+- **Covered now:** aggregate usage present on the sync tool result.
 - **Gap:** async-no-usage property; the privacy property is only assertable
   once v2 chooses its telemetry surface; TUI/status rendering is
   intentionally out of scope for boundary tests.
@@ -267,6 +271,48 @@ gaps.
 | `dispatch.test.ts`/`shared-write-safety.test.ts`/`workspace.test.ts`/`isolated-workspace.test.ts`: writer serialization, cross-call rejection, shared/isolated rejection, scratch discard, ordered apply, conflict retention | Contract + Regression | Pending tests in `tests/contract/workspaces.test.ts` |
 | `lifecycle.test.ts` retry matrix and `dispatch.test.ts` serialized-successor | Regression | Pending tests in `tests/regression/failure-propagation.test.ts` |
 | All helper/private-state/rendering/internals tests (see per-subsystem "Internal" rows) | Internal | Not ported |
+
+## Third tranche (foundational execution/lifecycle implementation)
+
+The scaffold boundary was replaced by a real implementation under `src/`:
+`validation.ts` (mode/semantic checks), `host.ts` (task resolution +
+subagent `AgentSession` construction through the parent's `ModelRuntime`),
+`admission.ts` (workspace/session reservations), `coordinator.ts`
+(scheduling, bounded concurrency, index-aligned outcomes), `execution.ts`
+(one `AgentSession` per attempt, cooperative abort), `tickets.ts` (guarded
+ticket lifecycle + RPCs), `retry.ts` (retry classification), `config.ts`
+(`delegate.json`), `profiles.ts` (built-in agent profiles).
+
+Semantic decisions recorded during implementation:
+
+- Ticket terminal status: all-ok → `completed`; all-failed → `failed`;
+  mixed → `completed` with per-task statuses retained. A forced
+  `cancelled` is authoritative immediately; late worker outcomes are
+  recorded for visibility but can never change the status.
+- Whole-task retry is bounded (max 2 attempts), applies only to clearly
+  transient errors, and never replays a task that produced side effects or
+  owns a `sessionId`/`resumeFrom`.
+- Pause parks queued tasks before slot acquisition and parks in-flight
+  tasks between model turns via `prepareNextTurnWithContext`; a paused
+  ticket keeps its reservations.
+- `wait` timeout or caller abort detaches only that waiter.
+- Subagent sessions are extension-free, in-memory-transcript, and stream
+  through the parent `ModelRuntime` (reached via `modelRegistry.runtime`,
+  a private-field seam that fails loudly if upstream changes it).
+- Known harness quirk: a schema-level rejection never calls
+  `tool.execute`, so the synthesized `tool_execution_end` record is the
+  only result evidence — and the harness dedupes it by a playbook
+  `toolCallId` that repeats across `session.run` calls on one session.
+  Tests asserting a schema rejection therefore need a fresh session per
+  malformed call.
+
+Promoted to live tests: all of `dispatch.test.ts` (6), `tickets.test.ts`
+(7), `validation.test.ts` semantic tests (8), `failure-propagation.test.ts`
+(3 pending), the first three `workspaces.test.ts` admission cases, and the
+`resumeFrom` + busy-ticket cases in `sessions.test.ts`.
+
+Still pending (later tranches): session pooling/close/frozen config;
+scratch discard; isolated apply and conflict retention.
 
 ## Next contract slices
 

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { TestSession } from "@marcfargas/pi-test-harness";
@@ -12,7 +12,6 @@ import {
   openDelegateBoundary,
   ticketIdOf,
 } from "../support/pi-boundary.ts";
-import { pendingTest } from "../support/pending.ts";
 
 describe("delegate dispatch contract", () => {
   let session: TestSession | undefined;
@@ -22,7 +21,7 @@ describe("delegate dispatch contract", () => {
     session = undefined;
   });
 
-  pendingTest(
+  test(
     "synchronous dispatch returns per-task results in task input order",
     async () => {
       // v1 evidence: lifecycle.test.ts "multiple fresh tasks run in parallel
@@ -49,7 +48,7 @@ describe("delegate dispatch contract", () => {
     },
   );
 
-  pendingTest(
+  test(
     "a failed task reports its own failure without failing its siblings",
     async () => {
       // v1 evidence: delegate.test.ts resolveFinalTicketStatus matrix;
@@ -78,7 +77,7 @@ describe("delegate dispatch contract", () => {
     },
   );
 
-  pendingTest(
+  test(
     "caller-provided task ids appear on results for correlation",
     async () => {
       // v1 evidence: dispatch.test.ts "carries caller-provided task id onto
@@ -97,7 +96,7 @@ describe("delegate dispatch contract", () => {
     },
   );
 
-  pendingTest(
+  test(
     "synchronous results carry aggregate usage when the host supports it",
     async () => {
       // v1 evidence: usage.test.ts nested usage accounting; SPEC: synchronous
@@ -125,7 +124,7 @@ describe("delegate dispatch contract", () => {
     },
   );
 
-  pendingTest(
+  test(
     "async dispatch returns a ticket and the batch completes in background",
     async () => {
       // v1 evidence: delegate.test.ts async delegate integration; SPEC:
@@ -151,7 +150,7 @@ describe("delegate dispatch contract", () => {
     },
   );
 
-  pendingTest(
+  test(
     "the configured concurrency bound limits simultaneous subagent work",
     async () => {
       // v1 evidence: concurrency.test.ts mapConcurrentByModel bound tests.
