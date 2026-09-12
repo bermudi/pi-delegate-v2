@@ -1,10 +1,25 @@
-import { Type, type SchemaOptions, type Static } from "@sinclair/typebox";
-import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import {
+  Type,
+  type SchemaOptions,
+  type Static,
+  type TUnsafe,
+} from "@sinclair/typebox";
+import {
+  defineTool,
+  type ExtensionAPI,
+} from "@earendil-works/pi-coding-agent";
+import { AdmissionController } from "./src/admission.ts";
+import { loadDelegateConfig } from "./src/config.ts";
+import { DispatchCoordinator } from "./src/coordinator.ts";
+import { formatDispatchResult } from "./src/format.ts";
+import { hostEnvironment, resolveTasks } from "./src/host.ts";
+import { handleTicketRpc, TicketStore } from "./src/tickets.ts";
+import { validateCall } from "./src/validation.ts";
 
 function stringEnum<const Values extends readonly string[]>(
   values: Values,
   options: SchemaOptions,
-) {
+): TUnsafe<Values[number]> {
   return Type.Unsafe<Values[number]>({
     ...options,
     type: "string",
@@ -105,9 +120,7 @@ const argumentsSchema = Type.Object(
 );
 
 type DelegateArguments = Static<typeof argumentsSchema>;
-type DelegateDetails = {
-  readonly mode: "help";
-};
+type DelegateDetails = Record<string, unknown>;
 
 const taskFieldNames = [
   "id",
@@ -190,54 +203,138 @@ const help = `# Delegate Tool Manual
 
 Delegate runs subagent tasks synchronously or as an asynchronous ticket.
 
-- Pass a non-empty \`tasks\` array to dispatch work.
-- Omit \`tasks\`, or pass \`tasks: []\`, to show this help.
-- Use top-level \`ticketAction\` for ticket operations.
-- Use top-level \`sessionAction\` for reusable-session operations.
+## Dispatch
+- Pass a non-empty \`tasks\` array to dispatch work. Sync calls return every
+  task's result in input order; \`async: true\` returns a ticket immediately
+  and runs the batch in the background.
+- Task fields: \`prompt\` (required unless \`resumeFrom\`), \`id\` (correlation
+  key), \`agent\` (named profile), \`cwd\`, \`systemPrompt\`, \`context\`,
+  \`model\`, \`tools\` (\`*\`/\`ro\` groups or names), \`thinking\`,
+  \`deadlineMs\`, \`sessionId\`, \`resumeFrom\`, \`workspace\`
+  (shared/scratch/isolated).
+
+## Tickets
+- \`ticketAction: "poll"\` — status of one \`ticket\`, or all tickets when the
+  field is omitted. Never blocks.
+- \`ticketAction: "wait"\` — block until the ticket settles; \`timeoutMs\`
+  detaches only the waiter, the work continues.
+- \`ticketAction: "cancel"\` — previews without \`force\`; with \`force: true\`
+  the ticket is cancelled now and in-flight tasks are asked to stop
+  (cooperative; no rollback).
+- \`ticketAction: "pause"\` / \`"resume"\` — hold and release queued work; a
+  paused ticket stays live and keeps its reservations.
+
+## Sessions
+- \`sessionAction: "list"\` lists named sessions; \`sessionAction: "close"\`
+  with \`sessionId\` closes one.
 `;
 
-const delegateTool = defineTool<typeof argumentsSchema, DelegateDetails>({
-  name: "delegate",
-  label: "Delegate to Subagents",
-  description:
-    "Run subagent tasks. Sync returns results; async returns a ticket; tasks:[] shows help.",
-  parameters: argumentsSchema,
-  prepareArguments,
+export default function delegateExtension(api: ExtensionAPI): void {
+  const tickets = new TicketStore();
+  const admission = new AdmissionController();
+  const coordinator = new DispatchCoordinator(tickets);
+  let callSeq = 0;
 
-  async execute(_toolCallId, params) {
-    if (params.ticketAction) {
-      throw new Error("Delegate v2 ticket operations are not implemented yet.");
-    }
-    if (params.sessionAction) {
-      throw new Error(
-        "Delegate v2 session operations are not implemented yet.",
-      );
-    }
-    if (params.ticket !== undefined) {
-      throw new Error(
-        "ticket requires ticketAction poll, cancel, wait, pause, or resume.",
-      );
-    }
-    if (params.force === true) {
-      throw new Error("force is valid only with ticketAction cancel.");
-    }
-    if (params.timeoutMs !== undefined) {
-      throw new Error("timeoutMs is valid only with ticketAction wait.");
-    }
-    if (!params.tasks || params.tasks.length === 0) {
-      if (params.async === true) {
-        throw new Error("async dispatch requires at least one task.");
-      }
-      return {
-        content: [{ type: "text" as const, text: help }],
-        details: { mode: "help" as const },
-      };
-    }
+  api.registerTool(
+    defineTool<typeof argumentsSchema, DelegateDetails>({
+      name: "delegate",
+      label: "Delegate to Subagents",
+      description:
+        "Run subagent tasks. Sync returns results; async returns a ticket; tasks:[] shows help.",
+      parameters: argumentsSchema,
+      prepareArguments,
 
-    throw new Error("Delegate v2 dispatch is not implemented yet.");
-  },
-});
+      async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+        // pi's ToolDefinition types params via the `typebox` v1 package while
+        // this schema is built with @sinclair/typebox 0.34; the v1 Static
+        // resolves Unsafe enum fields to unknown, so re-assert our own Static.
+        const call = validateCall(params as DelegateArguments);
+        if (call.mode === "help") {
+          return {
+            content: [{ type: "text" as const, text: help }],
+            details: { mode: "help" as const },
+          };
+        }
+        if (call.mode === "ticket") {
+          const result = await handleTicketRpc(call, tickets, signal);
+          return {
+            content: [{ type: "text" as const, text: result.text }],
+            details: { mode: "ticket" as const, action: call.action },
+            isError: result.isError,
+          };
+        }
+        if (call.mode === "session") {
+          throw new Error(
+            `Delegate v2 session operations are not implemented yet (sessionAction "${call.action}").`,
+          );
+        }
 
-export default function delegateExtension(pi: ExtensionAPI): void {
-  pi.registerTool(delegateTool);
+        const env = hostEnvironment(ctx, () => api.getActiveTools());
+        const config = loadDelegateConfig(ctx);
+        const tasks = resolveTasks(call.tasks, env);
+
+        if (call.async) {
+          const ticket = tickets.create(tasks);
+          try {
+            const grant = admission.admit(tasks, ticket.id);
+            void coordinator
+              .run(tasks, { env, config, grant, ticket })
+              .then(() => undefined)
+              .catch((error: unknown) => {
+                tickets.settle(ticket, "failed");
+                console.error(
+                  `[delegate] background ticket ${ticket.id} crashed: ${error instanceof Error ? error.message : String(error)}`,
+                );
+              });
+          } catch (error) {
+            tickets.remove(ticket.id);
+            throw error;
+          }
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text:
+                  `Ticket "${ticket.id}" created: ${tasks.length} task(s) running in the background.\n` +
+                  `Check progress with delegate({ ticketAction: "poll", ticket: "${ticket.id}" }).`,
+              },
+            ],
+            details: {
+              mode: "dispatch" as const,
+              async: true,
+              ticket: ticket.id,
+              tasks: tasks.map((task) => task.id),
+            },
+          };
+        }
+
+        callSeq += 1;
+        const grant = admission.admit(tasks, `call-${callSeq}`);
+        const result = await coordinator.run(tasks, {
+          env,
+          config,
+          grant,
+          signal,
+        });
+        const allFailed = result.outcomes.every(
+          (outcome) => outcome.status !== "ok",
+        );
+        return {
+          content: [
+            { type: "text" as const, text: formatDispatchResult(result.outcomes) },
+          ],
+          details: {
+            mode: "dispatch" as const,
+            async: false,
+            tasks: result.outcomes.map((outcome) => ({
+              id: outcome.id,
+              status: outcome.status,
+            })),
+          },
+          usage: result.usage,
+          isError: allFailed,
+        };
+      },
+    }),
+  );
 }
