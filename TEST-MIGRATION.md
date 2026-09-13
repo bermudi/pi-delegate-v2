@@ -214,8 +214,7 @@ gaps.
   helpers.
 - **Covered now:** same-call writer serialization order; cross-call
   rejection against a running ticket; shared + isolated same-call rejection;
-  the unimplemented `scratch` value fails loudly before any provider
-  call; an inherited `GIT_DIR` redirect fails closed for a bash-capable
+  an inherited `GIT_DIR` redirect fails closed for a bash-capable
   multi-writer batch; the scope probe runs with `GIT_*` scrubbed so a bogus
   redirect cannot shrink the reserved scope.
 - **Gap:** read-only + writer parallelism allowed; unknown-but-real tools
@@ -227,15 +226,22 @@ gaps.
 
 - **Contract:** one-shot; disposable copy; changes discarded; no `sessionId`
   or `resumeFrom`; relative-write protection only; actionable setup-failure
-  remedy.
-- **Regression:** stale-lease cleanup races; symlink escape rejection;
-  nested-Git and linked-worktree rejection; setup failure appends the
-  `workspace:"shared"` remedy.
+  remedy; read-only tasks rejected; no source write reservation.
+- **Regression:** stale-copy sweep (pid-namespaced, dead pids collected);
+  linked-worktree rejection (a `.git` file redirects Git into the real
+  repository); setup failure appends the `workspace:"shared"` remedy.
+  V1's symlink-escape rejection is deliberately dropped — scratch is not a
+  sandbox, and stores like pnpm/bun make escaping links common; links are
+  preserved verbatim instead.
 - **Internal:** lease layout/markers, sweep mechanics, copy strategy.
-- **Pending (migrated):** discarded mutations never reach the source tree.
-- **Gap:** setup-failure remedy wording; unsupported-tree rejections
-  observable at the boundary; cleanup-safety properties are internal by
-  nature.
+- **Covered now:** discarded mutations never reach the source tree;
+  read-only tasks reject before any provider call; a linked worktree
+  rejects with the shared/isolated remedy; a scratch task does not
+  conflict with an overlapping shared writer; copies from dead processes
+  are swept; copies land under the agent dir, never beside the source.
+- **Gap:** nested repositories whose `.git` files use absolute gitdirs
+  (accepted risk: an ordinary copy preserves them, and scratch is not a
+  security boundary).
 
 ### Isolated workspaces
 
@@ -311,7 +317,7 @@ gaps.
 | `lifecycle.test.ts`/`dispatch.test.ts`: ordered sync results, sibling failure isolation, task-id echo, usage, async ticket return, concurrency bound | Contract | Pending tests in `tests/contract/dispatch.test.ts` |
 | `delegate.test.ts`/`pause.test.ts` ticket integration: roster, not-found, wait, timeout detach, cancel preview/force, retained results, pause/resume | Contract + Regression | Pending tests in `tests/contract/tickets.test.ts` |
 | `lifecycle.test.ts` pool/session tests: pooling, list, close, frozen config, `resumeFrom` errors, busy conflicts | Contract + Regression | Live tests in `tests/contract/sessions.test.ts` |
-| `dispatch.test.ts`/`shared-write-safety.test.ts`/`workspace.test.ts`/`isolated-workspace.test.ts`: writer serialization, cross-call rejection, shared/isolated rejection, scratch discard, ordered apply, conflict retention | Contract + Regression | `tests/contract/workspaces.test.ts` (live; scratch discard pending) |
+| `dispatch.test.ts`/`shared-write-safety.test.ts`/`workspace.test.ts`/`isolated-workspace.test.ts`: writer serialization, cross-call rejection, shared/isolated rejection, scratch discard, ordered apply, conflict retention | Contract + Regression | `tests/contract/workspaces.test.ts` (live) |
 | `lifecycle.test.ts` retry matrix and `dispatch.test.ts` serialized-successor | Regression | Pending tests in `tests/regression/failure-propagation.test.ts` |
 | All helper/private-state/rendering/internals tests (see per-subsystem "Internal" rows) | Internal | Not ported |
 
@@ -359,8 +365,6 @@ Promoted to live tests: all of `dispatch.test.ts` (6), `tickets.test.ts`
 (3 pending), the first three `workspaces.test.ts` admission cases, and the
 `resumeFrom` + busy-ticket cases in `sessions.test.ts`.
 
-Still pending (later tranches): scratch discard.
-
 ## Fourth tranche (adversarial correctness review)
 
 Public-boundary regression tests added for defects found in review:
@@ -373,9 +377,9 @@ Public-boundary regression tests added for defects found in review:
   re-read per call in both directions; a `concurrency.models` per-model
   bound serializes below the global limit; `with-parent-transcript`
   prepends the parent conversation.
-- `tests/contract/workspaces.test.ts` — unimplemented `scratch` fails
-  loudly; `GIT_DIR` redirect + bash-capable multi-writer batch fails
-  closed; the Git scope probe scrubs inherited `GIT_*`.
+- `tests/contract/workspaces.test.ts` — `GIT_DIR` redirect +
+  bash-capable multi-writer batch fails closed; the Git scope probe
+  scrubs inherited `GIT_*`.
 - `tests/regression/failure-propagation.test.ts` — `deadlineMs` is one
   wall-clock budget across attempts and backoff.
 - `tests/contract/sessions.test.ts` — `resumeFrom` without a prompt sends
@@ -529,6 +533,49 @@ Promoted to live tests: pool + list + continuation, close-then-fresh, and
 frozen-config rejection in `tests/contract/sessions.test.ts`; the
 tool-boundary scaffold assertion now expects the real `list` roster.
 
+## Eighth tranche (scratch workspaces)
+
+`src/scratch.ts` implements `workspace: "scratch"` end to end. Each scratch
+task gets its own copy of its source tree — the Git top-level when the cwd
+sits in an ordinary repository (the copied `.git` keeps Git commands
+contained), otherwise the cwd itself — created with `cp -a --reflink=auto`
+and a `fs.cp` verbatim-symlink fallback for non-GNU cp. Task cwds are
+remapped into the copy before dispatch; copies live under
+`<agentDir>/delegate-scratch/pid-<pid>/<batch>/`, never beside the source.
+
+Semantic decisions recorded during implementation:
+
+- **Read-only tasks reject.** A task whose resolved tools are all
+  read-only cannot use scratch: the copy buys nothing and the failure
+  teaches the caller. `scout + bash` stays legal — bash can dirty the
+  tree, which is exactly what scratch contains.
+- **Linked worktrees and submodules reject before copying.** A `.git`
+  file at the source root redirects Git into another repository, so
+  commands inside the copy would mutate the real repository's metadata —
+  the one escape an ordinary relative write cannot take. The error names
+  the `shared`/`isolated` remedies. This check is a stat, not a paid
+  copy — the v1 failure mode of discovering this after copying is gone.
+- **Symlink escapes are preserved, not rejected.** V1 refused links
+  pointing outside the copy, which made scratch deterministically useless
+  on pnpm/bun-style layouts. Scratch is not a security boundary
+  (`SPEC.md`); reading through a link is not an ordinary relative write.
+- **No fallback to shared.** Scratch's whole value is containment; an
+  actionable error is the fallback path, and the preflight makes it cheap.
+- **No source reservation.** Scratch tasks never write the source via
+  relative paths, so they hold no admission reservation — a scratch task
+  runs alongside an overlapping shared writer.
+- **Cleanup is quiescence-gated.** `finalize` discards copies of
+  confirmed-quiescent workers; a quarantined worker's copy is retained
+  until `cleanupWorker` sees confirmed quiescence. Copies from dead
+  processes are swept on the next scratch preparation in any session.
+- `finalize`/`dispose` never throw — cleanup failure is litter, not an
+  outcome change; it is logged.
+
+Promoted to live tests: the scratch-discard contract test. New live tests:
+read-only rejection, linked-worktree rejection with remedy, no
+shared/scratch reservation conflict, dead-process sweep, and a non-Git
+cwd copy.
+
 ## Next contract slices
 
 Done: mode exclusivity and validation failures; batch-before-start
@@ -539,11 +586,10 @@ all-or-nothing application; cancellation safety and quarantine.
 
 Remaining:
 
-1. Scratch discard (one pending contract test).
-2. Leaf-aware delivery after session-tree navigation (needs harness-level
+1. Leaf-aware delivery after session-tree navigation (needs harness-level
    session-tree control).
-3. Usage and telemetry privacy.
-4. The per-subsystem **Gap** entries above.
+2. Usage and telemetry privacy.
+3. The per-subsystem **Gap** entries above.
 
 Each slice should add only the public test driver capabilities it needs. Tests
 must not introduce public exports solely to reach private v2 state.

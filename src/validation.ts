@@ -208,11 +208,6 @@ function validateTasks(tasks: readonly TaskInput[]): void {
         `${where}: workspace "${task.workspace}" is one-shot and cannot be combined with sessionId or resumeFrom.`,
       );
     }
-    if (task.workspace === "scratch") {
-      fail(
-        `${where}: workspace "scratch" is not implemented yet; use "shared" or "isolated", or omit the field.`,
-      );
-    }
     if (task.resumeFrom !== undefined) {
       if (!isAbsolute(task.resumeFrom) || !task.resumeFrom.endsWith(".jsonl")) {
         fail(

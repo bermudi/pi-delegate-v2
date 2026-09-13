@@ -302,6 +302,11 @@ export function resolveTasks(
     }
 
     const workspace: Workspace = task.workspace ?? "shared";
+    if (workspace === "scratch" && !isWriter(tools)) {
+      throw new Error(
+        `${where}: workspace "scratch" copies the tree for a task whose tools are all read-only — the copy buys nothing. Omit workspace to run in the source tree, or add write-capable tools.`,
+      );
+    }
     const reserves =
       (workspace === "shared" && isWriter(tools)) || workspace === "isolated";
 

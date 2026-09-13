@@ -310,10 +310,10 @@ async function processesIn(root: string): Promise<number[]> {
   return pids;
 }
 
-async function stopWorkspaceProcesses(root: string): Promise<void> {
+export async function stopWorkspaceProcesses(root: string): Promise<void> {
   let pids = await processesIn(root);
   if (!pids.length) return;
-  log(`terminating ${pids.length} process(es) left in isolated workspace '${root}'`, "");
+  log(`terminating ${pids.length} process(es) left in delegated workspace '${root}'`, "");
   for (const pid of pids) {
     try {
       process.kill(pid, "SIGTERM");

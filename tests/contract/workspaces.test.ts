@@ -9,13 +9,12 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { execSync } from "node:child_process";
+import { execSync, spawnSync } from "node:child_process";
 import type { TestSession } from "@marcfargas/pi-test-harness";
 import {
   fauxAssistantMessage,
   fauxToolCall,
   type FauxResponseFactory,
-  type FauxResponseStep,
 } from "@earendil-works/pi-ai";
 import {
   callDelegate,
@@ -23,7 +22,6 @@ import {
   openDelegateBoundary,
   ticketIdOf,
 } from "../support/pi-boundary.ts";
-import { pendingTest } from "../support/pending.ts";
 
 function gitInit(dir: string): void {
   // An initial commit is required: isolated baselines are built on HEAD.
@@ -280,29 +278,69 @@ describe("delegate workspace and shared-write contract", () => {
   );
 
   test(
-    "unimplemented workspace modes fail loudly before any provider call",
+    "a read-only task cannot use scratch — the copy buys nothing",
     async () => {
-      // INVARIANTS: unsupported modes must not silently degrade to shared.
+      // SPEC: a task whose resolved tools are all read-only is rejected;
+      // paying for a copy to contain writes a reader cannot make is the
+      // v1 waste this prevents.
       session = await openDelegateBoundary();
       const subagents = await installSubagentModel(session);
       const dir = tempDir();
       gitInit(dir);
 
-      for (const workspace of ["scratch"]) {
-        const result = await callDelegate(session, {
-          tasks: [
-            {
-              prompt: "write marker",
-              cwd: dir,
-              model: subagents.spec,
-              tools: ["write"],
-              workspace,
-            },
-          ],
-        });
+      for (const task of [
+        {
+          prompt: "look around",
+          cwd: dir,
+          model: subagents.spec,
+          tools: ["read"],
+          workspace: "scratch",
+        },
+        {
+          prompt: "look around",
+          cwd: dir,
+          model: subagents.spec,
+          agent: "scout",
+          workspace: "scratch",
+        },
+      ]) {
+        const result = await callDelegate(session, { tasks: [task] });
         expect(result.isError).toBe(true);
-        expect(result.text).toMatch(/not implemented|unsupported/i);
+        expect(result.text).toMatch(/scratch/i);
+        expect(result.text).toMatch(/read.only/i);
       }
+      expect(subagents.state.callCount).toBe(0);
+    },
+  );
+
+  test(
+    "scratch rejects a linked worktree before copying, with the remedy",
+    async () => {
+      // v1 evidence: a scratch retry on a linked worktree paid for a copy
+      // before failing. A `.git` file at the root redirects Git into the
+      // real repository — the one write that escapes a plain copy — so the
+      // rejection is a stat, not a failed copy.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      const dir = tempDir();
+      gitInit(dir);
+      const linked = join(dir, "linked");
+      execSync("git worktree add --detach linked HEAD", { cwd: dir });
+
+      const result = await callDelegate(session, {
+        tasks: [
+          {
+            prompt: "write a file",
+            cwd: linked,
+            model: subagents.spec,
+            tools: ["write"],
+            workspace: "scratch",
+          },
+        ],
+      });
+      expect(result.isError).toBe(true);
+      expect(result.text).toMatch(/worktree|submodule|\.git/i);
+      expect(result.text).toMatch(/shared|isolated/);
       expect(subagents.state.callCount).toBe(0);
     },
   );
@@ -405,7 +443,7 @@ describe("delegate workspace and shared-write contract", () => {
     },
   );
 
-  pendingTest(
+  test(
     "scratch changes are discarded and never reach the source tree",
     async () => {
       // v1 evidence: workspace.test.ts "copies the full Git tree, maps a
@@ -415,25 +453,41 @@ describe("delegate workspace and shared-write contract", () => {
       const subagents = await installSubagentModel(session);
       const dir = tempDir();
       gitInit(dir);
+      mkdirSync(join(dir, "sub"));
 
-      const marker = join(dir, "scratch-marker.txt");
-      // A relative write resolves inside the scratch copy, not the source.
-      const writeThenDone: FauxResponseStep[] = [
-        fauxAssistantMessage([
-          fauxToolCall("write", {
-            path: "scratch-marker.txt",
-            content: "scratch",
-          }),
-        ]),
-        fauxAssistantMessage("SCRATCH-DONE"),
-      ];
-      subagents.respond(writeThenDone);
+      // Responses are a global FIFO across parallel workers: dispatch on
+      // the prompt. A relative write must land inside the task's own copy
+      // — the second task's nested cwd maps into its copy's sub/.
+      const writeThenDone: FauxResponseFactory = async (context) => {
+        if (context.messages.some((m) => m.role === "toolResult")) {
+          return fauxAssistantMessage("SCRATCH-DONE");
+        }
+        const file = JSON.stringify(context.messages).includes("nested")
+          ? "nested-marker.txt"
+          : "scratch-marker.txt";
+        return fauxAssistantMessage([
+          fauxToolCall("write", { path: file, content: "scratch" }),
+        ]);
+      };
+      subagents.respond([
+        writeThenDone,
+        writeThenDone,
+        writeThenDone,
+        writeThenDone,
+      ]);
 
       const result = await callDelegate(session, {
         tasks: [
           {
-            prompt: "write a file",
+            prompt: "write scratch-marker.txt",
             cwd: dir,
+            model: subagents.spec,
+            workspace: "scratch",
+            tools: ["write"],
+          },
+          {
+            prompt: "write nested-marker.txt",
+            cwd: join(dir, "sub"),
             model: subagents.spec,
             workspace: "scratch",
             tools: ["write"],
@@ -442,7 +496,106 @@ describe("delegate workspace and shared-write contract", () => {
       });
       expect(result.isError).toBe(false);
       expect(result.text).toContain("SCRATCH-DONE");
-      expect(existsSync(marker)).toBe(false);
+      expect(existsSync(join(dir, "scratch-marker.txt"))).toBe(false);
+      expect(existsSync(join(dir, "sub", "nested-marker.txt"))).toBe(false);
+      // No litter: the copies are gone and the agent-dir scratch area is
+      // pruned — the test session's agentDir is its cwd.
+      expect(existsSync(join(session.cwd, "delegate-scratch"))).toBe(false);
+    },
+  );
+
+  test(
+    "a scratch task holds no source reservation — it runs beside a shared writer",
+    async () => {
+      // SPEC: scratch holds no write reservation on the source tree. A
+      // shared writer and a scratch task on one scope proceed together;
+      // the shared write lands, the scratch write does not.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      const dir = tempDir();
+
+      const writeForPrompt: FauxResponseFactory = async (context) => {
+        if (context.messages.some((m) => m.role === "toolResult")) {
+          return fauxAssistantMessage("DONE");
+        }
+        const file = JSON.stringify(context.messages).includes("shared-file")
+          ? "shared-file.txt"
+          : "scratch-file.txt";
+        return fauxAssistantMessage([
+          fauxToolCall("write", { path: file, content: file }),
+        ]);
+      };
+      subagents.respond([
+        writeForPrompt,
+        writeForPrompt,
+        writeForPrompt,
+        writeForPrompt,
+      ]);
+
+      const result = await callDelegate(session, {
+        tasks: [
+          {
+            prompt: "write shared-file.txt",
+            cwd: dir,
+            model: subagents.spec,
+            tools: ["write"],
+          },
+          {
+            prompt: "write scratch-file.txt",
+            cwd: dir,
+            model: subagents.spec,
+            tools: ["write"],
+            workspace: "scratch",
+          },
+        ],
+      });
+      // No overlap rejection, no serialization — and the scratch write
+      // never reached the source.
+      expect(result.isError).toBe(false);
+      expect(readFileSync(join(dir, "shared-file.txt"), "utf8")).toBe(
+        "shared-file.txt",
+      );
+      expect(existsSync(join(dir, "scratch-file.txt"))).toBe(false);
+    },
+  );
+
+  test(
+    "scratch sweeps copies left behind by a dead process",
+    async () => {
+      // Copies live under <agentDir>/delegate-scratch/pid-<pid>/ so a later
+      // call can remove a dead owner's leftovers. The test session's
+      // agentDir is its cwd.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      const dir = tempDir();
+
+      const dead = spawnSync("true");
+      const stale = join(
+        session.cwd,
+        "delegate-scratch",
+        `pid-${dead.pid}`,
+        "batch",
+        "worker-0",
+      );
+      mkdirSync(stale, { recursive: true });
+      writeFileSync(join(stale, "junk.txt"), "junk");
+
+      subagents.respond([fauxAssistantMessage("OK")]);
+      const result = await callDelegate(session, {
+        tasks: [
+          {
+            prompt: "hi",
+            cwd: dir,
+            model: subagents.spec,
+            tools: ["write"],
+            workspace: "scratch",
+          },
+        ],
+      });
+      expect(result.isError).toBe(false);
+      expect(
+        existsSync(join(session.cwd, "delegate-scratch", `pid-${dead.pid}`)),
+      ).toBe(false);
     },
   );
 

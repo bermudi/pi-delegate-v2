@@ -18,6 +18,7 @@ import {
 } from "./src/format.ts";
 import { hostEnvironment, resolveTasks } from "./src/host.ts";
 import { prepareIsolated, type IsolatedPlan } from "./src/isolated.ts";
+import { prepareScratch, type ScratchPlan } from "./src/scratch.ts";
 import { handleSessionRpc, SessionPool } from "./src/sessions.ts";
 import { handleTicketRpc, TicketStore } from "./src/tickets.ts";
 import { validateCall } from "./src/validation.ts";
@@ -87,7 +88,7 @@ const taskSchema = Type.Object(
     workspace: Type.Optional(
       stringEnum(["shared", "scratch", "isolated"], {
         description:
-          "shared/scratch/isolated. 'shared' edits the tree; writers in one repo run one at a time in task order. 'isolated' runs each task in a private Git worktree — same-repo edits run in parallel and merge in order. 'scratch' not implemented.",
+          "shared/scratch/isolated. 'shared' edits the tree; writers in one repo run one at a time in task order. 'isolated' runs each task in a private Git worktree — same-repo edits run in parallel and merge in order. 'scratch' runs once in a disposable copy and discards every change — for write-capable tasks whose value is the answer, not the edits; read-only tasks cannot use it.",
       }),
     ),
   },
@@ -128,7 +129,7 @@ const argumentsSchema = Type.Object(
     workspace: Type.Optional(
       stringEnum(["shared", "scratch", "isolated"], {
         description:
-          "Default workspace for every task lacking its own. 'isolated' = parallel same-repo edits.",
+          "Default workspace for every task lacking its own. 'isolated' = parallel same-repo edits. 'scratch' = disposable copy, changes discarded.",
       }),
     ),
   },
@@ -237,7 +238,11 @@ Delegate runs subagent tasks synchronously or as an asynchronous ticket.
   changes merge into the source in task order. Independent edits to the
   same repository run in parallel — much faster than shared for
   independent work. Cannot use \`sessionId\` or \`resumeFrom\`.
-- \`scratch\`: not implemented yet.
+- \`scratch\`: one task, one disposable copy of the tree (reflinked when
+  the filesystem supports it); every change is discarded. Use it for
+  tasks that may write or run commands but whose output is the answer,
+  not the edits. A read-only task cannot use it — it needs no copy.
+  Cannot use \`sessionId\` or \`resumeFrom\`.
 
 ## Tickets
 - \`ticketAction: "poll"\` — status of one \`ticket\`, or all tickets when the
@@ -275,7 +280,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
       name: "delegate",
       label: "Delegate to Subagents",
       description:
-        "Run subagent tasks. Sync returns results; async returns a ticket; tasks:[] shows help. Same-repo writers serialize under 'shared'; workspace 'isolated' runs independent edits in parallel.",
+        "Run subagent tasks. Sync returns results; async returns a ticket; tasks:[] shows help. Same-repo writers serialize under 'shared'; 'isolated' runs independent edits in parallel; 'scratch' discards a disposable copy's changes.",
       parameters: argumentsSchema,
       prepareArguments,
 
@@ -319,33 +324,52 @@ export default function delegateExtension(api: ExtensionAPI): void {
         if (call.async) {
           const ticket = tickets.create(tasks);
           let grant: AdmissionGrant | undefined;
+          let scratchPlan: ScratchPlan | undefined;
           try {
             grant = admission.admit(tasks, ticket.id);
             ticket.notices = serializedNotices(tasks, grant.serialized);
-            const plan = await prepareIsolated(
+            // Scratch before isolated: file copies are cheaper than Git
+            // setup, and a later preparation failure can dispose() them.
+            scratchPlan = await prepareScratch(
               tasks,
+              join(env.agentDir, "delegate-scratch"),
+            );
+            const plan = await prepareIsolated(
+              scratchPlan?.tasks ?? tasks,
               join(env.agentDir, "delegate-isolated"),
             );
             void coordinator
-              .run(plan?.tasks ?? tasks, {
+              .run(plan?.tasks ?? scratchPlan?.tasks ?? tasks, {
                 env,
                 config,
                 grant,
                 sessions,
                 ticket,
-                finalize: plan
-                  ? (outcomes) =>
-                      plan.reconcile(outcomes, {
-                        shouldApplySource: () =>
-                          !ticket.cancellation.signal.aborted,
-                        retainedReason:
-                          "The ticket was cancelled before source application.",
-                        signal: ticket.cancellation.signal,
-                      })
-                  : undefined,
-                onWorkerQuiesced: plan
-                  ? (taskIndex) => plan.cleanupWorker(taskIndex)
-                  : undefined,
+                finalize:
+                  plan || scratchPlan
+                    ? async (outcomes) => {
+                        if (plan) {
+                          await plan.reconcile(outcomes, {
+                            shouldApplySource: () =>
+                              !ticket.cancellation.signal.aborted,
+                            retainedReason:
+                              "The ticket was cancelled before source application.",
+                            signal: ticket.cancellation.signal,
+                          });
+                        }
+                        if (scratchPlan) await scratchPlan.finalize(outcomes);
+                        return outcomes;
+                      }
+                    : undefined,
+                onWorkerQuiesced:
+                  plan || scratchPlan
+                    ? async (taskIndex) => {
+                        await Promise.all([
+                          plan?.cleanupWorker(taskIndex),
+                          scratchPlan?.cleanupWorker(taskIndex),
+                        ]);
+                      }
+                    : undefined,
               })
               .then(() => undefined)
               .catch((error: unknown) => {
@@ -355,6 +379,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
                 );
               });
           } catch (error) {
+            await scratchPlan?.dispose();
             grant?.release();
             tickets.remove(ticket.id);
             throw error;
@@ -392,35 +417,57 @@ export default function delegateExtension(api: ExtensionAPI): void {
           });
         }
         let plan: IsolatedPlan | undefined;
+        let scratchPlan: ScratchPlan | undefined;
         try {
-          plan = await prepareIsolated(
+          scratchPlan = await prepareScratch(
             tasks,
+            join(env.agentDir, "delegate-scratch"),
+            signal,
+          );
+          plan = await prepareIsolated(
+            scratchPlan?.tasks ?? tasks,
             join(env.agentDir, "delegate-isolated"),
             signal,
           );
         } catch (error) {
+          await scratchPlan?.dispose();
           grant.release();
           throw error;
         }
-        const result = await coordinator.run(plan?.tasks ?? tasks, {
-          env,
-          config,
-          grant,
-          sessions,
-          signal,
-          finalize: plan
-            ? (outcomes) =>
-                plan.reconcile(outcomes, {
-                  shouldApplySource: () => !signal?.aborted,
-                  retainedReason:
-                    "The call was aborted before source application.",
-                  signal,
-                })
-            : undefined,
-          onWorkerQuiesced: plan
-            ? (taskIndex) => plan.cleanupWorker(taskIndex)
-            : undefined,
-        });
+        const result = await coordinator.run(
+          plan?.tasks ?? scratchPlan?.tasks ?? tasks,
+          {
+            env,
+            config,
+            grant,
+            sessions,
+            signal,
+            finalize:
+              plan || scratchPlan
+                ? async (outcomes) => {
+                    if (plan) {
+                      await plan.reconcile(outcomes, {
+                        shouldApplySource: () => !signal?.aborted,
+                        retainedReason:
+                          "The call was aborted before source application.",
+                        signal,
+                      });
+                    }
+                    if (scratchPlan) await scratchPlan.finalize(outcomes);
+                    return outcomes;
+                  }
+                : undefined,
+            onWorkerQuiesced:
+              plan || scratchPlan
+                ? async (taskIndex) => {
+                    await Promise.all([
+                      plan?.cleanupWorker(taskIndex),
+                      scratchPlan?.cleanupWorker(taskIndex),
+                    ]);
+                  }
+                : undefined,
+          },
+        );
         const allFailed = result.outcomes.every(
           (outcome) => outcome.status !== "ok",
         );

@@ -72,7 +72,9 @@ between shared and isolated work, rejects the whole call before execution.
 
 - **shared** operates directly in the source tree.
 - **scratch** runs once in a disposable reflink copy and discards its changes.
-  It cannot use `sessionId` or `resumeFrom`.
+  It cannot use `sessionId` or `resumeFrom`. A task whose resolved tools are
+  all read-only is rejected — the copy buys nothing. Scratch holds no write
+  reservation on the source tree.
 - **isolated** runs one-shot tasks in detached Git worktrees and reconciles
   successful proposals into the source tree in task order. It cannot use
   `sessionId` or `resumeFrom`.
