@@ -10,7 +10,10 @@
 import { afterEach, expect, test } from "bun:test";
 import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { TestSession } from "@marcfargas/pi-test-harness";
+import type {
+  TestSession,
+  ToolResultRecord,
+} from "@marcfargas/pi-test-harness";
 import {
   fauxAssistantMessage,
   fauxToolCall,
@@ -38,6 +41,27 @@ function writeConcurrency(maxConcurrent: number): void {
     join(session.cwd, "delegate.json"),
     JSON.stringify({ maxConcurrent }),
   );
+}
+
+/**
+ * Probe admission until a dispatch is accepted or the budget expires.
+ * Rejection for a still-retained (quarantined) reservation fails inside
+ * admission before any task starts, so only an admitted attempt consumes a
+ * scripted provider response — making this the public-boundary witness for
+ * "the abandoned worker wound down and its reservation was released".
+ */
+async function dispatchUntilAdmitted(
+  session: TestSession,
+  arguments_: Record<string, unknown>,
+  timeoutMs = 5000,
+): Promise<ToolResultRecord> {
+  const deadline = Date.now() + timeoutMs;
+  let result = await callDelegate(session, arguments_);
+  while (result.isError && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 25));
+    result = await callDelegate(session, arguments_);
+  }
+  return result;
 }
 
 test(
@@ -240,7 +264,14 @@ test(
       await gate;
       return fauxAssistantMessage("TOO-LATE");
     };
-    subagents.respond([gated, fauxAssistantMessage("AFTER-QUARANTINE")]);
+    subagents.respond([
+      gated,
+      // Spares: the admission-retry probe below only consumes a script on
+      // an admitted attempt, but a mid-flight failure would too.
+      ...Array.from({ length: 4 }, () =>
+        fauxAssistantMessage("AFTER-QUARANTINE"),
+      ),
+    ]);
 
     const result = await callDelegate(session, {
       tasks: [
@@ -265,10 +296,12 @@ test(
     expect(rejected.isError).toBe(true);
     expect(rejected.text).toMatch(/conflict|running|overlap|active/i);
 
-    // Releasing the gate lets the worker wind down; only then does the
-    // reservation release. The poll round-trip drains its microtasks first.
+    // Releasing the gate lets the worker wind down; only then is the
+    // retained reservation released. Wind-down is asynchronous and there is
+    // no ticket to wait on, so probe admission until the quarantine is
+    // provably gone.
     release();
-    const admitted = await callDelegate(session, {
+    const admitted = await dispatchUntilAdmitted(session, {
       tasks: [{ prompt: "after", model: subagents.spec, tools: ["write"] }],
     });
     expect(admitted.isError).toBe(false);
@@ -295,7 +328,12 @@ test(
       await gate;
       return fauxAssistantMessage("TOO-LATE");
     };
-    subagents.respond([gated, fauxAssistantMessage("AFTER-QUARANTINE")]);
+    subagents.respond([
+      gated,
+      ...Array.from({ length: 4 }, () =>
+        fauxAssistantMessage("AFTER-QUARANTINE"),
+      ),
+    ]);
 
     const pending = callDelegateDetached(session, {
       tasks: [
@@ -333,7 +371,7 @@ test(
     expect(rejected.text).toMatch(/conflict|running|overlap|active/i);
 
     release();
-    const admitted = await callDelegate(session, {
+    const admitted = await dispatchUntilAdmitted(session, {
       tasks: [{ prompt: "after", model: subagents.spec, tools: ["write"] }],
     });
     expect(admitted.isError).toBe(false);
