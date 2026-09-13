@@ -84,8 +84,8 @@ export interface SessionSettle {
     readonly status: TaskStatus;
     /** Whether session.prompt() was attempted this run. */
     readonly prompted: boolean;
-    /** True when the run ended on its deadline budget. */
-    readonly deadline: boolean;
+    /** Set when a watchdog (deadline or stall) ended the run. */
+    readonly watchdog: "deadline" | "stall" | undefined;
     /** Worker quiescence could not be confirmed; never dispose. */
     readonly quarantined: boolean;
   };
@@ -98,8 +98,8 @@ export interface SessionSettle {
  *
  * Disposition rules (INVARIANTS "Session reuse"):
  * - insert only after a successful, prompted run with a durable session file;
- * - a checked-out session cancelled or deadline-exceeded after prompting is
- *   evicted; a deadline/cancel before prompting leaves it intact;
+ * - a checked-out session cancelled or watchdog-ended (deadline/stall) after
+ *   prompting is evicted; either before prompting leaves it intact;
  * - an ordinary failure on a pooled session keeps it reusable;
  * - a quarantined session is evicted but never disposed — it may still be
  *   mutating.
@@ -222,13 +222,14 @@ export class SessionPool {
       return;
     }
     if (entry !== undefined) {
-      // Cancellation or a deadline before prompting leaves the session
-      // intact. Ordinary failure keeps it reusable. Anything else evicts it.
+      // Cancellation or a watchdog abort before prompting leaves the
+      // session intact. Ordinary failure keeps it reusable. Anything else
+      // evicts it.
       if (!outcome.prompted) {
         keep();
         return;
       }
-      if (outcome.status === "failed" && !outcome.deadline) {
+      if (outcome.status === "failed" && outcome.watchdog === undefined) {
         keep();
         return;
       }

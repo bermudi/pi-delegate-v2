@@ -316,6 +316,7 @@ export class DispatchCoordinator {
               env: options.env,
               sessions: options.sessions,
               signal,
+              stallTimeoutMs: options.config.stallTimeoutMs,
               isAborted: () => signal.aborted,
               waitWhilePaused: (runSignal) =>
                 ticket ? this.waitWhilePaused(ticket, runSignal ?? signal) : Promise.resolve(),

@@ -80,9 +80,9 @@ gaps.
 - **Covered now:** ordered results; sibling failure isolation; task-id echo;
   aggregate usage on the tool result; parent-abort of an in-flight sync call
   settles as a structured cancellation (asserted in the cancellation
-  regression suite via `callDelegateDetached` + raw-session `abort()`).
-- **Gap:** deadline/stall outcomes visible in result text; overlap warnings
-  on results.
+  regression suite via `callDelegateDetached` + raw-session `abort()`);
+  deadline/stall outcomes visible in result text (cancellation suite).
+- **Gap:** overlap warnings on results.
 
 ### Multi-task / concurrent dispatch
 
@@ -141,9 +141,13 @@ gaps.
   Parent-abort of an in-flight sync call settles with the `cancelled` cause
   (which outranks the task's unfired deadline) while the gated worker is
   still held — proven by driving `session.session.abort()` on the raw
-  AgentSession mid-call.
-- **Gap:** the stall cause (needs wall-clock control at the boundary);
-  a worker whose abort is delivered
+  AgentSession mid-call. The stall cause: a worker silent past the
+  `delegate.json` `stallTimeoutMs` budget settles as a structured stall
+  (not a deadline, not a plain cancel) with its reservation retained until
+  the gated worker winds down; parked time behind a paused ticket is not
+  inactivity (the countdown freezes between turns), while a silent
+  in-flight turn still stalls under a paused ticket.
+- **Gap:** a worker whose abort is delivered
   but then completes "ok" anyway (the faux provider always honors a
   tripped signal once its gate releases, so the boundary cannot produce a
   late success — the abortReason guard is what keeps it cancelled);
@@ -160,9 +164,11 @@ gaps.
 - **Internal:** checkpoint machinery, `Agent.subscribe` gating, parked
   listener bookkeeping.
 - **Covered now:** pause holds queued work; paused ticket remains running;
-  resume continues to settlement. v2 gates queued tasks before slot
-  acquisition and parks between-turn continuations via the core
-  `prepareNextTurnWithContext` hook.
+  resume continues to settlement; parked time is not inactivity (the stall
+  countdown freezes while parked and resumes with its remaining budget),
+  and a silent in-flight turn still stalls under a paused ticket. v2 gates
+  queued tasks before slot acquisition and parks between-turn continuations
+  via the core `prepareNextTurnWithContext` hook.
 - **Gap:** mid-turn pause semantics (current turn finishes); deadline-during-
   pause; pause unavailability on terminal tickets.
 
@@ -333,6 +339,11 @@ Semantic decisions recorded during implementation:
   tasks between model turns via `prepareNextTurnWithContext`; a paused
   ticket keeps its reservations.
 - `wait` timeout or caller abort detaches only that waiter.
+- Stall is an inactivity watchdog fed by session events (`delegate.json`
+  `stallTimeoutMs`, default 15min, 0 disables). It settles a task as failed
+  with stall wording — distinct from deadline and operator cancellation —
+  freezes while a worker is parked between turns, and evicts a pooled
+  session after a prompted run the same way a deadline does.
 - Subagent sessions are extension-free, in-memory-transcript, and stream
   through the parent `ModelRuntime` (reached via `modelRegistry.runtime`,
   a private-field seam that fails loudly if upstream changes it).

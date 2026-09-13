@@ -15,11 +15,17 @@ export interface DelegateConfig {
   /** Global bound on simultaneously executing tasks. */
   readonly maxConcurrent: number;
   readonly concurrency: ConcurrencyConfig;
+  /**
+   * Inactivity watchdog: a task whose session emits no events for this long
+   * is cooperatively aborted as stalled. 0 disables it.
+   */
+  readonly stallTimeoutMs: number;
 }
 
 export const DEFAULT_CONFIG: DelegateConfig = {
   maxConcurrent: 3,
   concurrency: { default: undefined, providers: {}, models: {} },
+  stallTimeoutMs: 15 * 60 * 1000,
 };
 
 /** Effective per-model bound: model key, then provider, then default, then global. */
@@ -57,8 +63,8 @@ export function configPathOf(ctx: ExtensionContext): string {
 
 /**
  * Load `<agentDir>/delegate.json`. A missing file yields defaults; malformed
- * JSON or a non-positive `maxConcurrent` fails loudly — a half-applied
- * concurrency limit is worse than an error.
+ * JSON, a non-positive `maxConcurrent`, or a negative `stallTimeoutMs` fails
+ * loudly — a half-applied limit is worse than an error.
  */
 export function loadDelegateConfig(ctx: ExtensionContext): DelegateConfig {
   const path = configPathOf(ctx);
@@ -84,9 +90,20 @@ export function loadDelegateConfig(ctx: ExtensionContext): DelegateConfig {
       `${path}: maxConcurrent must be a positive integer; got ${JSON.stringify(maxConcurrent)}.`,
     );
   }
+  const stallTimeoutMs = config.stallTimeoutMs;
+  if (
+    stallTimeoutMs !== undefined &&
+    (!Number.isInteger(stallTimeoutMs) || (stallTimeoutMs as number) < 0)
+  ) {
+    throw new Error(
+      `${path}: stallTimeoutMs must be a non-negative integer; got ${JSON.stringify(stallTimeoutMs)}.`,
+    );
+  }
   return {
     maxConcurrent: (maxConcurrent as number) ?? DEFAULT_CONFIG.maxConcurrent,
     concurrency: parseConcurrency(config.concurrency, path),
+    stallTimeoutMs:
+      (stallTimeoutMs as number) ?? DEFAULT_CONFIG.stallTimeoutMs,
   };
 }
 

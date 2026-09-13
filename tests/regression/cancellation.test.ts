@@ -416,3 +416,177 @@ test(
     expect(subagents.state.callCount).toBe(1);
   },
 );
+
+test(
+  "a worker silent past stallTimeoutMs settles as a structured stall, not a hang",
+  async () => {
+    // v1 evidence: runner.ts inactivity watchdog — silence past the
+    // configured stall timeout requests cooperative cancellation under the
+    // stall cause; SPEC: "Stall timeouts measure inactivity; deadlines
+    // measure wall-clock time." The budget comes from delegate.json.
+    session = await openDelegateBoundary();
+    const subagents = await installSubagentModel(session);
+    writeFileSync(
+      join(session.cwd, "delegate.json"),
+      JSON.stringify({ stallTimeoutMs: 150 }),
+    );
+
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const gated: FauxResponseFactory = async () => {
+      await gate;
+      return fauxAssistantMessage("TOO-LATE");
+    };
+    subagents.respond([
+      gated,
+      // Spares for the admission probe below — only an admitted attempt
+      // consumes a scripted response.
+      ...Array.from({ length: 4 }, () =>
+        fauxAssistantMessage("AFTER-QUARANTINE"),
+      ),
+    ]);
+
+    const result = await callDelegate(session, {
+      tasks: [{ prompt: "hang", model: subagents.spec, tools: ["write"] }],
+    });
+    // The call returned at all: settlement did not wait on the still-gated
+    // worker. The cause is the inactivity watchdog — not a deadline, not an
+    // operator cancellation.
+    expect(result.text).toMatch(/stall/i);
+    expect(result.text).not.toMatch(/deadline|cancel/i);
+    expect(subagents.state.callCount).toBe(1);
+
+    // Termination is unconfirmed while the gate holds: the worker's scope
+    // stays reserved, same as any quarantined cancellation.
+    const rejected = await callDelegate(session, {
+      tasks: [{ prompt: "conflict", model: subagents.spec, tools: ["write"] }],
+    });
+    expect(rejected.isError).toBe(true);
+
+    release();
+    const admitted = await dispatchUntilAdmitted(session, {
+      tasks: [{ prompt: "after", model: subagents.spec, tools: ["write"] }],
+    });
+    expect(admitted.isError).toBe(false);
+    expect(admitted.text).toContain("AFTER-QUARANTINE");
+  },
+);
+
+test(
+  "parked time behind a paused ticket is not inactivity — the stall watchdog suspends",
+  async () => {
+    // v1 evidence: pause.ts — "inactivity checks stop while parked; explicit
+    // wall-clock deadlines still count". A worker parked between turns for
+    // longer than the stall budget must survive to resume.
+    //
+    // Determinism: the pause lands while turn one's provider call is still
+    // gated, so the worker is provably mid-turn when it parks. The marker
+    // file plus a short barrier then confirm the between-turns park was
+    // actually reached before the over-budget wait begins.
+    session = await openDelegateBoundary();
+    const subagents = await installSubagentModel(session);
+    writeFileSync(
+      join(session.cwd, "delegate.json"),
+      JSON.stringify({ stallTimeoutMs: 150 }),
+    );
+
+    const marker = join(session.cwd, "parked");
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const turnOne: FauxResponseFactory = async () => {
+      await gate;
+      return fauxAssistantMessage([
+        fauxToolCall("bash", { command: `printf parked > "${marker}"` }),
+      ]);
+    };
+    subagents.respond([turnOne, fauxAssistantMessage("PARKED-DONE")]);
+
+    const dispatched = await callDelegate(session, {
+      tasks: [{ prompt: "park me", model: subagents.spec, tools: ["bash"] }],
+      async: true,
+    });
+    const ticket = ticketIdOf(dispatched.text);
+
+    await callDelegate(session, { ticketAction: "pause", ticket });
+    release();
+
+    // Wait until the tool call finished and the cascade reached the park.
+    const deadline = Date.now() + 5000;
+    while (!existsSync(marker) && Date.now() < deadline) {
+      await new Promise((r) => setImmediate(r));
+    }
+    expect(existsSync(marker)).toBe(true);
+    await new Promise((r) => setTimeout(r, 30));
+
+    // Parked far longer than the 150ms budget: a watchdog that counted
+    // parked time would already have fired.
+    await new Promise((r) => setTimeout(r, 500));
+
+    const resumed = await callDelegate(session, {
+      ticketAction: "resume",
+      ticket,
+    });
+    expect(resumed.isError).toBe(false);
+
+    const settled = await callDelegate(session, {
+      ticketAction: "wait",
+      ticket,
+      timeoutMs: 5000,
+    });
+    expect(settled.text).toContain("PARKED-DONE");
+    expect(settled.text).not.toMatch(/stall/i);
+    expect(subagents.state.callCount).toBe(2);
+  },
+);
+
+test(
+  "an in-flight silent turn still stalls while its ticket is paused",
+  async () => {
+    // Companion to the park test: suspension covers the between-turns park,
+    // not the whole paused state — pause is cooperative and does not shield
+    // a wedged in-flight provider call from the inactivity watchdog.
+    session = await openDelegateBoundary();
+    const subagents = await installSubagentModel(session);
+    writeFileSync(
+      join(session.cwd, "delegate.json"),
+      JSON.stringify({ stallTimeoutMs: 150 }),
+    );
+
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const gated: FauxResponseFactory = async () => {
+      await gate;
+      return fauxAssistantMessage("TOO-LATE");
+    };
+    subagents.respond([gated]);
+
+    const dispatched = await callDelegate(session, {
+      tasks: [{ prompt: "hang", model: subagents.spec, tools: ["write"] }],
+      async: true,
+    });
+    const ticket = ticketIdOf(dispatched.text);
+
+    // Wait until the provider call is in flight, then pause the ticket.
+    const started = Date.now() + 5000;
+    while (subagents.state.callCount === 0 && Date.now() < started) {
+      await new Promise((r) => setImmediate(r));
+    }
+    expect(subagents.state.callCount).toBe(1);
+    const paused = await callDelegate(session, {
+      ticketAction: "pause",
+      ticket,
+    });
+    expect(paused.isError).toBe(false);
+
+    // The gated call emits no events: the stall fires even though the
+    // ticket is paused, because the worker never reached the park.
+    const settled = await callDelegate(session, {
+      ticketAction: "wait",
+      ticket,
+      timeoutMs: 5000,
+    });
+    expect(settled.text).toMatch(/stall/i);
+
+    release();
+  },
+);

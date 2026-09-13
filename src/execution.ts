@@ -36,6 +36,8 @@ export interface RunControls {
   readonly isAborted: () => boolean;
   /** Combined cancellation signal (ticket cancel, parent abort, deadline). */
   readonly signal: AbortSignal;
+  /** Inactivity watchdog budget in ms; 0 disables it. */
+  readonly stallTimeoutMs: number;
 }
 
 export interface AttemptResult {
@@ -192,6 +194,13 @@ export class TaskExecution implements ExecutionHandle {
   private poolEntry: PooledSession | undefined;
   /** True once session.prompt() was attempted this run. */
   private prompted = false;
+  /** Inactivity watchdog: while armed, the wall-clock instant of the stall. */
+  private stallAt: number | undefined;
+  private stallTimer: ReturnType<typeof setTimeout> | undefined;
+  /** True while parked in the pause gate — parked time is not inactivity. */
+  private stallSuspended = false;
+  /** While suspended, the frozen countdown to re-arm on resume. */
+  private stallRemaining: number | undefined;
   /** Resolves the moment cancellation is requested, however it arrives. */
   private readonly abortRequested = new Deferred();
   private readonly done: Promise<AttemptResult>;
@@ -243,6 +252,20 @@ export class TaskExecution implements ExecutionHandle {
   }
 
   /**
+   * Watchdog causes (deadline, stall) settle as failures with their own
+   * wording; operator and parent aborts settle as plain cancellations.
+   */
+  private watchdogError(): string | undefined {
+    if (this.abortReason === "deadline") {
+      return `deadline exceeded after ${this.task.deadlineMs}ms`;
+    }
+    if (this.abortReason === "stall") {
+      return `stalled: no session activity for ${this.controls.stallTimeoutMs}ms; task aborted`;
+    }
+    return undefined;
+  }
+
+  /**
    * The outcome the caller sees when cancellation was requested before the
    * worker confirmed it stopped. Honest about uncertainty: quarantined is
    * always set, and partial output reflects what is already on the record.
@@ -252,11 +275,12 @@ export class TaskExecution implements ExecutionHandle {
     const partial = session
       ? lastAssistantText(session)
       : { text: "" };
-    if (this.abortReason === "deadline") {
+    const watchdog = this.watchdogError();
+    if (watchdog !== undefined) {
       return {
         status: "failed",
         output: partial.text || undefined,
-        error: `deadline exceeded after ${this.task.deadlineMs}ms`,
+        error: watchdog,
         hadSideEffects: this.hadSideEffects,
         quarantined: true,
       };
@@ -267,6 +291,56 @@ export class TaskExecution implements ExecutionHandle {
       hadSideEffects: this.hadSideEffects,
       quarantined: true,
     };
+  }
+
+  /**
+   * The inactivity watchdog: every session event is activity and restarts
+   * the countdown. While suspended (parked in the pause gate) the countdown
+   * freezes — parked time is not inactivity — but an event still proves the
+   * worker is alive and restores the full budget for when it resumes.
+   */
+  private armStall(ms: number): void {
+    if (this.stallTimer !== undefined) clearTimeout(this.stallTimer);
+    this.stallAt = Date.now() + ms;
+    this.stallTimer = setTimeout(() => void this.abort("stall"), ms);
+  }
+
+  private noteActivity(): void {
+    const budget = this.controls.stallTimeoutMs;
+    if (budget <= 0) return;
+    if (this.stallSuspended) {
+      this.stallRemaining = budget;
+      return;
+    }
+    this.armStall(budget);
+  }
+
+  private suspendStall(): void {
+    this.stallSuspended = true;
+    if (this.stallTimer === undefined || this.stallAt === undefined) return;
+    this.stallRemaining = Math.max(0, this.stallAt - Date.now());
+    clearTimeout(this.stallTimer);
+    this.stallTimer = undefined;
+    this.stallAt = undefined;
+  }
+
+  private resumeStall(): void {
+    this.stallSuspended = false;
+    const remaining = this.stallRemaining;
+    this.stallRemaining = undefined;
+    // A countdown frozen at zero fires on resume — the silence budget was
+    // already spent. A worker suspended before the watchdog was ever armed
+    // gets a fresh budget rather than no watchdog.
+    if (remaining !== undefined) this.armStall(remaining);
+    else if (this.controls.stallTimeoutMs > 0) {
+      this.armStall(this.controls.stallTimeoutMs);
+    }
+  }
+
+  private clearStall(): void {
+    if (this.stallTimer !== undefined) clearTimeout(this.stallTimer);
+    this.stallTimer = undefined;
+    this.stallAt = undefined;
   }
 
   private disposeSession(): void {
@@ -282,7 +356,7 @@ export class TaskExecution implements ExecutionHandle {
   /**
    * Session custody at run end. A sessionId task's session belongs to the
    * pool: it decides keep/evict/dispose from the outcome (insert-on-success,
-   * evict after a prompted cancel or deadline, keep through ordinary
+   * evict after a prompted cancel or watchdog abort, keep through ordinary
    * failure and pre-prompt cancellation). Other sessions are disposed here
    * unless quarantined.
    */
@@ -299,7 +373,10 @@ export class TaskExecution implements ExecutionHandle {
       outcome: {
         status: outcome.status,
         prompted: this.prompted,
-        deadline: this.abortReason === "deadline",
+        watchdog:
+          this.abortReason === "deadline" || this.abortReason === "stall"
+            ? this.abortReason
+            : undefined,
         quarantined: this.quarantined,
       },
     });
@@ -332,10 +409,11 @@ export class TaskExecution implements ExecutionHandle {
             log(`abort during setup of task ${this.task.id} failed`, error);
           }
         }
-        if (this.abortReason === "deadline") {
+        const watchdog = this.watchdogError();
+        if (watchdog !== undefined) {
           return {
             status: "failed",
-            error: `deadline exceeded after ${this.task.deadlineMs}ms`,
+            error: watchdog,
             hadSideEffects: false,
             quarantined: this.quarantined,
           };
@@ -357,16 +435,23 @@ export class TaskExecution implements ExecutionHandle {
       const previous = agent.prepareNextTurnWithContext;
       agent.prepareNextTurnWithContext = async (turn, signal) => {
         if (turn.toolResults.length > 0) {
-          await this.controls.waitWhilePaused(signal);
+          this.suspendStall();
+          try {
+            await this.controls.waitWhilePaused(signal);
+          } finally {
+            this.resumeStall();
+          }
         }
         return previous?.(turn, signal);
       };
 
-      // Track tool executions that produced side effects; whole-task retry
-      // must never replay them. A run that starts after cancellation (abort
-      // landed in prompt preflight, before the run registered) is killed at
-      // its first event.
+      // Every session event is watchdog activity. Also track tool
+      // executions that produced side effects; whole-task retry must never
+      // replay them. A run that starts after cancellation (abort landed in
+      // prompt preflight, before the run registered) is killed at its
+      // first event.
       const unsubscribe = child.subscribe((event: AgentSessionEvent) => {
+        this.noteActivity();
         if (event.type === "agent_start") {
           if (this.abortReason !== undefined || this.controls.isAborted()) {
             child.agent.abort();
@@ -380,6 +465,9 @@ export class TaskExecution implements ExecutionHandle {
           this.hadSideEffects = true;
         }
       });
+      // Armed until the run ends — including waitForIdle, where a wedged
+      // session produces no events and the watchdog is the rescue.
+      this.noteActivity();
 
       usageBefore = usageOf(session);
       try {
@@ -395,11 +483,12 @@ export class TaskExecution implements ExecutionHandle {
 
       const { text, stopReason, errorMessage } = lastAssistantText(session);
       const usage = diffUsage(usageOf(session), usageBefore);
-      if (this.abortReason === "deadline") {
+      const watchdog = this.watchdogError();
+      if (watchdog !== undefined) {
         return {
           status: "failed",
           output: text || undefined,
-          error: `deadline exceeded after ${this.task.deadlineMs}ms`,
+          error: watchdog,
           usage,
           hadSideEffects: this.hadSideEffects,
           quarantined: this.quarantined,
@@ -441,10 +530,11 @@ export class TaskExecution implements ExecutionHandle {
         session !== undefined && usageBefore !== undefined
           ? diffUsage(usageOf(session), usageBefore)
           : undefined;
-      if (this.abortReason === "deadline") {
+      const watchdog = this.watchdogError();
+      if (watchdog !== undefined) {
         return {
           status: "failed",
-          error: `deadline exceeded after ${this.task.deadlineMs}ms`,
+          error: watchdog,
           usage,
           hadSideEffects: this.hadSideEffects,
           quarantined: this.quarantined,
@@ -467,6 +557,7 @@ export class TaskExecution implements ExecutionHandle {
       };
     } finally {
       this.controls.signal.removeEventListener("abort", onAbort);
+      this.clearStall();
       this.finished = true;
     }
   }
