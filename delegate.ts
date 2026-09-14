@@ -60,7 +60,10 @@ const taskSchema = Type.Object(
       }),
     ),
     model: Type.Optional(
-      Type.String({ description: "Explicit model override." }),
+      Type.String({
+        description:
+          "Alternative model configured under \"models\" in the user-global delegate.json; omit to inherit the parent's model. Unconfigured references are rejected.",
+      }),
     ),
     tools: Type.Optional(
       Type.Array(Type.String(), {
@@ -226,9 +229,14 @@ Delegate runs subagent tasks synchronously or as an asynchronous ticket.
   and runs the batch in the background.
 - Task fields: \`prompt\` (required unless \`resumeFrom\`), \`id\` (correlation
   key), \`agent\` (named profile), \`cwd\`, \`systemPrompt\`, \`context\`,
-  \`model\`, \`tools\` (\`*\`/\`ro\` groups or names), \`thinking\`,
-  \`deadlineMs\`, \`sessionId\`, \`resumeFrom\`, \`workspace\`
-  (shared/scratch/isolated). A top-level \`workspace\` is the batch default.
+  \`model\` (a \"models\" entry from delegate.json), \`tools\` (\`*\`/\`ro\`
+  groups or names), \`thinking\`, \`deadlineMs\`, \`sessionId\`, \`resumeFrom\`,
+  \`workspace\` (shared/scratch/isolated). A top-level \`workspace\` is the
+  batch default.
+- Models: subagents run on the parent's model unless \`model\` names an
+  alternative the user configured under \"models\" in the user-global
+  delegate.json. Any other model reference is rejected — the registry knowing
+  a model is not permission to spend on it.
 
 ## Workspaces
 - \`shared\` (default): the task edits the caller's tree directly. Writers
@@ -318,7 +326,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
 
         const env = hostEnvironment(ctx, () => api.getActiveTools());
         const config = loadDelegateConfig(ctx);
-        const tasks = resolveTasks(call.tasks, env);
+        const tasks = resolveTasks(call.tasks, env, config);
         sessions.validateReuse(tasks);
 
         if (call.async) {

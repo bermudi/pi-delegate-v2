@@ -31,7 +31,8 @@ release notes and migration guidance; it must not arrive as rewrite drift.
 - User-global `delegate.json` configuration. Project files do not become
   delegate configuration.
 - Parent model/context inheritance and extension isolation, including verified
-  provider-scoped exceptions and the meanings of `*` and `ro`.
+  provider-scoped exceptions and the meanings of `*` and `ro`, subject to the
+  model-allowlist departure below.
 
 ### Execution and state
 
@@ -69,6 +70,23 @@ release notes and migration guidance; it must not arrive as rewrite drift.
 - Fail-open telemetry that never stores prompt/output content, with stable
   call/task outcome meaning and explicit migration or versioning for existing
   databases.
+
+## v2 deliberate breaking changes
+
+Departures from the preserve list above. Each must carry its own motivation
+and migration guidance; none may arrive as silent rewrite drift.
+
+- **Task `model` accepts only configured alternatives.** V1 resolved any
+  registry-resolvable model reference (including `:thinking`-suffixed ones)
+  the caller cared to type, letting a subagent spend on any model in the
+  registry. V2 runs tasks on the parent's model unless `model` names an entry
+  of the `"models"` array in the user-global `delegate.json`. Unconfigured
+  references — and configured references that do not resolve in the session's
+  registry — fail the whole call before tasks start, listing the configured
+  set. Migration: put every model you want delegable into
+  `delegate.json` `"models"` (e.g. `["anthropic/claude-haiku-4-5"]`), or stop
+  sending `model` and inherit the parent's. The model-swap recovery hint and
+  the tool manual now point at the same list.
 
 ## v2 intentionally may change
 

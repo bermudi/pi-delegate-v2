@@ -19,7 +19,7 @@ import {
   getBuiltinProfile,
   isWriter,
 } from "./profiles.ts";
-import { agentDirOf } from "./config.ts";
+import { agentDirOf, configPathOf, matchConfiguredModel, type DelegateConfig } from "./config.ts";
 import type { TaskInput } from "./validation.ts";
 import type { ResolvedTask, Workspace } from "./types.ts";
 
@@ -244,10 +244,16 @@ const RESUME_DEFAULT_PROMPT =
  * Resolve validated task inputs into executable tasks: agent profile, model,
  * tools, absolute cwd, and the shared-write reservation roots. Everything
  * that can fail is resolved here, before admission and before execution.
+ *
+ * Model policy: a task runs on the parent's model unless its `model` field
+ * names an alternative configured under "models" in the user-global
+ * delegate.json. The model registry knowing a reference is not
+ * authorization — only the user's configuration is.
  */
 export function resolveTasks(
   tasks: readonly TaskInput[],
   env: HostEnvironment,
+  config: DelegateConfig,
 ): ResolvedTask[] {
   let parentActive: string[] = [];
   try {
@@ -287,12 +293,32 @@ export function resolveTasks(
       throw new Error(`${where}: ${tools}`);
     }
 
-    const model = resolveModel(task.model, env);
+    // The allowlist gate runs before registry resolution: a model the
+    // caller can name but the user has not configured is rejected here,
+    // with the configured alternatives listed for self-correction.
+    let modelSpec = task.model;
+    if (modelSpec !== undefined) {
+      const configured = matchConfiguredModel(modelSpec, config);
+      if (configured === undefined) {
+        const list =
+          config.models.length > 0
+            ? ` Configured alternatives: ${config.models.join(", ")}.`
+            : " No alternative models are configured.";
+        throw new Error(
+          `${where}: model '${modelSpec}' is not configured for delegation. ` +
+            `Subagents run on the parent's model by default; to use a specific ` +
+            `model, add it to "models" in ${configPathOf(env.ctx)}.${list}`,
+        );
+      }
+      // Resolve the configured entry, not the caller's casing of it.
+      modelSpec = configured;
+    }
+    const model = resolveModel(modelSpec, env);
     if (!model) {
       throw new Error(
         task.model
-          ? `${where}: unknown or unavailable model '${task.model}'.`
-          : `${where}: no parent model is selected; set an explicit task model.`,
+          ? `${where}: model '${modelSpec}' is configured in ${configPathOf(env.ctx)} but is not available in this session's model registry.`
+          : `${where}: no parent model is selected; add a model to "models" in ${configPathOf(env.ctx)}.`,
       );
     }
 

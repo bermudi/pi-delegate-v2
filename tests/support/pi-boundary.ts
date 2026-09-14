@@ -1,4 +1,5 @@
-import { resolve } from "node:path";
+import { readFileSync, writeFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 import {
   calls,
   createTestSession,
@@ -93,6 +94,10 @@ export function objectOf(
  * `spec`. This intentionally exercises the same registry the extension is
  * expected to resolve models and stream subagent sessions through — the parent
  * session's runtime — so no provider calls ever leave the process.
+ *
+ * Registration also configures `spec` as a delegate.json alternative: the
+ * `model` task field only accepts parent-model or configured alternatives,
+ * so a test selecting the faux model must configure it the way a user would.
  */
 export interface SubagentModel {
   /** Model reference accepted by the task `model` field. */
@@ -105,6 +110,36 @@ export interface SubagentModel {
   readonly state: FauxProviderState;
 }
 
+/** Read the session's delegate.json as an object ({} when absent/unparseable). */
+function currentDelegateConfig(session: TestSession): Record<string, unknown> {
+  try {
+    const parsed: unknown = JSON.parse(
+      readFileSync(join(session.cwd, "delegate.json"), "utf8"),
+    );
+    return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Shallow-merge a patch into the session's delegate.json (top-level keys in
+ * the patch replace stored ones). The harness session's agentDir is its
+ * temporary cwd, so this stands in for editing the user-global config.
+ */
+export function configureDelegate(
+  session: TestSession,
+  patch: Record<string, unknown>,
+): void {
+  const merged = { ...currentDelegateConfig(session), ...patch };
+  writeFileSync(
+    join(session.cwd, "delegate.json"),
+    JSON.stringify(merged, null, 2),
+  );
+}
+
 export async function installSubagentModel(
   session: TestSession,
 ): Promise<SubagentModel> {
@@ -112,8 +147,16 @@ export async function installSubagentModel(
   const runtime = (session.session as AgentSession).modelRuntime;
   runtime.registerNativeProvider(faux.provider);
   await runtime.setRuntimeApiKey("delegate-faux", "test-key");
+  const spec = "delegate-faux/faux-1";
+  const existing = currentDelegateConfig(session);
+  const already = Array.isArray(existing.models) ? existing.models : [];
+  configureDelegate(session, {
+    models: [...new Set([...(already as unknown[]), spec])].filter(
+      (entry): entry is string => typeof entry === "string",
+    ),
+  });
   return {
-    spec: "delegate-faux/faux-1",
+    spec,
     respond: (steps) => faux.setResponses(steps),
     append: (steps) => faux.appendResponses(steps),
     state: faux.state,

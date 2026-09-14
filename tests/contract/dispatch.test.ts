@@ -1,6 +1,4 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { writeFileSync } from "node:fs";
-import { join } from "node:path";
 import type { TestSession } from "@marcfargas/pi-test-harness";
 import {
   fauxAssistantMessage,
@@ -8,6 +6,7 @@ import {
 } from "@earendil-works/pi-ai";
 import {
   callDelegate,
+  configureDelegate,
   installSubagentModel,
   openDelegateBoundary,
   ticketIdOf,
@@ -160,10 +159,7 @@ describe("delegate dispatch contract", () => {
       // limiter is what is actually measured.
       session = await openDelegateBoundary();
       const subagents = await installSubagentModel(session);
-      writeFileSync(
-        join(session.cwd, "delegate.json"),
-        JSON.stringify({ maxConcurrent: 1 }),
-      );
+      configureDelegate(session, { maxConcurrent: 1 });
 
       let active = 0;
       let maxActive = 0;
@@ -197,10 +193,7 @@ describe("delegate dispatch contract", () => {
       // how many permits are active or queued when it is applied.
       session = await openDelegateBoundary();
       const subagents = await installSubagentModel(session);
-      writeFileSync(
-        join(session.cwd, "delegate.json"),
-        JSON.stringify({ maxConcurrent: 1 }),
-      );
+      configureDelegate(session, { maxConcurrent: 1 });
 
       let active = 0;
       let maxActive = 0;
@@ -222,10 +215,7 @@ describe("delegate dispatch contract", () => {
       });
       expect(maxActive).toBe(1);
 
-      writeFileSync(
-        join(session.cwd, "delegate.json"),
-        JSON.stringify({ maxConcurrent: 2 }),
-      );
+      configureDelegate(session, { maxConcurrent: 2 });
       active = 0;
       maxActive = 0;
       subagents.respond([gated, gated, gated, gated]);
@@ -247,13 +237,10 @@ describe("delegate dispatch contract", () => {
       // bound of 1 must hold even when the global bound allows more.
       session = await openDelegateBoundary();
       const subagents = await installSubagentModel(session);
-      writeFileSync(
-        join(session.cwd, "delegate.json"),
-        JSON.stringify({
-          maxConcurrent: 3,
-          concurrency: { models: { "delegate-faux/faux-1": 1 } },
-        }),
-      );
+      configureDelegate(session, {
+        maxConcurrent: 3,
+        concurrency: { models: { "delegate-faux/faux-1": 1 } },
+      });
 
       let active = 0;
       let maxActive = 0;
@@ -276,6 +263,104 @@ describe("delegate dispatch contract", () => {
       expect(result.isError).toBe(false);
       expect(maxActive).toBe(1);
       expect(subagents.state.callCount).toBe(3);
+    },
+  );
+
+  test(
+    "a model reference outside the configured alternatives rejects the whole call",
+    async () => {
+      // SPEC: a task model must name an alternative configured under
+      // "models" in delegate.json; subagents otherwise run on the parent's
+      // model. A model the caller can merely name is not authorized — the
+      // rejection must happen before any task starts and must teach the
+      // configured set so the caller can self-correct.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      subagents.respond([fauxAssistantMessage("NEVER-RUNS")]);
+
+      const result = await callDelegate(session, {
+        tasks: [{ prompt: "nope", model: "delegate-faux/typo-9" }],
+      });
+
+      expect(result.isError).toBe(true);
+      expect(result.text).toContain("not configured");
+      expect(result.text).toContain("delegate-faux/faux-1"); // configured set listed
+      expect(subagents.state.callCount).toBe(0); // nothing started
+    },
+  );
+
+  test(
+    "a registry-resolvable model is still rejected unless configured",
+    async () => {
+      // The faux model is registered on the parent runtime and resolves in
+      // the registry, but resolution is gated on the configured allowlist:
+      // remove the entry and the same reference must fail; restore it and
+      // the task runs. Registry knowledge is not permission.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      configureDelegate(session, { models: ["some-other/model-1"] });
+      subagents.respond([fauxAssistantMessage("SHOULD-NOT-RUN")]);
+
+      const rejected = await callDelegate(session, {
+        tasks: [{ prompt: "x", model: subagents.spec }],
+      });
+      expect(rejected.isError).toBe(true);
+      expect(rejected.text).toContain("some-other/model-1");
+      expect(subagents.state.callCount).toBe(0);
+
+      configureDelegate(session, { models: [subagents.spec] });
+      subagents.respond([fauxAssistantMessage("ALLOWED-RUNS")]);
+      const allowed = await callDelegate(session, {
+        tasks: [{ prompt: "x", model: subagents.spec }],
+      });
+      expect(allowed.isError).toBe(false);
+      expect(allowed.text).toContain("ALLOWED-RUNS");
+    },
+  );
+
+  test(
+    "a configured reference that does not resolve in the registry rejects the call",
+    async () => {
+      // SPEC: a configured reference that cannot resolve in the session's
+      // model registry fails the whole call identically. The error names the
+      // configured entry so the human fixes delegate.json, not the caller.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      configureDelegate(session, {
+        models: [subagents.spec, "ghost-provider/model-x"],
+      });
+      subagents.respond([fauxAssistantMessage("NEVER-RUNS")]);
+
+      const result = await callDelegate(session, {
+        tasks: [{ prompt: "x", model: "ghost-provider/model-x" }],
+      });
+
+      expect(result.isError).toBe(true);
+      expect(result.text).toContain("ghost-provider/model-x");
+      expect(result.text).toContain("not available");
+      expect(result.text).toContain("delegate.json");
+      expect(subagents.state.callCount).toBe(0);
+    },
+  );
+
+  test(
+    "model references match configured alternatives case-insensitively",
+    async () => {
+      // Callers echo model strings in whatever casing they last saw; the
+      // gate tolerates that without widening the configured set — the
+      // canonical configured entry is what gets resolved, never the
+      // caller's casing of it.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      subagents.respond([fauxAssistantMessage("CASE-TOLERANT-RUNS")]);
+
+      const result = await callDelegate(session, {
+        tasks: [{ prompt: "x", model: "DELEGATE-FAUX/FAUX-1" }],
+      });
+
+      expect(result.isError).toBe(false);
+      expect(result.text).toContain("CASE-TOLERANT-RUNS");
+      expect(subagents.state.callCount).toBe(1);
     },
   );
 

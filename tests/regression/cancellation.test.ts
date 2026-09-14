@@ -8,7 +8,7 @@
  * `maxConcurrent: 1` bound let tests place tasks at exact lifecycle points.
  */
 import { afterEach, expect, test } from "bun:test";
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import type {
   TestSession,
@@ -23,6 +23,7 @@ import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import {
   callDelegate,
   callDelegateDetached,
+  configureDelegate,
   installSubagentModel,
   openDelegateBoundary,
   ticketIdOf,
@@ -37,10 +38,7 @@ afterEach(() => {
 
 function writeConcurrency(maxConcurrent: number): void {
   if (!session) throw new Error("session not open");
-  writeFileSync(
-    join(session.cwd, "delegate.json"),
-    JSON.stringify({ maxConcurrent }),
-  );
+  configureDelegate(session, { maxConcurrent });
 }
 
 /**
@@ -426,10 +424,7 @@ test(
     // measure wall-clock time." The budget comes from delegate.json.
     session = await openDelegateBoundary();
     const subagents = await installSubagentModel(session);
-    writeFileSync(
-      join(session.cwd, "delegate.json"),
-      JSON.stringify({ stallTimeoutMs: 150 }),
-    );
+    configureDelegate(session, { stallTimeoutMs: 150 });
 
     let release!: () => void;
     const gate = new Promise<void>((r) => (release = r));
@@ -485,10 +480,7 @@ test(
     // actually reached before the over-budget wait begins.
     session = await openDelegateBoundary();
     const subagents = await installSubagentModel(session);
-    writeFileSync(
-      join(session.cwd, "delegate.json"),
-      JSON.stringify({ stallTimeoutMs: 150 }),
-    );
+    configureDelegate(session, { stallTimeoutMs: 150 });
 
     const marker = join(session.cwd, "parked");
     let release!: () => void;
@@ -547,10 +539,7 @@ test(
     // a wedged in-flight provider call from the inactivity watchdog.
     session = await openDelegateBoundary();
     const subagents = await installSubagentModel(session);
-    writeFileSync(
-      join(session.cwd, "delegate.json"),
-      JSON.stringify({ stallTimeoutMs: 150 }),
-    );
+    configureDelegate(session, { stallTimeoutMs: 150 });
 
     let release!: () => void;
     const gate = new Promise<void>((r) => (release = r));

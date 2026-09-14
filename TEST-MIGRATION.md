@@ -29,11 +29,15 @@ copy its fixtures, mocks, call graph, or intermediate assertions.
 - `installSubagentModel` (`tests/support/pi-boundary.ts`) registers pi-ai's
   built-in `faux` provider on the test session's `modelRuntime`, giving tasks
   a provider-free model selectable through the public `model` task field.
-  This encodes a testability assumption for v2: subagent model resolution and
-  streaming must route through the parent session's model runtime/registry
-  (which `default`-profile parent-model inheritance needs anyway). If v2 ends
-  up creating subagent sessions on a different runtime, update the support
-  layer — not the tests.
+  It also configures that reference under `models` in the session's
+  `delegate.json`: the task `model` field only accepts the parent's model or
+  a configured alternative, so tests select the faux model exactly the way a
+  user would. `configureDelegate(session, patch)` shallow-merges into that
+  file without clobbering the allowlist. This encodes a testability assumption
+  for v2: subagent model resolution and streaming must route through the
+  parent session's model runtime/registry (which `default`-profile
+  parent-model inheritance needs anyway). If v2 ends up creating subagent
+  sessions on a different runtime, update the support layer — not the tests.
 - The harness session's `agentDir` is its temporary cwd, so
   `<cwd>/delegate.json` stands in for the user-global config file.
 - Assertions target observable outcomes (result text/isError/details, ticket
@@ -64,9 +68,13 @@ gaps.
   task/session ids; non-positive `deadlineMs`; scratch/isolated +
   `sessionId`/`resumeFrom`; mixed-mode conflict errors; prompt-less task
   without resume; unknown agent guidance; required-field messages for
-  ticket/session RPC.
-- **Gap:** model-reference resolution errors (unknown/unauthenticated model)
-  and corrective-hint wording depth are unasserted.
+  ticket/session RPC; `model` outside the configured alternatives rejects
+  the whole call before any task starts, listing the configured set; a
+  registry-resolvable but unconfigured reference is rejected the same way;
+  a configured reference that does not resolve in the registry names the
+  entry and the config file; references match configured alternatives
+  case-insensitively (`tests/contract/dispatch.test.ts`).
+- **Gap:** corrective-hint depth beyond listing the configured set.
 
 ### Synchronous dispatch
 
@@ -575,6 +583,35 @@ Promoted to live tests: the scratch-discard contract test. New live tests:
 read-only rejection, linked-worktree rejection with remedy, no
 shared/scratch reservation conflict, dead-process sweep, and a non-Git
 cwd copy.
+
+## Ninth tranche (model allowlist)
+
+Subagents now run on the parent's model unless a task's `model` field names
+an alternative configured under `"models"` in the user-global `delegate.json`
+(v1 let callers name any registry-resolvable model). This is a deliberate
+breaking change recorded in `COMPATIBILITY.md` with migration guidance.
+
+- `src/config.ts` parses and validates the `models` array (non-empty trimmed
+  strings, loud failure on malformed entries) and matches task references
+  case-insensitively against it — case tolerance never widens the configured
+  set.
+- `src/host.ts` gates before registry resolution: an unconfigured reference
+  rejects the whole call before tasks start, listing the configured
+  alternatives and the config path; a configured reference that cannot
+  resolve fails identically. The caller's casing is never resolved — the
+  canonical configured entry is.
+- The model-swap recovery hint and the tool manual now point at the
+  configured list instead of implying free model choice.
+- Test support: `installSubagentModel` configures its faux model reference in
+  `delegate.json` (a task could no longer select it otherwise), and
+  `configureDelegate` replaces the previous wholesale `writeFileSync` config
+  sites so no write clobbers the allowlist.
+- New live tests in `tests/contract/dispatch.test.ts`: unconfigured reference
+  rejection (nothing starts, configured set listed); the closed loophole
+  itself — a registry-resolvable model is rejected until configured, then
+  runs; a configured-but-unresolvable reference names the entry and the
+  config file; reference matching is case-insensitive without widening the
+  configured set.
 
 ## Next contract slices
 

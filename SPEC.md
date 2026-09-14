@@ -40,7 +40,7 @@ A task accepts:
 | `cwd` | Working directory; relative paths resolve from the parent cwd |
 | `systemPrompt` | Base prompt; project context is added separately |
 | `context` | `fresh` or `with-parent-transcript`; default is `fresh` |
-| `model` | Explicit model override |
+| `model` | Alternative model configured under `models` in the user-global `delegate.json`; omitting it runs the task on the parent's model. The model registry containing a model is not authorization — references outside the configured set are rejected |
 | `tools` | Exact capability list; `*` = read/write/edit/bash, `ro` = read/grep/find/ls |
 | `thinking` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max` |
 | `sessionId` | Key for a live reusable session |
@@ -61,6 +61,14 @@ first-definition-wins discovery. Project context is rebuilt for the task cwd;
 the parent's extension inventory, MCP tools, and user-global harness
 instructions are not inherited. Provider extensions are disabled except for
 the verified, provider-scoped allowlist.
+
+Subagents run on the parent's model. A task may instead name an alternative
+model configured under `"models"` in the user-global `delegate.json` — an
+array of model references the user has approved for delegation. Any other
+`model` value fails the whole call before tasks start, listing the configured
+alternatives; a configured reference that does not resolve in the session's
+model registry fails identically. Model selection is a user decision, not a
+caller decision.
 
 Tasks run concurrently subject to global and per-model limits. Overlapping
 same-call shared writers serialize in task order, and the result names the

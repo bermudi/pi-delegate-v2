@@ -16,6 +16,12 @@ export interface DelegateConfig {
   readonly maxConcurrent: number;
   readonly concurrency: ConcurrencyConfig;
   /**
+   * Alternative models a task `model` field may name, exactly as the user
+   * configured them. Empty means subagents may only run on the parent's
+   * model. The registry knowing a model is not authorization to use it.
+   */
+  readonly models: readonly string[];
+  /**
    * Inactivity watchdog: a task whose session emits no events for this long
    * is cooperatively aborted as stalled. 0 disables it.
    */
@@ -25,7 +31,22 @@ export interface DelegateConfig {
 export const DEFAULT_CONFIG: DelegateConfig = {
   maxConcurrent: 3,
   concurrency: { default: undefined, providers: {}, models: {} },
+  models: [],
   stallTimeoutMs: 15 * 60 * 1000,
+};
+
+/**
+ * Canonical configured entry for a task `model` reference, or undefined when
+ * the reference names no configured alternative. Case-insensitive: callers
+ * echo model strings in whatever casing they last saw, and tolerance here
+ * does not widen the set — the configured entries stay the only gate.
+ */
+export function matchConfiguredModel(
+  spec: string,
+  config: DelegateConfig,
+): string | undefined {
+  const wanted = spec.trim().toLowerCase();
+  return config.models.find((entry) => entry.toLowerCase() === wanted);
 };
 
 /** Effective per-model bound: model key, then provider, then default, then global. */
@@ -102,9 +123,30 @@ export function loadDelegateConfig(ctx: ExtensionContext): DelegateConfig {
   return {
     maxConcurrent: (maxConcurrent as number) ?? DEFAULT_CONFIG.maxConcurrent,
     concurrency: parseConcurrency(config.concurrency, path),
+    models: parseModels(config.models, path),
     stallTimeoutMs:
       (stallTimeoutMs as number) ?? DEFAULT_CONFIG.stallTimeoutMs,
   };
+}
+
+/**
+ * Parse the `models` allowlist: non-empty strings, stored trimmed. A
+ * malformed entry fails loudly at load — a silently dropped alternative
+ * would surface later as a confusing per-task rejection.
+ */
+function parseModels(value: unknown, path: string): string[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) {
+    throw new Error(`${path}: models must be an array of model references.`);
+  }
+  return value.map((entry) => {
+    if (typeof entry !== "string" || entry.trim() === "") {
+      throw new Error(
+        `${path}: models entries must be non-empty strings; got ${JSON.stringify(entry)}.`,
+      );
+    }
+    return entry.trim();
+  });
 }
 
 function isPositiveInteger(value: unknown): value is number {
