@@ -71,6 +71,14 @@ containing a model is not authorization to spend on it. A configured
 reference that does not resolve in the session's model registry fails the
 whole call, naming the config entry.
 
+The user-global `delegate.json` is discovered from the session's agent
+directory: the `DELEGATE_AGENT_DIR` environment variable when set, else the
+session-store layout (`<agentDir>/sessions/<slug>`), else — for sessions
+with no session directory — the session cwd behind a visible warning.
+Delegate-owned trees (`delegate-sessions/`, `delegate-scratch/`,
+`delegate-isolated/`) are created under the same resolved directory.
+Project files never become delegate configuration.
+
 Tasks run concurrently subject to global and per-model limits. Overlapping
 same-call shared writers serialize in task order, and the result names the
 serialized tasks and scope with the `isolated` remedy — independent same-repo

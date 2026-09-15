@@ -33,13 +33,18 @@ export async function openDelegateBoundary(): Promise<TestSession> {
   // session is in-memory, so v2 would resolve the agent dir to the session
   // cwd as a *warned* fallback (#12). Point DELEGATE_AGENT_DIR at the
   // session cwd — the explicit seam the fallback warning recommends — so
-  // the suite exercises the env source and stays warning-clean. This
-  // assumes sessions are used serially within a file (bun runs each test
-  // file in its own process), so the most recently opened session owns the
-  // value; configureDelegate already reads/writes delegate.json at
-  // session.cwd, so the env var and the file layout agree. Tests that need
-  // the fallback or session-store sources save/delete/restore the variable
-  // around the call.
+  // the suite exercises the env source and stays warning-clean.
+  // NOTE: all bun test files share ONE process, so this env var is
+  // process-global. It is safe only under the suite's actual discipline:
+  // every test opens its session here immediately before dispatching, one
+  // live session at a time, serially — the most recently opened session
+  // owns the value. Do not dispatch on a session opened before another
+  // session's openDelegateBoundary, and do not hold two live sessions
+  // that both dispatch; either would resolve the agent dir to a foreign
+  // session's cwd. Tests that need the fallback or session-store sources
+  // save/delete/restore the variable around the call.
+  // configureDelegate reads/writes delegate.json at session.cwd, so the
+  // env var and the file layout agree.
   process.env.DELEGATE_AGENT_DIR = resolve(session.cwd);
   return session;
 }

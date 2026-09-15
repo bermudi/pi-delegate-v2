@@ -97,7 +97,7 @@ const AGENT_DIR_ENV_VAR = "DELEGATE_AGENT_DIR";
 export function resolveAgentDir(ctx: ExtensionContext): AgentDirResolution {
   const fromEnv = process.env[AGENT_DIR_ENV_VAR];
   if (fromEnv !== undefined && fromEnv.trim() !== "") {
-    return { dir: fromEnv, source: "env" };
+    return { dir: fromEnv.trim(), source: "env" };
   }
   const sessionDir = ctx.sessionManager.getSessionDir();
   if (sessionDir && basename(dirname(sessionDir)) === "sessions") {

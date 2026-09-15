@@ -105,6 +105,38 @@ describe("regression: agentDir cwd fallback warns before proceeding (#12)", () =
   );
 
   test(
+    "an async dispatch on an in-memory session warns through the same latch",
+    async () => {
+      // #12 review: the warning sits before the sync/async split in
+      // execute, so a background-ticket dispatch warns too — assert it
+      // instead of trusting the placement. A fresh session means a fresh
+      // extension instance and a fresh latch.
+      session = await openDelegateBoundary();
+      subagents = await installSubagentModel(session);
+
+      const warnings = spyConsoleWarn();
+      const restoreEnv = withoutAgentDirEnv();
+      try {
+        subagents.respond([fauxAssistantMessage("ASYNC")]);
+        const result = await callDelegate(session, {
+          tasks: [{ prompt: "remember GAMMA-MARKER" }],
+          async: true,
+        });
+
+        expect(result.isError).toBe(false);
+        const fallback = warnings.lines.filter((line) =>
+          line.includes("DELEGATE_AGENT_DIR"),
+        );
+        expect(fallback).toHaveLength(1);
+        expect(fallback[0]).toContain(session!.cwd);
+      } finally {
+        restoreEnv.restore();
+        warnings.restore();
+      }
+    },
+  );
+
+  test(
     "a file-backed session under <agentDir>/sessions/ resolves via the session source",
     async () => {
       // Issue #12, layout shape: when the session dir sits in Pi's

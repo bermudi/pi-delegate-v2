@@ -45,10 +45,12 @@ copy its fixtures, mocks, call graph, or intermediate assertions.
   fallback (#12): `openDelegateBoundary` therefore sets
   `DELEGATE_AGENT_DIR` to the session cwd — the explicit seam the warning
   recommends — keeping the suite on the env source and warning-clean.
-  This assumes sessions are used serially within a file (bun runs each
-  test file in its own process), so the most recently opened session owns
-  the value. Tests exercising the cwd fallback or the session-store
-  layout save/delete/restore the variable around the call.
+  All bun test files share ONE process, so the env var is process-global;
+  it is safe only under the suite's discipline: every test opens its
+  session via openDelegateBoundary immediately before dispatching, one
+  live session at a time, serially. Tests exercising the cwd fallback or
+  the session-store layout save/delete/restore the variable around the
+  call.
 - Assertions target observable outcomes (result text/isError/details, ticket
   status wording, filesystem effects, provider call counts), never v1 prose
   or internal state. Exact ticket-id format and wording stay loose on
