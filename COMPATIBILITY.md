@@ -88,8 +88,9 @@ and migration guidance; none may arrive as silent rewrite drift.
   with guidance toward the config; a configured reference that does not
   resolve in the session's registry fails the same way, naming the entry.
   Migration: move any per-task model choice into `delegate.json`
-  `"models"` (e.g. `{"default": "anthropic/claude-haiku-4-5",
-  "scout": "google/gemini-2.5-flash"}`); callers stop sending `model`. The
+  `"models"` — e.g. `{"default": "<provider/model-id>",
+  "scout": "<provider/model-id>"}` with references taken from your actual
+  configured models; callers stop sending `model`. The
   model-failure recovery hint now addresses the operator, not the caller.
 
 ## v2 intentionally may change
