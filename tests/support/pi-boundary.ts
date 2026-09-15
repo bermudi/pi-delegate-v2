@@ -25,10 +25,23 @@ export interface PublicTool {
 }
 
 export async function openDelegateBoundary(): Promise<TestSession> {
-  return createTestSession({
+  const session = await createTestSession({
     extensions: [extensionPath],
     propagateErrors: false,
   });
+  // Pi 0.84.2 exposes no agentDir on ExtensionContext and the harness
+  // session is in-memory, so v2 would resolve the agent dir to the session
+  // cwd as a *warned* fallback (#12). Point DELEGATE_AGENT_DIR at the
+  // session cwd — the explicit seam the fallback warning recommends — so
+  // the suite exercises the env source and stays warning-clean. This
+  // assumes sessions are used serially within a file (bun runs each test
+  // file in its own process), so the most recently opened session owns the
+  // value; configureDelegate already reads/writes delegate.json at
+  // session.cwd, so the env var and the file layout agree. Tests that need
+  // the fallback or session-store sources save/delete/restore the variable
+  // around the call.
+  process.env.DELEGATE_AGENT_DIR = resolve(session.cwd);
+  return session;
 }
 
 export function delegateTool(session: TestSession): PublicTool {

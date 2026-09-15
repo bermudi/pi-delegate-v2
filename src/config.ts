@@ -66,18 +66,49 @@ export function modelConcurrencyLimit(
 
 const CONFIG_FILE = "delegate.json";
 
+/** Where a resolved agent directory came from. */
+export type AgentDirSource = "env" | "session" | "cwd";
+
+export interface AgentDirResolution {
+  readonly dir: string;
+  readonly source: AgentDirSource;
+}
+
+const AGENT_DIR_ENV_VAR = "DELEGATE_AGENT_DIR";
+
 /**
- * The user-global config directory for the running session. Pi does not expose
- * `agentDir` on the extension context, so derive it from the session store
- * location (`<agentDir>/sessions/<cwd-slug>`). In-memory sessions (tests) have
- * no session dir; there the harness's agentDir is the session cwd.
+ * Resolve the user-global agent directory, with provenance, from three
+ * sources in order:
+ *
+ * 1. `DELEGATE_AGENT_DIR` — explicit operator intent; never warned about.
+ * 2. The session-store layout (`<agentDir>/sessions/<cwd-slug>`), which is
+ *    how the Pi CLI lays sessions out.
+ * 3. `ctx.cwd` — the fallback for embedded hosts running in-memory
+ *    sessions, which have no session dir.
+ *
+ * Pi 0.84.2 does not expose `agentDir` on `ExtensionContext` (tracked
+ * upstream as earendil-works/pi#4807). The cwd fallback is warned about
+ * once at dispatch (see the extension in `delegate.ts`) rather than thrown,
+ * because embedded hosts — including our test harness — legitimately run
+ * without a session dir and would otherwise be unusable. When `ctx.agentDir`
+ * lands upstream, delete the inference and the fallback and read it
+ * directly.
  */
-export function agentDirOf(ctx: ExtensionContext): string {
+export function resolveAgentDir(ctx: ExtensionContext): AgentDirResolution {
+  const fromEnv = process.env[AGENT_DIR_ENV_VAR];
+  if (fromEnv !== undefined && fromEnv.trim() !== "") {
+    return { dir: fromEnv, source: "env" };
+  }
   const sessionDir = ctx.sessionManager.getSessionDir();
   if (sessionDir && basename(dirname(sessionDir)) === "sessions") {
-    return dirname(dirname(sessionDir));
+    return { dir: dirname(dirname(sessionDir)), source: "session" };
   }
-  return ctx.cwd;
+  return { dir: ctx.cwd, source: "cwd" };
+}
+
+/** The resolved agent directory (see `resolveAgentDir` for provenance). */
+export function agentDirOf(ctx: ExtensionContext): string {
+  return resolveAgentDir(ctx).dir;
 }
 
 export function configPathOf(ctx: ExtensionContext): string {

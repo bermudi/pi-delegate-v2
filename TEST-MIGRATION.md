@@ -39,7 +39,16 @@ copy its fixtures, mocks, call graph, or intermediate assertions.
   session's model runtime/registry. If v2 ends up creating subagent sessions
   on a different runtime, update the support layer — not the tests.
 - The harness session's `agentDir` is its temporary cwd, so
-  `<cwd>/delegate.json` stands in for the user-global config file.
+  `<cwd>/delegate.json` stands in for the user-global config file. Pi
+  0.84.2 exposes no `agentDir` on `ExtensionContext` and the harness
+  session is in-memory, so v2 resolves that cwd only as a *warned*
+  fallback (#12): `openDelegateBoundary` therefore sets
+  `DELEGATE_AGENT_DIR` to the session cwd — the explicit seam the warning
+  recommends — keeping the suite on the env source and warning-clean.
+  This assumes sessions are used serially within a file (bun runs each
+  test file in its own process), so the most recently opened session owns
+  the value. Tests exercising the cwd fallback or the session-store
+  layout save/delete/restore the variable around the call.
 - Assertions target observable outcomes (result text/isError/details, ticket
   status wording, filesystem effects, provider call counts), never v1 prose
   or internal state. Exact ticket-id format and wording stay loose on
@@ -306,6 +315,26 @@ gaps.
 - **Gap:** async-no-usage property; the privacy property is only assertable
   once v2 chooses its telemetry surface; TUI/status rendering is
   intentionally out of scope for boundary tests.
+
+### Agent directory resolution
+
+- **Contract:** the user-global agent directory resolves from
+  `DELEGATE_AGENT_DIR` when set, else Pi's session-store layout
+  (`<agentDir>/sessions/<slug>`), else the session cwd. Pi 0.84.2 exposes
+  no `agentDir` on `ExtensionContext`; when it does (earendil-works/pi#4807),
+  the inference and the fallback are deleted.
+- **Regression (#12):** the cwd fallback — taken by embedded/in-memory
+  hosts — must not be silent: it warns once per extension instance before
+  the first dispatch, naming the directory, `delegate.json`, the
+  `delegate-*` trees that may be created under it, and the
+  `DELEGATE_AGENT_DIR` escape hatch; the call itself proceeds (warn, not
+  reject). A file-backed session under `<agentDir>/sessions/` resolves to
+  that agent dir via the "session" source with no warning.
+- **Internal:** the provenance tuple shape and the warning latch are free
+  to change; only warn-once-then-proceed and source precedence are
+  contract.
+- **Covered now:** `tests/regression/agent-dir-fallback.test.ts`.
+- **Gap:** none.
 
 ## First tranche
 

@@ -10,7 +10,7 @@ import {
   type ExtensionAPI,
 } from "@earendil-works/pi-coding-agent";
 import { AdmissionController, type AdmissionGrant } from "./src/admission.ts";
-import { loadDelegateConfig } from "./src/config.ts";
+import { loadDelegateConfig, resolveAgentDir } from "./src/config.ts";
 import { DispatchCoordinator } from "./src/coordinator.ts";
 import {
   formatDispatchResult,
@@ -321,6 +321,9 @@ export default function delegateExtension(api: ExtensionAPI): void {
   const sessions = new SessionPool();
   const coordinator = new DispatchCoordinator(tickets);
   let callSeq = 0;
+  // Owned by this closure: one fallback warning per extension instance, not
+  // per call (see resolveAgentDir for why the fallback exists at all).
+  let warnedAgentDirFallback = false;
 
   api.on("session_shutdown", () => {
     sessions.shutdown();
@@ -364,6 +367,13 @@ export default function delegateExtension(api: ExtensionAPI): void {
           };
         }
 
+        const agentDirResolution = resolveAgentDir(ctx);
+        if (agentDirResolution.source === "cwd" && !warnedAgentDirFallback) {
+          warnedAgentDirFallback = true;
+          console.warn(
+            `[delegate] Falling back to '${agentDirResolution.dir}' as the agent directory: delegate.json will be read from there, and delegate-sessions/, delegate-scratch/, delegate-isolated/ may be created under it. Set DELEGATE_AGENT_DIR to choose an agent directory explicitly. This warning appears once.`,
+          );
+        }
         const env = hostEnvironment(ctx, () => api.getActiveTools());
         const config = loadDelegateConfig(ctx);
         const tasks = resolveTasks(call.tasks, env, config);
