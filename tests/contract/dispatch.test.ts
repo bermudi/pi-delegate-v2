@@ -34,8 +34,8 @@ describe("delegate dispatch contract", () => {
 
       const result = await callDelegate(session, {
         tasks: [
-          { prompt: "first", model: subagents.spec },
-          { prompt: "second", model: subagents.spec },
+          { prompt: "first" },
+          { prompt: "second" },
         ],
       });
 
@@ -64,8 +64,8 @@ describe("delegate dispatch contract", () => {
 
       const result = await callDelegate(session, {
         tasks: [
-          { prompt: "fine", model: subagents.spec },
-          { prompt: "doomed", model: subagents.spec },
+          { prompt: "fine" },
+          { prompt: "doomed" },
         ],
       });
 
@@ -86,7 +86,7 @@ describe("delegate dispatch contract", () => {
       subagents.respond([fauxAssistantMessage("OUTPUT-ID")]);
 
       const result = await callDelegate(session, {
-        tasks: [{ id: "corr-1", prompt: "x", model: subagents.spec }],
+        tasks: [{ id: "corr-1", prompt: "x" }],
       });
 
       expect(result.isError).toBe(false);
@@ -106,7 +106,7 @@ describe("delegate dispatch contract", () => {
       subagents.respond([fauxAssistantMessage("done")]);
 
       await callDelegate(session, {
-        tasks: [{ prompt: "x", model: subagents.spec }],
+        tasks: [{ prompt: "x" }],
       });
 
       const end = session.events.all
@@ -133,7 +133,7 @@ describe("delegate dispatch contract", () => {
       subagents.respond([fauxAssistantMessage("OUTPUT-ASYNC")]);
 
       const dispatched = await callDelegate(session, {
-        tasks: [{ prompt: "bg", model: subagents.spec }],
+        tasks: [{ prompt: "bg" }],
         async: true,
       });
       expect(dispatched.isError).toBe(false);
@@ -175,7 +175,6 @@ describe("delegate dispatch contract", () => {
       const result = await callDelegate(session, {
         tasks: [0, 1, 2].map((n) => ({
           prompt: `task ${n}`,
-          model: subagents.spec,
           tools: ["read"],
         })),
       });
@@ -209,7 +208,6 @@ describe("delegate dispatch contract", () => {
       await callDelegate(session, {
         tasks: [0, 1, 2].map((n) => ({
           prompt: `low ${n}`,
-          model: subagents.spec,
           tools: ["read"],
         })),
       });
@@ -222,7 +220,6 @@ describe("delegate dispatch contract", () => {
       await callDelegate(session, {
         tasks: [0, 1, 2, 3].map((n) => ({
           prompt: `high ${n}`,
-          model: subagents.spec,
           tools: ["read"],
         })),
       });
@@ -256,7 +253,6 @@ describe("delegate dispatch contract", () => {
       const result = await callDelegate(session, {
         tasks: [0, 1, 2].map((n) => ({
           prompt: `task ${n}`,
-          model: subagents.spec,
           tools: ["read"],
         })),
       });
@@ -267,54 +263,54 @@ describe("delegate dispatch contract", () => {
   );
 
   test(
-    "a model reference outside the configured alternatives rejects the whole call",
+    "a task model field is rejected with guidance before any task starts",
     async () => {
-      // SPEC: a task model must name an alternative configured under
-      // "models" in delegate.json; subagents otherwise run on the parent's
-      // model. A model the caller can merely name is not authorized — the
-      // rejection must happen before any task starts and must teach the
-      // configured set so the caller can self-correct.
+      // SPEC: callers never select subagent models — models are shit at
+      // picking models. A task `model` field (any value, even one the
+      // registry knows) fails the whole call before tasks start and points
+      // at the user-side config instead.
       session = await openDelegateBoundary();
       const subagents = await installSubagentModel(session);
       subagents.respond([fauxAssistantMessage("NEVER-RUNS")]);
 
       const result = await callDelegate(session, {
-        tasks: [{ prompt: "nope", model: "delegate-faux/typo-9" }],
+        tasks: [{ prompt: "nope", model: subagents.spec }],
       });
 
       expect(result.isError).toBe(true);
-      expect(result.text).toContain("not configured");
-      expect(result.text).toContain("delegate-faux/faux-1"); // configured set listed
+      expect(result.text).toContain("model field is not accepted");
+      expect(result.text).toContain("delegate.json");
       expect(subagents.state.callCount).toBe(0); // nothing started
     },
   );
 
   test(
-    "a registry-resolvable model is still rejected unless configured",
+    "an agent's configured model wins over the default entry",
     async () => {
-      // The faux model is registered on the parent runtime and resolves in
-      // the registry, but resolution is gated on the configured allowlist:
-      // remove the entry and the same reference must fail; restore it and
-      // the task runs. Registry knowledge is not permission.
+      // SPEC: a task runs on the model configured for its agent, else the
+      // "default" entry. Two independent faux providers prove which model
+      // actually served each task — scout gets its own entry, an inline
+      // task falls back to default.
       session = await openDelegateBoundary();
       const subagents = await installSubagentModel(session);
-      configureDelegate(session, { models: ["some-other/model-1"] });
-      subagents.respond([fauxAssistantMessage("SHOULD-NOT-RUN")]);
-
-      const rejected = await callDelegate(session, {
-        tasks: [{ prompt: "x", model: subagents.spec }],
+      configureDelegate(session, {
+        models: { default: subagents.alt.spec, scout: subagents.spec },
       });
-      expect(rejected.isError).toBe(true);
-      expect(rejected.text).toContain("some-other/model-1");
-      expect(subagents.state.callCount).toBe(0);
+      subagents.respond([fauxAssistantMessage("SCOUT-RUNS-ITS-OWN")]);
+      subagents.alt.respond([fauxAssistantMessage("INLINE-RUNS-DEFAULT")]);
 
-      configureDelegate(session, { models: [subagents.spec] });
-      subagents.respond([fauxAssistantMessage("ALLOWED-RUNS")]);
-      const allowed = await callDelegate(session, {
-        tasks: [{ prompt: "x", model: subagents.spec }],
+      const result = await callDelegate(session, {
+        tasks: [
+          { prompt: "look around", agent: "scout" },
+          { prompt: "plain work" },
+        ],
       });
-      expect(allowed.isError).toBe(false);
-      expect(allowed.text).toContain("ALLOWED-RUNS");
+
+      expect(result.isError).toBe(false);
+      expect(result.text).toContain("SCOUT-RUNS-ITS-OWN");
+      expect(result.text).toContain("INLINE-RUNS-DEFAULT");
+      expect(subagents.state.callCount).toBe(1);
+      expect(subagents.alt.state.callCount).toBe(1);
     },
   );
 
@@ -322,17 +318,17 @@ describe("delegate dispatch contract", () => {
     "a configured reference that does not resolve in the registry rejects the call",
     async () => {
       // SPEC: a configured reference that cannot resolve in the session's
-      // model registry fails the whole call identically. The error names the
-      // configured entry so the human fixes delegate.json, not the caller.
+      // model registry fails the whole call. The error names the config
+      // entry so the human fixes delegate.json, not the caller.
       session = await openDelegateBoundary();
       const subagents = await installSubagentModel(session);
       configureDelegate(session, {
-        models: [subagents.spec, "ghost-provider/model-x"],
+        models: { default: "ghost-provider/model-x" },
       });
       subagents.respond([fauxAssistantMessage("NEVER-RUNS")]);
 
       const result = await callDelegate(session, {
-        tasks: [{ prompt: "x", model: "ghost-provider/model-x" }],
+        tasks: [{ prompt: "x" }],
       });
 
       expect(result.isError).toBe(true);
@@ -340,27 +336,6 @@ describe("delegate dispatch contract", () => {
       expect(result.text).toContain("not available");
       expect(result.text).toContain("delegate.json");
       expect(subagents.state.callCount).toBe(0);
-    },
-  );
-
-  test(
-    "model references match configured alternatives case-insensitively",
-    async () => {
-      // Callers echo model strings in whatever casing they last saw; the
-      // gate tolerates that without widening the configured set — the
-      // canonical configured entry is what gets resolved, never the
-      // caller's casing of it.
-      session = await openDelegateBoundary();
-      const subagents = await installSubagentModel(session);
-      subagents.respond([fauxAssistantMessage("CASE-TOLERANT-RUNS")]);
-
-      const result = await callDelegate(session, {
-        tasks: [{ prompt: "x", model: "DELEGATE-FAUX/FAUX-1" }],
-      });
-
-      expect(result.isError).toBe(false);
-      expect(result.text).toContain("CASE-TOLERANT-RUNS");
-      expect(subagents.state.callCount).toBe(1);
     },
   );
 
@@ -390,7 +365,6 @@ describe("delegate dispatch contract", () => {
         tasks: [
           {
             prompt: "look back",
-            model: subagents.spec,
             context: "with-parent-transcript",
           },
         ],

@@ -62,7 +62,7 @@ const taskSchema = Type.Object(
     model: Type.Optional(
       Type.String({
         description:
-          "Alternative model configured under \"models\" in the user-global delegate.json; omit to inherit the parent's model. Unconfigured references are rejected.",
+          "Rejected: callers do not select subagent models. Omit entirely — tasks run on the parent's model, or the model the user configured for the agent in delegate.json.",
       }),
     ),
     tools: Type.Optional(
@@ -229,14 +229,12 @@ Delegate runs subagent tasks synchronously or as an asynchronous ticket.
   and runs the batch in the background.
 - Task fields: \`prompt\` (required unless \`resumeFrom\`), \`id\` (correlation
   key), \`agent\` (named profile), \`cwd\`, \`systemPrompt\`, \`context\`,
-  \`model\` (a \"models\" entry from delegate.json), \`tools\` (\`*\`/\`ro\`
-  groups or names), \`thinking\`, \`deadlineMs\`, \`sessionId\`, \`resumeFrom\`,
-  \`workspace\` (shared/scratch/isolated). A top-level \`workspace\` is the
-  batch default.
-- Models: subagents run on the parent's model unless \`model\` names an
-  alternative the user configured under \"models\" in the user-global
-  delegate.json. Any other model reference is rejected — the registry knowing
-  a model is not permission to spend on it.
+  \`tools\` (\`*\`/\`ro\` groups or names), \`thinking\`, \`deadlineMs\`,
+  \`sessionId\`, \`resumeFrom\`, \`workspace\` (shared/scratch/isolated).
+  A top-level \`workspace\` is the batch default.
+- Models: you never pick models. Tasks run on the parent's model, or on the
+  model the user configured for the task's agent under \"models\" in the
+  user-global delegate.json. A task \`model\` field is rejected.
 
 ## Workspaces
 - \`shared\` (default): the task edits the caller's tree directly. Writers

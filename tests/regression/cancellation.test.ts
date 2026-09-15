@@ -80,7 +80,6 @@ test(
     const dispatched = await callDelegate(session, {
       tasks: [0, 1].map((n) => ({
         prompt: `queued ${n}`,
-        model: subagents.spec,
         tools: ["read"],
       })),
       async: true,
@@ -141,7 +140,7 @@ test(
     subagents.respond([turnOne]);
 
     const dispatched = await callDelegate(session, {
-      tasks: [{ prompt: "park me", model: subagents.spec, tools: ["bash"] }],
+      tasks: [{ prompt: "park me",  tools: ["bash"] }],
       async: true,
     });
     const ticket = ticketIdOf(dispatched.text);
@@ -196,7 +195,7 @@ test(
     subagents.respond([gated, fauxAssistantMessage("AFTER-QUARANTINE")]);
 
     const dispatched = await callDelegate(session, {
-      tasks: [{ prompt: "hold", model: subagents.spec, tools: ["write"] }],
+      tasks: [{ prompt: "hold",  tools: ["write"] }],
       async: true,
     });
     const ticket = ticketIdOf(dispatched.text);
@@ -219,7 +218,7 @@ test(
 
     // While the worker may still mutate, conflicting work rejects.
     const rejected = await callDelegate(session, {
-      tasks: [{ prompt: "conflict", model: subagents.spec, tools: ["write"] }],
+      tasks: [{ prompt: "conflict",  tools: ["write"] }],
     });
     expect(rejected.isError).toBe(true);
     expect(rejected.text).toMatch(/conflict|running|overlap|active/i);
@@ -239,7 +238,7 @@ test(
     expect(settled.text).not.toMatch(/— (completed|ok)/i);
 
     const admitted = await callDelegate(session, {
-      tasks: [{ prompt: "after", model: subagents.spec, tools: ["write"] }],
+      tasks: [{ prompt: "after",  tools: ["write"] }],
     });
     expect(admitted.isError).toBe(false);
     expect(admitted.text).toContain("AFTER-QUARANTINE");
@@ -275,7 +274,6 @@ test(
       tasks: [
         {
           prompt: "hang",
-          model: subagents.spec,
           tools: ["write"],
           deadlineMs: 500,
         },
@@ -289,7 +287,7 @@ test(
 
     // The abandoned worker may still mutate: conflicting work rejects.
     const rejected = await callDelegate(session, {
-      tasks: [{ prompt: "conflict", model: subagents.spec, tools: ["write"] }],
+      tasks: [{ prompt: "conflict",  tools: ["write"] }],
     });
     expect(rejected.isError).toBe(true);
     expect(rejected.text).toMatch(/conflict|running|overlap|active/i);
@@ -300,7 +298,7 @@ test(
     // provably gone.
     release();
     const admitted = await dispatchUntilAdmitted(session, {
-      tasks: [{ prompt: "after", model: subagents.spec, tools: ["write"] }],
+      tasks: [{ prompt: "after",  tools: ["write"] }],
     });
     expect(admitted.isError).toBe(false);
     expect(admitted.text).toContain("AFTER-QUARANTINE");
@@ -337,7 +335,6 @@ test(
       tasks: [
         {
           prompt: "hang",
-          model: subagents.spec,
           tools: ["write"],
           deadlineMs: 60_000,
         },
@@ -363,14 +360,14 @@ test(
     // The worker's termination is still unconfirmed: its scope stays
     // reserved until the gate releases and quiescence is proven.
     const rejected = await callDelegate(session, {
-      tasks: [{ prompt: "conflict", model: subagents.spec, tools: ["write"] }],
+      tasks: [{ prompt: "conflict",  tools: ["write"] }],
     });
     expect(rejected.isError).toBe(true);
     expect(rejected.text).toMatch(/conflict|running|overlap|active/i);
 
     release();
     const admitted = await dispatchUntilAdmitted(session, {
-      tasks: [{ prompt: "after", model: subagents.spec, tools: ["write"] }],
+      tasks: [{ prompt: "after",  tools: ["write"] }],
     });
     expect(admitted.isError).toBe(false);
     expect(admitted.text).toContain("AFTER-QUARANTINE");
@@ -392,7 +389,7 @@ test(
     subagents.respond([gated]);
 
     const dispatched = await callDelegate(session, {
-      tasks: [{ prompt: "streaming", model: subagents.spec, tools: ["read"] }],
+      tasks: [{ prompt: "streaming",  tools: ["read"] }],
       async: true,
     });
     const ticket = ticketIdOf(dispatched.text);
@@ -442,7 +439,7 @@ test(
     ]);
 
     const result = await callDelegate(session, {
-      tasks: [{ prompt: "hang", model: subagents.spec, tools: ["write"] }],
+      tasks: [{ prompt: "hang",  tools: ["write"] }],
     });
     // The call returned at all: settlement did not wait on the still-gated
     // worker. The cause is the inactivity watchdog — not a deadline, not an
@@ -454,13 +451,13 @@ test(
     // Termination is unconfirmed while the gate holds: the worker's scope
     // stays reserved, same as any quarantined cancellation.
     const rejected = await callDelegate(session, {
-      tasks: [{ prompt: "conflict", model: subagents.spec, tools: ["write"] }],
+      tasks: [{ prompt: "conflict",  tools: ["write"] }],
     });
     expect(rejected.isError).toBe(true);
 
     release();
     const admitted = await dispatchUntilAdmitted(session, {
-      tasks: [{ prompt: "after", model: subagents.spec, tools: ["write"] }],
+      tasks: [{ prompt: "after",  tools: ["write"] }],
     });
     expect(admitted.isError).toBe(false);
     expect(admitted.text).toContain("AFTER-QUARANTINE");
@@ -494,7 +491,7 @@ test(
     subagents.respond([turnOne, fauxAssistantMessage("PARKED-DONE")]);
 
     const dispatched = await callDelegate(session, {
-      tasks: [{ prompt: "park me", model: subagents.spec, tools: ["bash"] }],
+      tasks: [{ prompt: "park me",  tools: ["bash"] }],
       async: true,
     });
     const ticket = ticketIdOf(dispatched.text);
@@ -550,7 +547,7 @@ test(
     subagents.respond([gated]);
 
     const dispatched = await callDelegate(session, {
-      tasks: [{ prompt: "hang", model: subagents.spec, tools: ["write"] }],
+      tasks: [{ prompt: "hang",  tools: ["write"] }],
       async: true,
     });
     const ticket = ticketIdOf(dispatched.text);

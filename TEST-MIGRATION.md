@@ -28,16 +28,15 @@ copy its fixtures, mocks, call graph, or intermediate assertions.
   (`session.session.abort()`) — the awaited `run` API cannot express this.
 - `installSubagentModel` (`tests/support/pi-boundary.ts`) registers pi-ai's
   built-in `faux` provider on the test session's `modelRuntime`, giving tasks
-  a provider-free model selectable through the public `model` task field.
-  It also configures that reference under `models` in the session's
-  `delegate.json`: the task `model` field only accepts the parent's model or
-  a configured alternative, so tests select the faux model exactly the way a
-  user would. `configureDelegate(session, patch)` shallow-merges into that
-  file without clobbering the allowlist. This encodes a testability assumption
-  for v2: subagent model resolution and streaming must route through the
-  parent session's model runtime/registry (which `default`-profile
-  parent-model inheritance needs anyway). If v2 ends up creating subagent
-  sessions on a different runtime, update the support layer — not the tests.
+  a provider-free model — plus a second one (`alt`) for precedence proofs.
+  Tasks carry no model field, so the helper configures its reference as the
+  `models.default` entry in the session's `delegate.json`: config is the only
+  model source. `configureDelegate(session, patch)` shallow-merges into that
+  file without clobbering the map. This encodes a testability assumption for
+  v2: subagent model resolution and streaming must route through the parent
+  session's model runtime/registry (which `default`-profile parent-model
+  inheritance needs anyway). If v2 ends up creating subagent sessions on a
+  different runtime, update the support layer — not the tests.
 - The harness session's `agentDir` is its temporary cwd, so
   `<cwd>/delegate.json` stands in for the user-global config file.
 - Assertions target observable outcomes (result text/isError/details, ticket
@@ -68,13 +67,12 @@ gaps.
   task/session ids; non-positive `deadlineMs`; scratch/isolated +
   `sessionId`/`resumeFrom`; mixed-mode conflict errors; prompt-less task
   without resume; unknown agent guidance; required-field messages for
-  ticket/session RPC; `model` outside the configured alternatives rejects
-  the whole call before any task starts, listing the configured set; a
-  registry-resolvable but unconfigured reference is rejected the same way;
-  a configured reference that does not resolve in the registry names the
-  entry and the config file; references match configured alternatives
-  case-insensitively (`tests/contract/dispatch.test.ts`).
-- **Gap:** corrective-hint depth beyond listing the configured set.
+  ticket/session RPC; a task `model` field is rejected before any task
+  starts with guidance toward the config; an agent's `models` entry wins
+  over the `default` entry; a configured reference that does not resolve
+  in the registry names the entry and the config file
+  (`tests/contract/dispatch.test.ts`).
+- **Gap:** none specific to model selection.
 
 ### Synchronous dispatch
 
@@ -195,7 +193,9 @@ gaps.
   file bookkeeping.
 - **Covered now:** pool + list + continuation on reuse; `close` removes and
   a later call starts fresh; frozen-config mismatch rejects with an
-  actionable error; a pooled session cancelled mid-reuse is evicted and the
+  actionable error; a pooled session whose configured model changed between
+  calls rejects the same way (model freeze compares resolved models);
+  a pooled session cancelled mid-reuse is evicted and the
   next call starts fresh (busy `close` also rejected in-flight); `close` on
   an unknown session errors; missing-transcript `resumeFrom` error; a
   `sessionId` held by a running ticket rejects conflicting reuse;
@@ -584,34 +584,38 @@ read-only rejection, linked-worktree rejection with remedy, no
 shared/scratch reservation conflict, dead-process sweep, and a non-Git
 cwd copy.
 
-## Ninth tranche (model allowlist)
+## Ninth tranche (no caller model selection)
 
-Subagents now run on the parent's model unless a task's `model` field names
-an alternative configured under `"models"` in the user-global `delegate.json`
-(v1 let callers name any registry-resolvable model). This is a deliberate
-breaking change recorded in `COMPATIBILITY.md` with migration guidance.
+Tasks no longer select models at all. The task `model` field is rejected
+whole-call with guidance toward the config; model assignment is
+user-only — the parent's model by default, or the per-agent entry under
+`"models"` in the user-global `delegate.json` (object: agent name or
+`"default"` → reference; `"default"` covers inline tasks and agents without
+their own entry). Recorded as a deliberate breaking change in
+`COMPATIBILITY.md` with migration guidance. This supersedes the interim
+allowlist design from earlier in the same tranche.
 
-- `src/config.ts` parses and validates the `models` array (non-empty trimmed
-  strings, loud failure on malformed entries) and matches task references
-  case-insensitively against it — case tolerance never widens the configured
-  set.
-- `src/host.ts` gates before registry resolution: an unconfigured reference
-  rejects the whole call before tasks start, listing the configured
-  alternatives and the config path; a configured reference that cannot
-  resolve fails identically. The caller's casing is never resolved — the
-  canonical configured entry is.
-- The model-swap recovery hint and the tool manual now point at the
-  configured list instead of implying free model choice.
-- Test support: `installSubagentModel` configures its faux model reference in
-  `delegate.json` (a task could no longer select it otherwise), and
-  `configureDelegate` replaces the previous wholesale `writeFileSync` config
-  sites so no write clobbers the allowlist.
-- New live tests in `tests/contract/dispatch.test.ts`: unconfigured reference
-  rejection (nothing starts, configured set listed); the closed loophole
-  itself — a registry-resolvable model is rejected until configured, then
-  runs; a configured-but-unresolvable reference names the entry and the
-  config file; reference matching is case-insensitive without widening the
-  configured set.
+- `src/config.ts` parses and validates the `models` map — keys must be
+  `"default"` or a known agent (typos fail at load), values non-empty
+  trimmed references — and resolves per task: agent entry → `default`
+  entry → parent model.
+- `src/validation.ts` rejects any task `model` field before tasks start;
+  the schema keeps the key so the rejection is a targeted, teachable error
+  instead of a generic unknown-property failure.
+- `src/host.ts` resolves the configured reference through the registry; a
+  configured-but-unresolvable entry fails the whole call naming the entry
+  and config path.
+- The model-failure recovery hint addresses the operator (reconfigure
+  delegate.json), not the caller (which has no model recourse).
+- Test support: `installSubagentModel` configures its reference as
+  `models.default` and installs a second faux provider (`alt`) for
+  precedence proofs; every task input across the suites dropped its
+  `model` field.
+- New live tests: task `model` field rejection (nothing starts); agent
+  entry beats `default` (two providers prove which served each task);
+  configured-but-unresolvable entry rejection; a pooled session whose
+  configured model changed between calls rejects as a frozen-config
+  mismatch (`tests/contract/sessions.test.ts`).
 
 ## Next contract slices
 

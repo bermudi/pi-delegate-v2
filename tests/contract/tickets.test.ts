@@ -74,7 +74,7 @@ describe("delegate ticket contract", () => {
       subagents.respond([step]);
 
       const dispatched = await callDelegate(session, {
-        tasks: [{ prompt: "bg", model: subagents.spec }],
+        tasks: [{ prompt: "bg" }],
         async: true,
       });
       const ticket = ticketIdOf(dispatched.text);
@@ -111,7 +111,7 @@ describe("delegate ticket contract", () => {
       subagents.respond([step]);
 
       const dispatched = await callDelegate(session, {
-        tasks: [{ prompt: "bg", model: subagents.spec }],
+        tasks: [{ prompt: "bg" }],
         async: true,
       });
       const ticket = ticketIdOf(dispatched.text);
@@ -146,7 +146,7 @@ describe("delegate ticket contract", () => {
       subagents.respond([step]);
 
       const dispatched = await callDelegate(session, {
-        tasks: [{ prompt: "bg", model: subagents.spec }],
+        tasks: [{ prompt: "bg" }],
         async: true,
       });
       const ticket = ticketIdOf(dispatched.text);
@@ -183,8 +183,8 @@ describe("delegate ticket contract", () => {
 
       const dispatched = await callDelegate(session, {
         tasks: [
-          { prompt: "quick", model: subagents.spec },
-          { prompt: "slow", model: subagents.spec },
+          { prompt: "quick" },
+          { prompt: "slow" },
         ],
         async: true,
       });
@@ -222,8 +222,8 @@ describe("delegate ticket contract", () => {
 
       const dispatched = await callDelegate(session, {
         tasks: [
-          { prompt: "first", model: subagents.spec },
-          { prompt: "second", model: subagents.spec },
+          { prompt: "first" },
+          { prompt: "second" },
         ],
         async: true,
       });

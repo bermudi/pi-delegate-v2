@@ -64,7 +64,7 @@ export function isClearlyTransientError(error: string | undefined): boolean {
 }
 
 export const MODEL_SWAP_HINT =
-  "This looks like a model/account failure rather than a transient error; retry the task with a different 'model' — one of the alternatives configured in delegate.json.";
+  "This looks like a model/account failure rather than a transient error; no same-model retry applies. The model comes from delegate.json (or the parent session) — the user may need to reconfigure it.";
 
 export const MAX_TASK_ATTEMPTS = 2;
 export const RETRY_DELAY_MS = 150;

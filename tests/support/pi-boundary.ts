@@ -90,17 +90,15 @@ export function objectOf(
 
 /**
  * A provider-free subagent model registered on the test session's own model
- * runtime. Tasks can select it through the public `model` task field using
- * `spec`. This intentionally exercises the same registry the extension is
- * expected to resolve models and stream subagent sessions through — the parent
- * session's runtime — so no provider calls ever leave the process.
- *
- * Registration also configures `spec` as a delegate.json alternative: the
- * `model` task field only accepts parent-model or configured alternatives,
- * so a test selecting the faux model must configure it the way a user would.
+ * runtime. Tasks select it only through the user-side config — the helper
+ * configures it as the delegate.json `models.default` entry, since tasks
+ * carry no model field at all. This intentionally exercises the same registry
+ * the extension is expected to resolve models and stream subagent sessions
+ * through — the parent session's runtime — so no provider calls ever leave
+ * the process.
  */
 export interface SubagentModel {
-  /** Model reference accepted by the task `model` field. */
+  /** Configured model reference (models.default). */
   readonly spec: string;
   /** Replace the queued scripted responses for the next stream calls. */
   readonly respond: (steps: FauxResponseStep[]) => void;
@@ -108,6 +106,12 @@ export interface SubagentModel {
   readonly append: (steps: FauxResponseStep[]) => void;
   /** Live provider counters (e.g. callCount) for observability assertions. */
   readonly state: FauxProviderState;
+  /** A second, independent configured model (provider `delegate-faux-2`). */
+  readonly alt: {
+    readonly spec: string;
+    readonly respond: (steps: FauxResponseStep[]) => void;
+    readonly state: FauxProviderState;
+  };
 }
 
 /** Read the session's delegate.json as an object ({} when absent/unparseable). */
@@ -144,22 +148,34 @@ export async function installSubagentModel(
   session: TestSession,
 ): Promise<SubagentModel> {
   const faux = fauxProvider({ provider: "delegate-faux" });
+  const alt = fauxProvider({ provider: "delegate-faux-2" });
   const runtime = (session.session as AgentSession).modelRuntime;
   runtime.registerNativeProvider(faux.provider);
+  runtime.registerNativeProvider(alt.provider);
   await runtime.setRuntimeApiKey("delegate-faux", "test-key");
+  await runtime.setRuntimeApiKey("delegate-faux-2", "test-key");
   const spec = "delegate-faux/faux-1";
+  const altSpec = "delegate-faux-2/faux-1";
   const existing = currentDelegateConfig(session);
-  const already = Array.isArray(existing.models) ? existing.models : [];
+  const priorModels =
+    existing.models !== null &&
+    typeof existing.models === "object" &&
+    !Array.isArray(existing.models)
+      ? (existing.models as Record<string, unknown>)
+      : {};
   configureDelegate(session, {
-    models: [...new Set([...(already as unknown[]), spec])].filter(
-      (entry): entry is string => typeof entry === "string",
-    ),
+    models: { ...priorModels, default: spec },
   });
   return {
     spec,
     respond: (steps) => faux.setResponses(steps),
     append: (steps) => faux.appendResponses(steps),
     state: faux.state,
+    alt: {
+      spec: altSpec,
+      respond: (steps) => alt.setResponses(steps),
+      state: alt.state,
+    },
   };
 }
 

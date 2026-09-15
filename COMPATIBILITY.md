@@ -76,17 +76,21 @@ release notes and migration guidance; it must not arrive as rewrite drift.
 Departures from the preserve list above. Each must carry its own motivation
 and migration guidance; none may arrive as silent rewrite drift.
 
-- **Task `model` accepts only configured alternatives.** V1 resolved any
-  registry-resolvable model reference (including `:thinking`-suffixed ones)
-  the caller cared to type, letting a subagent spend on any model in the
-  registry. V2 runs tasks on the parent's model unless `model` names an entry
-  of the `"models"` array in the user-global `delegate.json`. Unconfigured
-  references — and configured references that do not resolve in the session's
-  registry — fail the whole call before tasks start, listing the configured
-  set. Migration: put every model you want delegable into
-  `delegate.json` `"models"` (e.g. `["anthropic/claude-haiku-4-5"]`), or stop
-  sending `model` and inherit the parent's. The model-swap recovery hint and
-  the tool manual now point at the same list.
+- **Task `model` field removed; models are user-configured only.** V1
+  resolved any registry-resolvable model reference (including
+  `:thinking`-suffixed ones) the caller cared to type, letting a subagent
+  spend on any model in the registry — and callers are reliably bad at
+  picking models (stale training-data names, wrong cost tier). V2 tasks
+  carry no model selection at all: a task runs on the parent's model, or on
+  the model the user assigned its agent under `"models"` in the user-global
+  `delegate.json` (object: agent name or `"default"` → reference; `"default"`
+  covers inline tasks). A task `model` field is rejected before tasks start
+  with guidance toward the config; a configured reference that does not
+  resolve in the session's registry fails the same way, naming the entry.
+  Migration: move any per-task model choice into `delegate.json`
+  `"models"` (e.g. `{"default": "anthropic/claude-haiku-4-5",
+  "scout": "google/gemini-2.5-flash"}`); callers stop sending `model`. The
+  model-failure recovery hint now addresses the operator, not the caller.
 
 ## v2 intentionally may change
 

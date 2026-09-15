@@ -74,8 +74,8 @@ describe("delegate workspace and shared-write contract", () => {
 
       const result = await callDelegate(session, {
         tasks: [
-          { prompt: "w1", cwd: dir, model: subagents.spec, tools: ["write"] },
-          { prompt: "w2", cwd: dir, model: subagents.spec, tools: ["write"] },
+          { prompt: "w1", cwd: dir,  tools: ["write"] },
+          { prompt: "w2", cwd: dir,  tools: ["write"] },
         ],
       });
       expect(result.isError).toBe(false);
@@ -148,13 +148,11 @@ describe("delegate workspace and shared-write contract", () => {
           {
             prompt: "write x.txt",
             cwd: dir,
-            model: subagents.spec,
             tools: ["write"],
           },
           {
             prompt: "write y.txt",
             cwd: dir,
-            model: subagents.spec,
             tools: ["write"],
           },
         ],
@@ -184,14 +182,12 @@ describe("delegate workspace and shared-write contract", () => {
           {
             prompt: "shared task",
             cwd: dir,
-            model: subagents.spec,
             tools: ["write"],
             workspace: "shared",
           },
           {
             prompt: "defaulted task",
             cwd: dir,
-            model: subagents.spec,
             tools: ["write"],
           },
         ],
@@ -222,7 +218,7 @@ describe("delegate workspace and shared-write contract", () => {
 
       const dispatched = await callDelegate(session, {
         tasks: [
-          { prompt: "bg", cwd: dir, model: subagents.spec, tools: ["write"] },
+          { prompt: "bg", cwd: dir,  tools: ["write"] },
         ],
         async: true,
       });
@@ -231,7 +227,7 @@ describe("delegate workspace and shared-write contract", () => {
 
       const rejected = await callDelegate(session, {
         tasks: [
-          { prompt: "now", cwd: dir, model: subagents.spec, tools: ["write"] },
+          { prompt: "now", cwd: dir,  tools: ["write"] },
         ],
       });
       expect(rejected.isError).toBe(true);
@@ -258,14 +254,12 @@ describe("delegate workspace and shared-write contract", () => {
           {
             prompt: "shared",
             cwd: dir,
-            model: subagents.spec,
             tools: ["write"],
             workspace: "shared",
           },
           {
             prompt: "isolated",
             cwd: dir,
-            model: subagents.spec,
             tools: ["write"],
             workspace: "isolated",
           },
@@ -292,14 +286,12 @@ describe("delegate workspace and shared-write contract", () => {
         {
           prompt: "look around",
           cwd: dir,
-          model: subagents.spec,
           tools: ["read"],
           workspace: "scratch",
         },
         {
           prompt: "look around",
           cwd: dir,
-          model: subagents.spec,
           agent: "scout",
           workspace: "scratch",
         },
@@ -332,7 +324,6 @@ describe("delegate workspace and shared-write contract", () => {
           {
             prompt: "write a file",
             cwd: linked,
-            model: subagents.spec,
             tools: ["write"],
             workspace: "scratch",
           },
@@ -363,13 +354,11 @@ describe("delegate workspace and shared-write contract", () => {
             {
               prompt: "first",
               cwd: dir,
-              model: subagents.spec,
               tools: ["write", "bash"],
             },
             {
               prompt: "second",
               cwd: dir,
-              model: subagents.spec,
               tools: ["write"],
             },
           ],
@@ -420,13 +409,11 @@ describe("delegate workspace and shared-write contract", () => {
             {
               prompt: "write left",
               cwd: left,
-              model: subagents.spec,
               tools: ["write"],
             },
             {
               prompt: "write right",
               cwd: right,
-              model: subagents.spec,
               tools: ["write"],
             },
           ],
@@ -481,14 +468,12 @@ describe("delegate workspace and shared-write contract", () => {
           {
             prompt: "write scratch-marker.txt",
             cwd: dir,
-            model: subagents.spec,
             workspace: "scratch",
             tools: ["write"],
           },
           {
             prompt: "write nested-marker.txt",
             cwd: join(dir, "sub"),
-            model: subagents.spec,
             workspace: "scratch",
             tools: ["write"],
           },
@@ -537,13 +522,11 @@ describe("delegate workspace and shared-write contract", () => {
           {
             prompt: "write shared-file.txt",
             cwd: dir,
-            model: subagents.spec,
             tools: ["write"],
           },
           {
             prompt: "write scratch-file.txt",
             cwd: dir,
-            model: subagents.spec,
             tools: ["write"],
             workspace: "scratch",
           },
@@ -586,7 +569,6 @@ describe("delegate workspace and shared-write contract", () => {
           {
             prompt: "hi",
             cwd: dir,
-            model: subagents.spec,
             tools: ["write"],
             workspace: "scratch",
           },
@@ -647,14 +629,12 @@ describe("delegate workspace and shared-write contract", () => {
           {
             prompt: "write a.txt",
             cwd: dir,
-            model: subagents.spec,
             workspace: "isolated",
             tools: ["write"],
           },
           {
             prompt: "write b.txt",
             cwd: dir,
-            model: subagents.spec,
             workspace: "isolated",
             tools: ["write"],
           },
@@ -732,14 +712,12 @@ describe("delegate workspace and shared-write contract", () => {
           {
             prompt: "change conflict.txt",
             cwd: dir,
-            model: subagents.spec,
             workspace: "isolated",
             tools: ["write"],
           },
           {
             prompt: "write ok.txt",
             cwd: dir,
-            model: subagents.spec,
             workspace: "isolated",
             tools: ["write"],
           },

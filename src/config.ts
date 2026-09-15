@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { knownAgentNames } from "./profiles.ts";
 
 export interface ConcurrencyConfig {
   /** Per-model-key bound when no more specific entry applies. */
@@ -16,11 +17,12 @@ export interface DelegateConfig {
   readonly maxConcurrent: number;
   readonly concurrency: ConcurrencyConfig;
   /**
-   * Alternative models a task `model` field may name, exactly as the user
-   * configured them. Empty means subagents may only run on the parent's
-   * model. The registry knowing a model is not authorization to use it.
+   * Per-agent model assignment: agent name (or "default" for every task
+   * without a more specific entry — inline tasks included) → model
+   * reference. Callers never select models; entries here and the parent's
+   * model are the only sources.
    */
-  readonly models: readonly string[];
+  readonly models: Readonly<Record<string, string>>;
   /**
    * Inactivity watchdog: a task whose session emits no events for this long
    * is cooperatively aborted as stalled. 0 disables it.
@@ -31,22 +33,20 @@ export interface DelegateConfig {
 export const DEFAULT_CONFIG: DelegateConfig = {
   maxConcurrent: 3,
   concurrency: { default: undefined, providers: {}, models: {} },
-  models: [],
+  models: {},
   stallTimeoutMs: 15 * 60 * 1000,
 };
 
 /**
- * Canonical configured entry for a task `model` reference, or undefined when
- * the reference names no configured alternative. Case-insensitive: callers
- * echo model strings in whatever casing they last saw, and tolerance here
- * does not widen the set — the configured entries stay the only gate.
+ * Model reference for one task: the agent's configured entry, else the
+ * "default" entry, else undefined (= the parent's model). Config is the
+ * only source of overrides — tasks carry no model field.
  */
-export function matchConfiguredModel(
-  spec: string,
+export function configuredModelFor(
+  agent: string,
   config: DelegateConfig,
 ): string | undefined {
-  const wanted = spec.trim().toLowerCase();
-  return config.models.find((entry) => entry.toLowerCase() === wanted);
+  return config.models[agent] ?? config.models.default;
 };
 
 /** Effective per-model bound: model key, then provider, then default, then global. */
@@ -130,23 +130,35 @@ export function loadDelegateConfig(ctx: ExtensionContext): DelegateConfig {
 }
 
 /**
- * Parse the `models` allowlist: non-empty strings, stored trimmed. A
- * malformed entry fails loudly at load — a silently dropped alternative
- * would surface later as a confusing per-task rejection.
+ * Parse the `models` map: agent name (or "default") → model reference.
+ * Keys must name a known agent (or "default") so a typo fails at load
+ * instead of silently never matching; values must be non-empty strings,
+ * stored trimmed. A malformed entry fails loudly — a silently dropped
+ * assignment would surface later as a confusing per-task failure.
  */
-function parseModels(value: unknown, path: string): string[] {
-  if (value === undefined) return [];
-  if (!Array.isArray(value)) {
-    throw new Error(`${path}: models must be an array of model references.`);
+function parseModels(value: unknown, path: string): Record<string, string> {
+  if (value === undefined) return {};
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(
+      `${path}: models must be an object mapping agent name (or "default") to a model reference.`,
+    );
   }
-  return value.map((entry) => {
-    if (typeof entry !== "string" || entry.trim() === "") {
+  const known = new Set(["default", ...knownAgentNames()]);
+  const out: Record<string, string> = {};
+  for (const [agent, entry] of Object.entries(value as Record<string, unknown>)) {
+    if (!known.has(agent)) {
       throw new Error(
-        `${path}: models entries must be non-empty strings; got ${JSON.stringify(entry)}.`,
+        `${path}: models key '${agent}' is not a known agent; known agents: ${[...known].join(", ")}.`,
       );
     }
-    return entry.trim();
-  });
+    if (typeof entry !== "string" || entry.trim() === "") {
+      throw new Error(
+        `${path}: models.${agent} must be a non-empty model reference; got ${JSON.stringify(entry)}.`,
+      );
+    }
+    out[agent] = entry.trim();
+  }
+  return out;
 }
 
 function isPositiveInteger(value: unknown): value is number {

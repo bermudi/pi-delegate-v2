@@ -34,7 +34,7 @@ describe("regression: failure propagation and retries", () => {
       ]);
 
       const result = await callDelegate(session, {
-        tasks: [{ prompt: "flaky", model: subagents.spec }],
+        tasks: [{ prompt: "flaky" }],
       });
       expect(result.isError).toBe(false);
       expect(result.text).toContain("RECOVERED");
@@ -60,7 +60,7 @@ describe("regression: failure propagation and retries", () => {
       ]);
 
       const result = await callDelegate(session, {
-        tasks: [{ prompt: "quota-bound", model: subagents.spec }],
+        tasks: [{ prompt: "quota-bound" }],
       });
       expect(result.text).toMatch(/usage limit|quota|upgrade/i);
       expect(result.text).toMatch(/model/i);
@@ -94,8 +94,8 @@ describe("regression: failure propagation and retries", () => {
 
       const result = await callDelegate(session, {
         tasks: [
-          { prompt: "w1", cwd, model: subagents.spec, tools: ["write"] },
-          { prompt: "w2", cwd, model: subagents.spec, tools: ["write"] },
+          { prompt: "w1", cwd,  tools: ["write"] },
+          { prompt: "w2", cwd,  tools: ["write"] },
         ],
       });
       expect(result.text).toContain("SECOND-RAN");
@@ -121,7 +121,7 @@ describe("regression: failure propagation and retries", () => {
 
       const result = await callDelegate(session, {
         tasks: [
-          { prompt: "flaky", model: subagents.spec, deadlineMs: 100 },
+          { prompt: "flaky",  deadlineMs: 100 },
         ],
       });
       expect(result.text).toMatch(/deadline/i);
@@ -141,7 +141,7 @@ describe("regression: failure propagation and retries", () => {
 
       const result = await callDelegate(session, {
         tasks: [
-          { prompt: "ok", model: subagents.spec },
+          { prompt: "ok" },
           { prompt: "bad", agent: "nonexistent-agent" },
         ],
       });

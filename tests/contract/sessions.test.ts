@@ -8,6 +8,7 @@ import {
 } from "@earendil-works/pi-ai";
 import {
   callDelegate,
+  configureDelegate,
   installSubagentModel,
   openDelegateBoundary,
   ticketIdOf,
@@ -33,7 +34,7 @@ describe("delegate session contract", () => {
       subagents.respond([fauxAssistantMessage("FIRST-TURN")]);
       const first = await callDelegate(session, {
         tasks: [
-          { prompt: "remember ALPHA-MARKER", sessionId: "conv", model: subagents.spec },
+          { prompt: "remember ALPHA-MARKER", sessionId: "conv" },
         ],
       });
       expect(first.isError).toBe(false);
@@ -51,7 +52,7 @@ describe("delegate session contract", () => {
       };
       subagents.respond([sawHistory]);
       const second = await callDelegate(session, {
-        tasks: [{ prompt: "again", sessionId: "conv", model: subagents.spec }],
+        tasks: [{ prompt: "again", sessionId: "conv" }],
       });
       expect(second.isError).toBe(false);
       expect(second.text).toContain("CONTINUED");
@@ -68,7 +69,7 @@ describe("delegate session contract", () => {
 
       subagents.respond([fauxAssistantMessage("SESQUIPEDALIAN")]);
       await callDelegate(session, {
-        tasks: [{ prompt: "x", sessionId: "conv", model: subagents.spec }],
+        tasks: [{ prompt: "x", sessionId: "conv" }],
       });
 
       const closed = await callDelegate(session, {
@@ -88,7 +89,7 @@ describe("delegate session contract", () => {
         );
       subagents.respond([fresh]);
       const reopened = await callDelegate(session, {
-        tasks: [{ prompt: "x", sessionId: "conv", model: subagents.spec }],
+        tasks: [{ prompt: "x", sessionId: "conv" }],
       });
       expect(reopened.text).toContain("FRESH");
     },
@@ -106,7 +107,7 @@ describe("delegate session contract", () => {
       subagents.respond([fauxAssistantMessage("hi")]);
       await callDelegate(session, {
         tasks: [
-          { prompt: "x", sessionId: "conv", model: subagents.spec, tools: ["read"] },
+          { prompt: "x", sessionId: "conv",  tools: ["read"] },
         ],
       });
 
@@ -115,7 +116,6 @@ describe("delegate session contract", () => {
           {
             prompt: "x",
             sessionId: "conv",
-            model: subagents.spec,
             tools: ["read", "bash"],
           },
         ],
@@ -125,6 +125,31 @@ describe("delegate session contract", () => {
       // error is a v2 formatting choice.
       expect(mismatched.text).toMatch(/conv|session/i);
       expect(mismatched.text).toMatch(/frozen|mismatch|incompatible|tools/i);
+    },
+  );
+
+  test(
+    "reusing a sessionId after its configured model changed is rejected",
+    async () => {
+      // INVARIANTS: a pooled session's model is frozen. Models come from
+      // delegate.json now, so the freeze must compare the *resolved* model:
+      // editing the config between calls is an incompatible reuse, the same
+      // as any other frozen-field mismatch.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+
+      subagents.respond([fauxAssistantMessage("hi")]);
+      await callDelegate(session, {
+        tasks: [{ prompt: "x", sessionId: "conv" }],
+      });
+
+      configureDelegate(session, { models: { default: subagents.alt.spec } });
+      const mismatched = await callDelegate(session, {
+        tasks: [{ prompt: "x", sessionId: "conv" }],
+      });
+      expect(mismatched.isError).toBe(true);
+      expect(mismatched.text).toMatch(/conv|session/i);
+      expect(mismatched.text).toMatch(/model/i);
     },
   );
 
@@ -143,7 +168,6 @@ describe("delegate session contract", () => {
           {
             prompt: "remember EVICT-MARKER",
             sessionId: "conv",
-            model: subagents.spec,
           },
         ],
       });
@@ -162,7 +186,7 @@ describe("delegate session contract", () => {
       ]);
       const created = await callDelegate(session, {
         tasks: [
-          { prompt: "more work", sessionId: "conv", model: subagents.spec },
+          { prompt: "more work", sessionId: "conv" },
         ],
         async: true,
       });
@@ -214,7 +238,7 @@ describe("delegate session contract", () => {
       subagents.respond([inspect]);
       const reused = await callDelegate(session, {
         tasks: [
-          { prompt: "again", sessionId: "conv", model: subagents.spec },
+          { prompt: "again", sessionId: "conv" },
         ],
       });
       expect(reused.isError).toBe(false);
@@ -250,7 +274,6 @@ describe("delegate session contract", () => {
           {
             prompt: "continue",
             resumeFrom: "/nonexistent/definitely-missing.jsonl",
-            model: subagents.spec,
           },
         ],
       });
@@ -307,7 +330,7 @@ describe("delegate session contract", () => {
       subagents.respond([inspect]);
 
       const result = await callDelegate(session, {
-        tasks: [{ resumeFrom: transcript, model: subagents.spec }],
+        tasks: [{ resumeFrom: transcript }],
       });
       expect(result.isError).toBe(false);
       expect(result.text).toContain("RESUMED");
@@ -334,13 +357,13 @@ describe("delegate session contract", () => {
       subagents.respond([hanging, fauxAssistantMessage("later")]);
 
       await callDelegate(session, {
-        tasks: [{ prompt: "bg", sessionId: "busy-one", model: subagents.spec }],
+        tasks: [{ prompt: "bg", sessionId: "busy-one" }],
         async: true,
       });
 
       const conflict = await callDelegate(session, {
         tasks: [
-          { prompt: "now", sessionId: "busy-one", model: subagents.spec },
+          { prompt: "now", sessionId: "busy-one" },
         ],
       });
       expect(conflict.isError).toBe(true);

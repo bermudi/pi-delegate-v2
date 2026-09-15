@@ -194,6 +194,13 @@ function validateTasks(tasks: readonly TaskInput[]): void {
       }
       sessionIds.add(task.sessionId);
     }
+    if (task.model !== undefined) {
+      fail(
+        `${where}: the model field is not accepted — callers do not select subagent models. ` +
+          `Remove it: the task runs on the parent's model, or on the model the user ` +
+          `configured for its agent under "models" in the delegate.json config.`,
+      );
+    }
     if (task.prompt === undefined && task.resumeFrom === undefined) {
       fail(`${where}: a task needs a prompt (prompt is optional only with resumeFrom).`);
     }

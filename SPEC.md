@@ -40,7 +40,6 @@ A task accepts:
 | `cwd` | Working directory; relative paths resolve from the parent cwd |
 | `systemPrompt` | Base prompt; project context is added separately |
 | `context` | `fresh` or `with-parent-transcript`; default is `fresh` |
-| `model` | Alternative model configured under `models` in the user-global `delegate.json`; omitting it runs the task on the parent's model. The model registry containing a model is not authorization — references outside the configured set are rejected |
 | `tools` | Exact capability list; `*` = read/write/edit/bash, `ro` = read/grep/find/ls |
 | `thinking` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max` |
 | `sessionId` | Key for a live reusable session |
@@ -62,13 +61,14 @@ the parent's extension inventory, MCP tools, and user-global harness
 instructions are not inherited. Provider extensions are disabled except for
 the verified, provider-scoped allowlist.
 
-Subagents run on the parent's model. A task may instead name an alternative
-model configured under `"models"` in the user-global `delegate.json` — an
-array of model references the user has approved for delegation. Any other
-`model` value fails the whole call before tasks start, listing the configured
-alternatives; a configured reference that does not resolve in the session's
-model registry fails identically. Model selection is a user decision, not a
-caller decision.
+Subagents run on the parent's model. The user may instead assign models
+per agent under `"models"` in the user-global `delegate.json` — an object
+mapping agent name (or `"default"`, which covers inline tasks and agents
+without their own entry) to a model reference. Callers never select models:
+a task `model` field is rejected before tasks start, whatever value it
+carries — the model registry containing a model is not authorization to
+spend on it. A configured reference that does not resolve in the session's
+model registry fails the whole call, naming the config entry.
 
 Tasks run concurrently subject to global and per-model limits. Overlapping
 same-call shared writers serialize in task order, and the result names the
@@ -134,8 +134,9 @@ unambiguous shapes:
 
 It does not merge flat fields into an existing non-empty task array. Unknown
 task keys, task-level `async`/`sessionAction`, duplicate IDs or session IDs,
-busy sessions, unresolved agents/models/tools, and invalid mode combinations
-fail the whole call with an actionable error and no started tasks.
+busy sessions, unresolved agents/tools, a task `model` field, and invalid mode
+combinations fail the whole call with an actionable error and no started
+tasks.
 
 ## Sessions, retries, and cancellation
 
@@ -147,7 +148,8 @@ reuse is rejected. `resumeFrom` rehydrates a durable transcript and may then be
 pooled under a new `sessionId`.
 
 Transient whole-task failures may retry. Model/account failures do not blindly
-retry on the same model and provide a different-model recovery hint.
+retry on the same model and surface as model-attributed, pointing the operator
+at the user-side model configuration — callers have no model recourse.
 
 Stall timeouts measure inactivity; deadlines measure wall-clock time.
 Cancellation does not promise rollback or immediate termination. Delegate does

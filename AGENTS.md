@@ -61,9 +61,10 @@ V1 is evidence for behavior, never a design source. When consulting it:
   explicit owner and lifetime (e.g. `TicketStore`, `AdmissionController`,
   the extension closure). Immutable constants and stateless helpers are
   fine.
-- Subagents run on the parent's model or a `delegate.json` `"models"`
-  alternative — never a free-form caller-chosen model. Registry resolvability
-  is not authorization; see SPEC.md and COMPATIBILITY.md.
+- Subagents run on the parent's model, or the per-agent `delegate.json`
+  `"models"` entry — callers never pick models and the task `model` field is
+  rejected. Registry resolvability is not authorization; see SPEC.md and
+  COMPATIBILITY.md.
 - Until a subsystem is implemented it fails loudly. Scaffold errors and
   scaffold output are not the contract — `SPEC.md` is.
 - Do not extend the scaffold to force a migrated test green; let it fail
