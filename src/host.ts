@@ -6,11 +6,11 @@ import {
   buildSessionContext,
   createAgentSession,
   DefaultResourceLoader,
+  ModelRuntime,
   SessionManager,
   SettingsManager,
   type AgentSession,
   type ExtensionContext,
-  type ModelRuntime,
 } from "@earendil-works/pi-coding-agent";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import {
@@ -28,12 +28,18 @@ import type { ResolvedTask, Workspace } from "./types.ts";
  * ModelRegistry facade; the wrapped runtime is the same object the parent
  * streams through, and subagents must share it so runtime-registered
  * providers (and their auth) apply to child sessions. The field is
- * TypeScript-private but present at runtime; fail loudly if that changes.
+ * TypeScript-private; the guard proves the grabbed value is the real
+ * `ModelRuntime` class — not merely present — so an upstream reshuffle
+ * fails loudly here instead of mis-wiring child sessions. Tracked upstream
+ * as earendil-works/pi#8791 (expose the model runtime to extensions); when
+ * it lands, delete the grab. Patching pi-coding-agent locally via
+ * patchedDependencies was deliberately rejected: patch rot on every Pi
+ * release outweighs one loud, contained failure.
  */
 export function parentModelRuntime(ctx: ExtensionContext): ModelRuntime {
-  const runtime = (ctx.modelRegistry as unknown as { runtime?: ModelRuntime })
+  const runtime = (ctx.modelRegistry as unknown as { runtime?: unknown })
     .runtime;
-  if (!runtime) {
+  if (!(runtime instanceof ModelRuntime)) {
     throw new Error(
       "delegate cannot reach the parent session's model runtime; subagent dispatch is unavailable.",
     );

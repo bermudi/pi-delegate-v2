@@ -89,7 +89,10 @@ gaps.
   aggregate usage on the tool result; parent-abort of an in-flight sync call
   settles as a structured cancellation (asserted in the cancellation
   regression suite via `callDelegateDetached` + raw-session `abort()`);
-  deadline/stall outcomes visible in result text (cancellation suite).
+  deadline/stall outcomes visible in result text (cancellation suite);
+  a sabotaged model-runtime grab (truthy impostor injected through the raw
+  harness session) fails the whole call with the actionable error before any
+  task starts (`tests/regression/host-runtime.test.ts`, issue #11).
 - **Gap:** overlap warnings on results.
 
 ### Multi-task / concurrent dispatch
