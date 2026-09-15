@@ -82,11 +82,45 @@ describe("regression: malformed provider calls recover at the public boundary", 
     expect(invalidTasks.text).toContain("Validation failed");
     expect(invalidTasks.text).not.toContain("dispatch is not implemented");
 
+    // v1: the schema rejected the ambiguous tools string outright. pi-ai's
+    // typebox 1.x validator now coerces it to ["read, write"] before our
+    // semantics run, so prepareArguments rejects it pre-coercion instead
+    // (found in the #10 review): still a whole-call failure with actionable
+    // guidance, never a degraded "unknown tool" error.
     const invalidTools = await call({
       tasks: [{ prompt: "inspect", tools: "read, write" }],
     });
     expect(invalidTools.isError).toBe(true);
-    expect(invalidTools.text).toContain("Validation failed");
+    expect(invalidTools.text).toContain("tools");
+    expect(invalidTools.text).not.toContain("unknown tool");
     expect(invalidTools.text).not.toContain("dispatch is not implemented");
+  });
+
+  test("rejects string-typed boolean and number fields instead of coercing them", async () => {
+    // The host's Value.Convert would silently turn these into true/123/1000
+    // and run the call; SPEC's repair list does not include them, so they
+    // must fail the whole call at the boundary (v1 rejected them by
+    // schema). Regression found in the #10 review.
+    const force = await call({
+      ticketAction: "cancel",
+      ticket: "t-1",
+      force: "true",
+    });
+    expect(force.isError).toBe(true);
+    expect(force.text).toContain("'force'");
+
+    const timeout = await call({
+      ticketAction: "wait",
+      ticket: "t-1",
+      timeoutMs: "123",
+    });
+    expect(timeout.isError).toBe(true);
+    expect(timeout.text).toContain("'timeoutMs'");
+
+    const deadline = await call({
+      tasks: [{ prompt: "inspect", deadlineMs: "1000" }],
+    });
+    expect(deadline.isError).toBe(true);
+    expect(deadline.text).toContain("'deadlineMs'");
   });
 });

@@ -184,6 +184,48 @@ function normalizeTask(value: unknown): unknown {
   return task;
 }
 
+/**
+ * Reject ambiguous shapes the host would silently coerce.
+ *
+ * pi-ai validates tool arguments with typebox 1.x `Value.Convert`, which
+ * unconditionally coerces strings on schemas it recognizes — "true"→true,
+ * "123"→123, "read, write"→["read, write"]. This schema is built with the
+ * same `typebox` package, so it is always recognized: without this pass the
+ * host would silently repair shapes SPEC.md does not authorize (its repair
+ * list is exactly: stringified task arrays, flat task fields, JSON-array or
+ * bare-token `tools` strings, and empty agent names). `prepareArguments` is
+ * the only hook that runs before that coercion, so the boundary lives here;
+ * a throw surfaces to the caller as a normal whole-call tool error.
+ */
+function rejectAmbiguousShapes(args: Record<string, unknown>): void {
+  for (const field of ["async", "force", "timeoutMs"] as const) {
+    const value = args[field];
+    if (typeof value === "string") {
+      throw new Error(
+        `'${field}' must be a ${field === "timeoutMs" ? "number" : "boolean"}, not the string ${JSON.stringify(value)}.`,
+      );
+    }
+  }
+  if (!Array.isArray(args.tasks)) return;
+  args.tasks.forEach((task, index) => {
+    if (task === null || typeof task !== "object") return;
+    const record = task as Record<string, unknown>;
+    const where = `tasks[${index}]`;
+    // normalizeTask has already repaired JSON-array strings and bare tokens;
+    // a surviving string is ambiguous by construction.
+    if (typeof record.tools === "string") {
+      throw new Error(
+        `${where}: 'tools' must be an array of tool names — a JSON array string or one bare name also works — not the ambiguous string ${JSON.stringify(record.tools)}.`,
+      );
+    }
+    if (typeof record.deadlineMs === "string") {
+      throw new Error(
+        `${where}: 'deadlineMs' must be a positive number, not the string ${JSON.stringify(record.deadlineMs)}.`,
+      );
+    }
+  });
+}
+
 function prepareArguments(value: unknown): DelegateArguments {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     return value as DelegateArguments;
@@ -215,6 +257,8 @@ function prepareArguments(value: unknown): DelegateArguments {
   if (Array.isArray(args.tasks)) {
     args.tasks = args.tasks.map(normalizeTask);
   }
+
+  rejectAmbiguousShapes(args);
 
   return args as DelegateArguments;
 }
