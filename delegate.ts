@@ -1,10 +1,10 @@
 import { join } from "node:path";
 import {
   Type,
-  type SchemaOptions,
   type Static,
+  type TSchemaOptions,
   type TUnsafe,
-} from "@sinclair/typebox";
+} from "typebox";
 import {
   defineTool,
   type ExtensionAPI,
@@ -25,7 +25,7 @@ import { validateCall } from "./src/validation.ts";
 
 function stringEnum<const Values extends readonly string[]>(
   values: Values,
-  options: SchemaOptions,
+  options: TSchemaOptions,
 ): TUnsafe<Values[number]> {
   return Type.Unsafe<Values[number]>({
     ...options,
@@ -292,10 +292,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
       prepareArguments,
 
       async execute(_toolCallId, params, signal, onUpdate, ctx) {
-        // pi's ToolDefinition types params via the `typebox` v1 package while
-        // this schema is built with @sinclair/typebox 0.34; the v1 Static
-        // resolves Unsafe enum fields to unknown, so re-assert our own Static.
-        const call = validateCall(params as DelegateArguments);
+        const call = validateCall(params);
         if (call.mode === "help") {
           return {
             content: [{ type: "text" as const, text: help }],

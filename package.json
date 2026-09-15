@@ -16,7 +16,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@sinclair/typebox": "0.34.52"
+    "typebox": "1.3.7"
   },
   "patchedDependencies": {
     "@marcfargas/pi-test-harness@0.6.1": "patches/@marcfargas%2Fpi-test-harness@0.6.1.patch"
