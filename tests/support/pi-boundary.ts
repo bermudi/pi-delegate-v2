@@ -90,15 +90,16 @@ export function objectOf(
 
 /**
  * A provider-free subagent model registered on the test session's own model
- * runtime. Tasks select it only through the user-side config — the helper
- * configures it as the delegate.json `models.default` entry, since tasks
- * carry no model field at all. This intentionally exercises the same registry
- * the extension is expected to resolve models and stream subagent sessions
- * through — the parent session's runtime — so no provider calls ever leave
- * the process.
+ * runtime. The helper also sets the PARENT session's model to it — inline
+ * tasks inherit the parent's model, so tests that dispatch unnamed tasks
+ * exercise real inheritance and stream through the scripted faux provider.
+ * Named-agent overrides come from delegate.json `models` entries (config is
+ * the only override source; tasks carry no model field). A second,
+ * independent provider (`alt`) exists for override/precedence proofs.
+ * No provider calls ever leave the process.
  */
 export interface SubagentModel {
-  /** Configured model reference (models.default). */
+  /** The parent session's (and thus inline tasks') model reference. */
   readonly spec: string;
   /** Replace the queued scripted responses for the next stream calls. */
   readonly respond: (steps: FauxResponseStep[]) => void;
@@ -156,16 +157,14 @@ export async function installSubagentModel(
   await runtime.setRuntimeApiKey("delegate-faux-2", "test-key");
   const spec = "delegate-faux/faux-1";
   const altSpec = "delegate-faux-2/faux-1";
-  const existing = currentDelegateConfig(session);
-  const priorModels =
-    existing.models !== null &&
-    typeof existing.models === "object" &&
-    !Array.isArray(existing.models)
-      ? (existing.models as Record<string, unknown>)
-      : {};
-  configureDelegate(session, {
-    models: { ...priorModels, default: spec },
-  });
+  // The parent runs on the faux model so inline subagents inherit it. The
+  // harness playbook replaces the parent's own streamFn, so this model is
+  // never streamed by the parent itself — only by inheriting subagents.
+  const parentModel = runtime.getModel("delegate-faux", "faux-1");
+  if (!parentModel) {
+    throw new Error("faux model did not register on the parent runtime");
+  }
+  await (session.session as AgentSession).setModel(parentModel);
   return {
     spec,
     respond: (steps) => faux.setResponses(steps),

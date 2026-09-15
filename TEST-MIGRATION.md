@@ -27,16 +27,17 @@ copy its fixtures, mocks, call graph, or intermediate assertions.
   call through the raw `AgentSession` the harness exposes
   (`session.session.abort()`) — the awaited `run` API cannot express this.
 - `installSubagentModel` (`tests/support/pi-boundary.ts`) registers pi-ai's
-  built-in `faux` provider on the test session's `modelRuntime`, giving tasks
-  a provider-free model — plus a second one (`alt`) for precedence proofs.
-  Tasks carry no model field, so the helper configures its reference as the
-  `models.default` entry in the session's `delegate.json`: config is the only
-  model source. `configureDelegate(session, patch)` shallow-merges into that
-  file without clobbering the map. This encodes a testability assumption for
+  built-in `faux` provider on the test session's `modelRuntime` and **sets
+  the parent session's model to it** — inline tasks inherit the parent's
+  model, so unnamed test tasks exercise real inheritance and stream through
+  the scripted provider (the harness playbook replaces the parent's own
+  streamFn, so the parent itself never streams it). A second provider
+  (`alt`) serves named-agent override proofs, configured through
+  `models` entries; `configureDelegate(session, patch)` shallow-merges into
+  the session's `delegate.json`. This encodes a testability assumption for
   v2: subagent model resolution and streaming must route through the parent
-  session's model runtime/registry (which `default`-profile parent-model
-  inheritance needs anyway). If v2 ends up creating subagent sessions on a
-  different runtime, update the support layer — not the tests.
+  session's model runtime/registry. If v2 ends up creating subagent sessions
+  on a different runtime, update the support layer — not the tests.
 - The harness session's `agentDir` is its temporary cwd, so
   `<cwd>/delegate.json` stands in for the user-global config file.
 - Assertions target observable outcomes (result text/isError/details, ticket
@@ -68,8 +69,9 @@ gaps.
   `sessionId`/`resumeFrom`; mixed-mode conflict errors; prompt-less task
   without resume; unknown agent guidance; required-field messages for
   ticket/session RPC; a task `model` field is rejected before any task
-  starts with guidance toward the config; an agent's `models` entry wins
-  over the `default` entry; a configured reference that does not resolve
+  starts with guidance toward the config; a named agent's `models` entry
+  overrides the parent model for that agent (and inline tasks provably
+  inherit the parent); a configured reference that does not resolve
   in the registry names the entry and the config file
   (`tests/contract/dispatch.test.ts`).
 - **Gap:** none specific to model selection.
@@ -193,8 +195,8 @@ gaps.
   file bookkeeping.
 - **Covered now:** pool + list + continuation on reuse; `close` removes and
   a later call starts fresh; frozen-config mismatch rejects with an
-  actionable error; a pooled session whose configured model changed between
-  calls rejects the same way (model freeze compares resolved models);
+  actionable error; a pooled session whose agent's configured model changed
+  between calls rejects the same way (model freeze compares resolved models);
   a pooled session cancelled mid-reuse is evicted and the
   next call starts fresh (busy `close` also rejected in-flight); `close` on
   an unknown session errors; missing-transcript `resumeFrom` error; a
@@ -587,18 +589,21 @@ cwd copy.
 ## Ninth tranche (no caller model selection)
 
 Tasks no longer select models at all. The task `model` field is rejected
-whole-call with guidance toward the config; model assignment is
-user-only — the parent's model by default, or the per-agent entry under
-`"models"` in the user-global `delegate.json` (object: agent name or
-`"default"` → reference; `"default"` covers inline tasks and agents without
-their own entry). Recorded as a deliberate breaking change in
-`COMPATIBILITY.md` with migration guidance. This supersedes the interim
-allowlist design from earlier in the same tranche.
+whole-call with guidance toward the config. Model assignment is
+user-only and inheritance-first: inline tasks and the `default` profile
+mirror the parent's model unconditionally — there is no `default` config
+entry, and `models.default` is rejected at load. Only a named agent may be
+overridden, via its entry under `"models"` in the user-global `delegate.json`
+(object: agent name → reference). Recorded as a deliberate breaking change
+in `COMPATIBILITY.md` with migration guidance. This supersedes the interim
+allowlist design from earlier in the same tranche (which briefly had a
+configurable `default` — the wrong knob: inheritance is the invariant).
 
-- `src/config.ts` parses and validates the `models` map — keys must be
-  `"default"` or a known agent (typos fail at load), values non-empty
-  trimmed references — and resolves per task: agent entry → `default`
-  entry → parent model.
+- `src/config.ts` parses and validates the `models` map — keys must name a
+  known non-default agent (typos fail at load, and `default` is rejected
+  with an explanation), values non-empty trimmed references — and resolves
+  per task: agent entry → parent model, with inline/default never consulting
+  config at all.
 - `src/validation.ts` rejects any task `model` field before tasks start;
   the schema keeps the key so the rejection is a targeted, teachable error
   instead of a generic unknown-property failure.
@@ -607,14 +612,15 @@ allowlist design from earlier in the same tranche.
   and config path.
 - The model-failure recovery hint addresses the operator (reconfigure
   delegate.json), not the caller (which has no model recourse).
-- Test support: `installSubagentModel` configures its reference as
-  `models.default` and installs a second faux provider (`alt`) for
-  precedence proofs; every task input across the suites dropped its
-  `model` field.
-- New live tests: task `model` field rejection (nothing starts); agent
-  entry beats `default` (two providers prove which served each task);
+- Test support: `installSubagentModel` sets the parent session's model to
+  the faux provider (inline tasks inherit it for real) and installs a
+  second faux provider (`alt`) for override proofs; every task input across
+  the suites dropped its `model` field.
+- New live tests: task `model` field rejection (nothing starts); a named
+  agent's entry overrides the parent model while inline tasks provably
+  inherit it (two providers show which served each task);
   configured-but-unresolvable entry rejection; a pooled session whose
-  configured model changed between calls rejects as a frozen-config
+  agent's configured model changed between calls rejects as a frozen-config
   mismatch (`tests/contract/sessions.test.ts`).
 
 ## Next contract slices

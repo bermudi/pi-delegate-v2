@@ -245,11 +245,11 @@ const RESUME_DEFAULT_PROMPT =
  * tools, absolute cwd, and the shared-write reservation roots. Everything
  * that can fail is resolved here, before admission and before execution.
  *
- * Model policy: callers never select models. A task runs on the model
- * configured for its agent under "models" in the user-global delegate.json
- * (key "default" covers inline tasks and agents without an entry), falling
- * back to the parent's model. The model registry knowing a reference is not
- * authorization — only the user's configuration is.
+ * Model policy: callers never select models. A named agent runs on the
+ * model configured for it under "models" in the user-global delegate.json;
+ * everything else — inline tasks and the `default` profile — mirrors the
+ * parent's model, unconditionally. The model registry knowing a reference
+ * is not authorization — only the user's configuration is.
  */
 export function resolveTasks(
   tasks: readonly TaskInput[],
@@ -294,17 +294,20 @@ export function resolveTasks(
       throw new Error(`${where}: ${tools}`);
     }
 
-    // Model selection is user-only: the agent's configured entry, else the
-    // "default" entry, else the parent's model. The task carries no model
-    // field; a caller-supplied one was rejected whole-call in validation.
+    // Model selection is user-only and inheritance-first: named agents use
+    // their configured entry when one exists; inline/default tasks always
+    // mirror the parent. A caller-supplied model field was rejected in
+    // validation.
     const agentName = task.agent ?? "default";
-    const modelSpec = configuredModelFor(agentName, config);
+    const modelSpec = configuredModelFor(task.agent, config);
     const model = resolveModel(modelSpec, env);
     if (!model) {
       throw new Error(
         modelSpec
           ? `${where}: models.${agentName} is configured as '${modelSpec}' in ${configPathOf(env.ctx)} but is not available in this session's model registry.`
-          : `${where}: no model is configured for agent '${agentName}' and no parent model is selected; add an entry under "models" in ${configPathOf(env.ctx)}.`,
+          : agentName === "default"
+            ? `${where}: no parent model is selected — inline/default tasks inherit it and are not configurable otherwise.`
+            : `${where}: no model is configured for agent '${agentName}' and no parent model is selected; add models.${agentName} under "models" in ${configPathOf(env.ctx)}.`,
       );
     }
 

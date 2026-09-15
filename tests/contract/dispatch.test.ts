@@ -285,19 +285,20 @@ describe("delegate dispatch contract", () => {
   );
 
   test(
-    "an agent's configured model wins over the default entry",
+    "a named agent's configured model overrides the inherited parent model",
     async () => {
-      // SPEC: a task runs on the model configured for its agent, else the
-      // "default" entry. Two independent faux providers prove which model
-      // actually served each task — scout gets its own entry, an inline
-      // task falls back to default.
+      // SPEC: inline/default tasks mirror the parent's model — always. Only
+      // a named agent with a delegate.json "models" entry runs elsewhere.
+      // The parent session itself runs on the primary faux model (set by
+      // installSubagentModel), so the inline task's provider call proves
+      // inheritance while the scout task's proves the override.
       session = await openDelegateBoundary();
       const subagents = await installSubagentModel(session);
       configureDelegate(session, {
-        models: { default: subagents.alt.spec, scout: subagents.spec },
+        models: { scout: subagents.alt.spec },
       });
-      subagents.respond([fauxAssistantMessage("SCOUT-RUNS-ITS-OWN")]);
-      subagents.alt.respond([fauxAssistantMessage("INLINE-RUNS-DEFAULT")]);
+      subagents.respond([fauxAssistantMessage("INLINE-INHERITS-PARENT")]);
+      subagents.alt.respond([fauxAssistantMessage("SCOUT-RUNS-CONFIGURED")]);
 
       const result = await callDelegate(session, {
         tasks: [
@@ -307,10 +308,10 @@ describe("delegate dispatch contract", () => {
       });
 
       expect(result.isError).toBe(false);
-      expect(result.text).toContain("SCOUT-RUNS-ITS-OWN");
-      expect(result.text).toContain("INLINE-RUNS-DEFAULT");
-      expect(subagents.state.callCount).toBe(1);
-      expect(subagents.alt.state.callCount).toBe(1);
+      expect(result.text).toContain("INLINE-INHERITS-PARENT");
+      expect(result.text).toContain("SCOUT-RUNS-CONFIGURED");
+      expect(subagents.state.callCount).toBe(1); // inline → parent model
+      expect(subagents.alt.state.callCount).toBe(1); // scout → configured
     },
   );
 
@@ -323,12 +324,12 @@ describe("delegate dispatch contract", () => {
       session = await openDelegateBoundary();
       const subagents = await installSubagentModel(session);
       configureDelegate(session, {
-        models: { default: "ghost-provider/model-x" },
+        models: { scout: "ghost-provider/model-x" },
       });
       subagents.respond([fauxAssistantMessage("NEVER-RUNS")]);
 
       const result = await callDelegate(session, {
-        tasks: [{ prompt: "x" }],
+        tasks: [{ prompt: "x", agent: "scout" }],
       });
 
       expect(result.isError).toBe(true);

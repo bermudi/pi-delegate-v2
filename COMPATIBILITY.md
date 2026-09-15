@@ -81,16 +81,17 @@ and migration guidance; none may arrive as silent rewrite drift.
   `:thinking`-suffixed ones) the caller cared to type, letting a subagent
   spend on any model in the registry — and callers are reliably bad at
   picking models (stale training-data names, wrong cost tier). V2 tasks
-  carry no model selection at all: a task runs on the parent's model, or on
-  the model the user assigned its agent under `"models"` in the user-global
-  `delegate.json` (object: agent name or `"default"` → reference; `"default"`
-  covers inline tasks). A task `model` field is rejected before tasks start
-  with guidance toward the config; a configured reference that does not
-  resolve in the session's registry fails the same way, naming the entry.
+  carry no model selection at all. Inline tasks and the `default` profile
+  mirror the parent's model unconditionally — inheritance is the invariant,
+  not a configurable, and `models.default` is rejected at config load. A
+  *named agent* runs on the model the user assigned it under `"models"` in
+  the user-global `delegate.json` (object: agent name → reference), else the
+  parent's model. A task `model` field is rejected before tasks start with
+guidance toward the config; a configured reference that does not resolve in
+  the session's registry fails the same way, naming the entry.
   Migration: move any per-task model choice into `delegate.json`
-  `"models"` — e.g. `{"default": "<provider/model-id>",
-  "scout": "<provider/model-id>"}` with references taken from your actual
-  configured models; callers stop sending `model`. The
+  `"models"` — e.g. `{"scout": "<provider/model-id>"}` with references
+  taken from your actual configured models; callers stop sending `model`. The
   model-failure recovery hint now addresses the operator, not the caller.
 
 ## v2 intentionally may change

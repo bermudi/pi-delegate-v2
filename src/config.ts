@@ -17,10 +17,10 @@ export interface DelegateConfig {
   readonly maxConcurrent: number;
   readonly concurrency: ConcurrencyConfig;
   /**
-   * Per-agent model assignment: agent name (or "default" for every task
-   * without a more specific entry — inline tasks included) → model
-   * reference. Callers never select models; entries here and the parent's
-   * model are the only sources.
+   * Per-agent model assignment: named agent (scout, coder, ...) → model
+   * reference. There is deliberately no "default" entry: inline tasks and
+   * the `default` profile always mirror the parent's model. Callers never
+   * select models; entries here are the only override, user-authored.
    */
   readonly models: Readonly<Record<string, string>>;
   /**
@@ -38,15 +38,17 @@ export const DEFAULT_CONFIG: DelegateConfig = {
 };
 
 /**
- * Model reference for one task: the agent's configured entry, else the
- * "default" entry, else undefined (= the parent's model). Config is the
- * only source of overrides — tasks carry no model field.
+ * Model reference for one task: the named agent's configured entry, or
+ * undefined (= the parent's model). Inline tasks and the `default` profile
+ * never get an entry — mirroring the parent is the invariant, not a
+ * configurable.
  */
 export function configuredModelFor(
-  agent: string,
+  agent: string | undefined,
   config: DelegateConfig,
 ): string | undefined {
-  return config.models[agent] ?? config.models.default;
+  if (agent === undefined || agent === "default") return undefined;
+  return config.models[agent];
 };
 
 /** Effective per-model bound: model key, then provider, then default, then global. */
@@ -130,9 +132,10 @@ export function loadDelegateConfig(ctx: ExtensionContext): DelegateConfig {
 }
 
 /**
- * Parse the `models` map: agent name (or "default") → model reference.
- * Keys must name a known agent (or "default") so a typo fails at load
- * instead of silently never matching; values must be non-empty strings,
+ * Parse the `models` map: named agent → model reference. Keys must name a
+ * known non-default agent (a typo fails at load instead of silently never
+ * matching); a "default" key is rejected explicitly — inline/default tasks
+ * inherit the parent's model, full stop. Values must be non-empty strings,
  * stored trimmed. A malformed entry fails loudly — a silently dropped
  * assignment would surface later as a confusing per-task failure.
  */
@@ -140,15 +143,21 @@ function parseModels(value: unknown, path: string): Record<string, string> {
   if (value === undefined) return {};
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     throw new Error(
-      `${path}: models must be an object mapping agent name (or "default") to a model reference.`,
+      `${path}: models must be an object mapping a named agent to a model reference.`,
     );
   }
-  const known = new Set(["default", ...knownAgentNames()]);
+  const known = knownAgentNames().filter((name) => name !== "default");
   const out: Record<string, string> = {};
   for (const [agent, entry] of Object.entries(value as Record<string, unknown>)) {
-    if (!known.has(agent)) {
+    if (agent === "default") {
       throw new Error(
-        `${path}: models key '${agent}' is not a known agent; known agents: ${[...known].join(", ")}.`,
+        `${path}: models.default is rejected — inline/default tasks always run on the parent's model. ` +
+          `Configure named agents only: ${known.join(", ")}.`,
+      );
+    }
+    if (!known.includes(agent)) {
+      throw new Error(
+        `${path}: models key '${agent}' is not a known agent; known agents: ${known.join(", ")}.`,
       );
     }
     if (typeof entry !== "string" || entry.trim() === "") {

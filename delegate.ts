@@ -232,9 +232,10 @@ Delegate runs subagent tasks synchronously or as an asynchronous ticket.
   \`tools\` (\`*\`/\`ro\` groups or names), \`thinking\`, \`deadlineMs\`,
   \`sessionId\`, \`resumeFrom\`, \`workspace\` (shared/scratch/isolated).
   A top-level \`workspace\` is the batch default.
-- Models: you never pick models. Tasks run on the parent's model, or on the
-  model the user configured for the task's agent under \"models\" in the
-  user-global delegate.json. A task \`model\` field is rejected.
+- Models: you never pick models. Tasks run on the parent's model; a named
+  agent may instead run on the model the user configured for it under
+  "models" in the user-global delegate.json. A task \`model\` field is
+  rejected.
 
 ## Workspaces
 - \`shared\` (default): the task edits the caller's tree directly. Writers

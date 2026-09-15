@@ -61,14 +61,15 @@ the parent's extension inventory, MCP tools, and user-global harness
 instructions are not inherited. Provider extensions are disabled except for
 the verified, provider-scoped allowlist.
 
-Subagents run on the parent's model. The user may instead assign models
-per agent under `"models"` in the user-global `delegate.json` — an object
-mapping agent name (or `"default"`, which covers inline tasks and agents
-without their own entry) to a model reference. Callers never select models:
-a task `model` field is rejected before tasks start, whatever value it
-carries — the model registry containing a model is not authorization to
-spend on it. A configured reference that does not resolve in the session's
-model registry fails the whole call, naming the config entry.
+Subagents run on the parent's model. The user may override a **named agent**
+under `"models"` in the user-global `delegate.json` — an object mapping agent
+name to a model reference. There is deliberately no `"default"` entry and no
+way to redirect inline or `default`-profile tasks: they mirror the parent's
+model unconditionally. Callers never select models: a task `model` field is
+rejected before tasks start, whatever value it carries — the model registry
+containing a model is not authorization to spend on it. A configured
+reference that does not resolve in the session's model registry fails the
+whole call, naming the config entry.
 
 Tasks run concurrently subject to global and per-model limits. Overlapping
 same-call shared writers serialize in task order, and the result names the

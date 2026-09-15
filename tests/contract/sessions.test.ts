@@ -129,23 +129,25 @@ describe("delegate session contract", () => {
   );
 
   test(
-    "reusing a sessionId after its configured model changed is rejected",
+    "reusing a sessionId after its agent's configured model changed is rejected",
     async () => {
       // INVARIANTS: a pooled session's model is frozen. Models come from
       // delegate.json now, so the freeze must compare the *resolved* model:
-      // editing the config between calls is an incompatible reuse, the same
-      // as any other frozen-field mismatch.
+      // editing an agent's entry between calls is an incompatible reuse,
+      // the same as any other frozen-field mismatch.
       session = await openDelegateBoundary();
       const subagents = await installSubagentModel(session);
 
       subagents.respond([fauxAssistantMessage("hi")]);
       await callDelegate(session, {
-        tasks: [{ prompt: "x", sessionId: "conv" }],
+        tasks: [{ prompt: "x", sessionId: "conv", agent: "scout" }],
       });
 
-      configureDelegate(session, { models: { default: subagents.alt.spec } });
+      configureDelegate(session, {
+        models: { scout: subagents.alt.spec },
+      });
       const mismatched = await callDelegate(session, {
-        tasks: [{ prompt: "x", sessionId: "conv" }],
+        tasks: [{ prompt: "x", sessionId: "conv", agent: "scout" }],
       });
       expect(mismatched.isError).toBe(true);
       expect(mismatched.text).toMatch(/conv|session/i);
