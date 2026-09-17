@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
-import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import type { TestSession } from "@marcfargas/pi-test-harness";
-import { callDelegate, installSubagentModel, openDelegateBoundary } from "../support/pi-boundary.ts";
+import { callDelegate, installSubagentModel, openDelegateBoundary, ticketIdOf } from "../support/pi-boundary.ts";
+
+import { mockParentTools } from "../support/parent-tools.ts";
 
 // Issue #13 regression (v2 evidence, not a migrated v1 helper test): a
 // degraded host tool probe must not silently give a restricted parent writers.
@@ -17,10 +18,11 @@ describe("regression: parent tool mirroring", () => {
   });
 
   function unavailableTools() {
-    const probe = spyOn(session!.session as AgentSession, "getActiveToolNames")
-      .mockImplementation(() => { throw new Error("parent tool inventory unavailable"); });
-    restores.push(() => probe.mockRestore());
-    return probe;
+    const mocked = mockParentTools(session!, () => {
+      throw new Error("parent tool inventory unavailable");
+    });
+    restores.push(mocked.restore);
+    return mocked.probe;
   }
 
   for (const async of [false, true]) {
@@ -40,6 +42,11 @@ describe("regression: parent tool mirroring", () => {
         ],
       });
 
+      // Let an erroneously admitted async batch settle before checking starts.
+      if (async && !result.isError) {
+        await callDelegate(session, { ticketAction: "wait", ticket: ticketIdOf(result.text) });
+      }
+      expect(subagents.state.callCount).toBe(0);
       expect(result.isError).toBe(true);
       expect(result.text).toMatch(/default.*parent.*tools/i);
       expect(result.text).toContain("parent tool inventory unavailable");
@@ -81,9 +88,8 @@ describe("regression: parent tool mirroring", () => {
   test("default profile mirrors restricted parent tools", async () => {
     session = await openDelegateBoundary();
     const subagents = await installSubagentModel(session);
-    const probe = spyOn(session.session as AgentSession, "getActiveToolNames")
-      .mockReturnValue(["read", "delegate"]);
-    restores.push(() => probe.mockRestore());
+    const mocked = mockParentTools(session, () => ["read", "delegate"]);
+    restores.push(mocked.restore);
     let observed: string[] | undefined;
     subagents.respond([(context) => {
       observed = (context.tools ?? []).map((tool) => tool.name);
