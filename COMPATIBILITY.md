@@ -32,7 +32,7 @@ release notes and migration guidance; it must not arrive as rewrite drift.
   delegate configuration.
 - Parent model/context inheritance and extension isolation, including verified
   provider-scoped exceptions and the meanings of `*` and `ro`, subject to the
-  model-allowlist departure below.
+  model-selection departure below.
 
 ### Execution and state
 

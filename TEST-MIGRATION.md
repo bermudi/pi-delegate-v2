@@ -336,6 +336,10 @@ gaps.
   to change; only warn-once-then-proceed and source precedence are
   contract.
 - **Covered now:** `tests/regression/agent-dir-fallback.test.ts`.
+  `tests/regression/boundary-isolation.test.ts` covers the v2 review
+  regression: overlapping harness sessions keep configuration reads and
+  pooled transcript writes in their own directories without changing the
+  process environment.
 - **Gap:** none.
 
 ## First tranche

@@ -24,28 +24,21 @@ export interface PublicTool {
   readonly parameters: unknown;
 }
 
-export async function openDelegateBoundary(): Promise<TestSession> {
+export async function openDelegateBoundary(
+  options: { inMemoryAgentDir?: boolean } = {},
+): Promise<TestSession> {
   const session = await createTestSession({
     extensions: [extensionPath],
     propagateErrors: false,
   });
-  // Pi 0.84.2 exposes no agentDir on ExtensionContext and the harness
-  // session is in-memory, so v2 would resolve the agent dir to the session
-  // cwd as a *warned* fallback (#12). Point DELEGATE_AGENT_DIR at the
-  // session cwd — the explicit seam the fallback warning recommends — so
-  // the suite exercises the env source and stays warning-clean.
-  // NOTE: all bun test files share ONE process, so this env var is
-  // process-global. It is safe only under the suite's actual discipline:
-  // every test opens its session here immediately before dispatching, one
-  // live session at a time, serially — the most recently opened session
-  // owns the value. Do not dispatch on a session opened before another
-  // session's openDelegateBoundary, and do not hold two live sessions
-  // that both dispatch; either would resolve the agent dir to a foreign
-  // session's cwd. Tests that need the fallback or session-store sources
-  // save/delete/restore the variable around the call.
-  // configureDelegate reads/writes delegate.json at session.cwd, so the
-  // env var and the file layout agree.
-  process.env.DELEGATE_AGENT_DIR = resolve(session.cwd);
+  // Model the host session-store layout without changing process.env or
+  // enabling parent transcript persistence. The directory getter belongs to
+  // this session only; overlapping boundaries cannot redirect each other.
+  // Fallback regressions opt out to retain the harness’s empty directory.
+  if (!options.inMemoryAgentDir) {
+    (session.session as AgentSession).sessionManager.getSessionDir = () =>
+      join(session.cwd, "sessions", "--test--");
+  }
   return session;
 }
 

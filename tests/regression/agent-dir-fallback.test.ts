@@ -57,7 +57,7 @@ describe("regression: agentDir cwd fallback warns before proceeding (#12)", () =
       // no notice. The fallback must stay (hosts legitimately need it) but
       // warn exactly once per extension instance before the first dispatch,
       // naming the directory and the DELEGATE_AGENT_DIR escape hatch.
-      session = await openDelegateBoundary();
+      session = await openDelegateBoundary({ inMemoryAgentDir: true });
       subagents = await installSubagentModel(session);
 
       const warnings = spyConsoleWarn();
@@ -111,7 +111,7 @@ describe("regression: agentDir cwd fallback warns before proceeding (#12)", () =
       // execute, so a background-ticket dispatch warns too — assert it
       // instead of trusting the placement. A fresh session means a fresh
       // extension instance and a fresh latch.
-      session = await openDelegateBoundary();
+      session = await openDelegateBoundary({ inMemoryAgentDir: true });
       subagents = await installSubagentModel(session);
 
       const warnings = spyConsoleWarn();
@@ -147,7 +147,7 @@ describe("regression: agentDir cwd fallback warns before proceeding (#12)", () =
       // gives the extension runner a real SessionManager laid out like the
       // CLI's <agentDir>/sessions/<slug>; the harness's own persistence is
       // untouched (the runner's field only backs the extensions' ctx).
-      session = await openDelegateBoundary();
+      session = await openDelegateBoundary({ inMemoryAgentDir: true });
       subagents = await installSubagentModel(session);
 
       const agentDir = mkdtempSync(join(tmpdir(), "delegate-agentdir-"));
