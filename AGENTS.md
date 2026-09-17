@@ -25,6 +25,52 @@ DELEGATE_RUN_PENDING=1 bun test # run pending tests for real — they should
                                 # fail meaningfully on unimplemented ops
 ```
 
+### LiteSpec (workflow only)
+
+Read `specs/product.md` for orientation. Use the tracked `litespec-plan`,
+`litespec-build`, and `litespec-review` skills for substantial work: reconcile
+existing GitHub issues before creating more, plan bounded units, build one
+unit with meaningful verification, then review. Small fixes need no queue.
+GitHub issues are the only backlog; if unavailable, report the blocker rather
+than creating a local queue.
+
+Project rules override generated workflow defaults. `SPEC.md`,
+`INVARIANTS.md`, and `COMPATIBILITY.md` remain the sole behavioral authorities;
+read them wherever a skill asks for relevant feature specs. Do not create
+mirrored `specs/<feature>/spec.md` contracts or treat issue proposals, product
+orientation, or decisions as overriding them. Behavioral changes require
+explicit reconciliation in the root contracts, not automatic spec drafting.
+`TEST-MIGRATION.md` remains the test provenance/coverage record; its public-tool
+boundary and pending-test rules also govern LiteSpec verifiers. Use the Bun
+checks above, not generic Go examples. Optional glossary/decisions files need
+not be scaffolded.
+
+Skills do not authorize commits, branch changes, or GitHub writes contrary to
+the user's task limits. If their evidence/review protocol needs a prohibited
+operation, report the limitation; do not fabricate a receipt or claim formal
+LiteSpec completion.
+
+Approved sequencing (not a second backlog): reconcile existing issues →
+background delivery/reliability → worker questions → automatic handoffs →
+restart recovery/live browser → later steering/team messages. This is planning
+order, not a claim of implemented or newly promised behavior.
+
+Generated `.agents/skills/litespec-*` files are versioned, unedited output from
+`../litespec` source commit `2ec5455f30889cdd15746f6e507b7f3f21bb8baa`.
+To regenerate intentionally, verify that checkout is clean and at the recorded
+commit, then run from this repository:
+
+```bash
+(cd ../litespec && go build -o /tmp/pi-delegate-litespec ./cmd/litespec)
+/tmp/pi-delegate-litespec update # never init in this existing project
+/tmp/pi-delegate-litespec validate --specs --strict
+/tmp/pi-delegate-litespec validate --decisions --strict
+```
+
+Review generated instruction changes against these overrides; update the source
+commit above only as part of an intentional generator upgrade. Validation is
+structural only and does not validate the root behavioral contracts.
+
 ## Consulting v1
 
 V1 is evidence for behavior, never a design source. When consulting it:
