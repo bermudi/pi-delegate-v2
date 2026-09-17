@@ -76,6 +76,15 @@ release notes and migration guidance; it must not arrive as rewrite drift.
 Departures from the preserve list above. Each must carry its own motivation
 and migration guidance; none may arrive as silent rewrite drift.
 
+- **Unavailable parent tools fail closed for default-profile inheritance.**
+  A throwing active-tool probe no longer silently falls back to writer tools.
+  If any `default` task omits `tools`, the whole sync or async call rejects
+  before children start, with a logged, actionable error preserving the cause.
+  Migration: restore the parent's tool inventory or supply an intentional
+  explicit `tools` list (including `[]`) on every affected task. Explicit-tool,
+  scout/coder/reviewer, and inline dispatches do not probe the inventory;
+  their existing capabilities are unchanged.
+
 - **Task `model` field removed; models are user-configured only.** V1
   resolved any registry-resolvable model reference (including
   `:thinking`-suffixed ones) the caller cared to type, letting a subagent

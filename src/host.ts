@@ -263,13 +263,19 @@ export function resolveTasks(
   config: DelegateConfig,
 ): ResolvedTask[] {
   let parentActive: string[] = [];
-  try {
-    parentActive = env
-      .getActiveTools()
-      .filter((name) => (CHILD_TOOLS as readonly string[]).includes(name));
-  } catch {
-    // The host may not expose its active tool list; the default profile
-    // then falls back to the standard writer set below.
+  if (tasks.some((task) => task.agent === "default" && task.tools === undefined)) {
+    try {
+      parentActive = env
+        .getActiveTools()
+        .filter((name) => (CHILD_TOOLS as readonly string[]).includes(name));
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      const message =
+        `Cannot resolve default-profile parent tools: ${detail}. ` +
+        `Restore the parent tool inventory or supply explicit tools for every default-profile task.`;
+      console.error(`[delegate] ${message}`, error);
+      throw new Error(message, { cause: error });
+    }
   }
 
   const needsParentContext = tasks.some(

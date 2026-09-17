@@ -104,6 +104,17 @@ gaps.
   a sabotaged model-runtime grab (truthy impostor injected through the raw
   harness session) fails the whole call with the actionable error before any
   task starts (`tests/regression/host-runtime.test.ts`, issue #11).
+- **Covered now (#13, v2 regression evidence):** throwing parent active-tool
+  probes reject mixed sync/async batches before any child starts, preserving
+  cause, guidance, and logging; explicit tools (including `[]`), built-in
+  scout/coder/reviewer, and inline choices bypass the probe; successful
+  restricted-parent mirroring retains read-only tools
+  (`tests/regression/parent-tools.test.ts`). Host-only injection in
+  `tests/support/parent-tools.ts` targets Pi 0.84.2's extension runtime callback
+  while retaining the wrapper's live inventory. Calls still use the registered
+  delegate tool. The original AgentSession fault seam also broke the wrapper
+  before delegate ran; its verifier commit is retained, with one explicitly
+  user-authorized correction commit (#13 exception comment).
 - **Gap:** overlap warnings on results.
 
 ### Multi-task / concurrent dispatch
