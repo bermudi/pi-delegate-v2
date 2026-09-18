@@ -48,7 +48,6 @@ describe("delegate public tool contract", () => {
     expect(Object.keys(taskFields).sort()).toEqual(
       [
         "agent",
-        "context",
         "cwd",
         "deadlineMs",
         "id",
@@ -90,10 +89,7 @@ describe("delegate public tool contract", () => {
       "scratch",
       "isolated",
     ]);
-    expect(objectOf(fields.context).enum).toEqual([
-      "fresh",
-      "with-parent-transcript",
-    ]);
+    expect(fields.context).toBeUndefined();
   });
 
   test("keeps removed controls outside the public schema", async () => {

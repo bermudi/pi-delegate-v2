@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import type { AgentSession } from "@earendil-works/pi-coding-agent";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import type { TestSession } from "@marcfargas/pi-test-harness";
 import {
   fauxAssistantMessage,
@@ -340,39 +341,66 @@ describe("delegate dispatch contract", () => {
     },
   );
 
-  test(
-    "with-parent-transcript prepends the parent conversation to the task context",
-    async () => {
-      // SPEC: context "with-parent-transcript" gives the subagent the parent
-      // conversation as context. The transcript must contain this session's
-      // own user/assistant text, without parent tools or extensions.
+  test("normal dispatch never injects parent conversation history", async () => {
+    // Issue #14: replaces the former parent-sharing contract by user decision.
+    session = await openDelegateBoundary();
+    const subagents = await installSubagentModel(session);
+    const entries = spyOn((session.session as AgentSession).sessionManager, "getEntries")
+      .mockImplementation(() => { throw new Error("parent transcript must not be read"); });
+    let observed = "";
+    subagents.respond([(context) => {
+      observed = JSON.stringify(context.messages);
+      return fauxAssistantMessage("FRESH-CHILD");
+    }]);
+    let result;
+    try {
+      result = await callDelegate(session, {
+        tasks: [{ prompt: "SELF-CONTAINED-BRIEF", tools: [] }],
+      });
+      expect(entries).not.toHaveBeenCalled();
+    } finally {
+      entries.mockRestore();
+    }
+    expect(result.isError).toBe(false);
+    expect(observed).toContain("SELF-CONTAINED-BRIEF");
+    expect(observed).not.toContain("delegate contract call");
+    expect(observed).not.toContain("parent-session");
+  });
+
+  for (const context of ["with-parent-transcript", "fresh", "everything", null]) {
+    for (const async of [false, true]) {
+      test(`obsolete context ${context} rejects the whole ${async ? "async" : "sync"} batch`, async () => {
+        session = await openDelegateBoundary();
+        const subagents = await installSubagentModel(session);
+        const result = await callDelegate(session, {
+          async,
+          tasks: [
+            { prompt: "valid sibling", tools: [] },
+            { prompt: "obsolete request", context },
+          ],
+        });
+        expect(result.isError).toBe(true);
+        expect(result.text).toMatch(/omit context/i);
+        expect(result.text).toContain("self-contained");
+        expect(subagents.state.callCount).toBe(0);
+      });
+    }
+  }
+
+  test("flat and stringified obsolete context requests receive migration guidance", async () => {
+    for (const args of [
+      { prompt: "flat", context: "with-parent-transcript" },
+      { prompt: "flat", context: "fresh" },
+      { tasks: JSON.stringify([{ prompt: "encoded", context: "with-parent-transcript" }]) },
+      { tasks: [{ prompt: "valid" }], context: "fresh" },
+    ]) {
+      session?.dispose();
       session = await openDelegateBoundary();
       const subagents = await installSubagentModel(session);
-
-      let sawParentTranscript = false;
-      const inspect: FauxResponseFactory = async (context) => {
-        const firstUser = context.messages.find(
-          (m) => m.role === "user",
-        );
-        const text = JSON.stringify(firstUser);
-        sawParentTranscript =
-          text.includes("parent-session") &&
-          text.includes("delegate contract call");
-        return fauxAssistantMessage("CONTEXT-SEEN");
-      };
-      subagents.respond([inspect]);
-
-      const result = await callDelegate(session, {
-        tasks: [
-          {
-            prompt: "look back",
-            context: "with-parent-transcript",
-          },
-        ],
-      });
-      expect(result.isError).toBe(false);
-      expect(result.text).toContain("CONTEXT-SEEN");
-      expect(sawParentTranscript).toBe(true);
-    },
-  );
+      const result = await callDelegate(session, args);
+      expect(result.isError).toBe(true);
+      expect(result.text).toMatch(/omit context/i);
+      expect(subagents.state.callCount).toBe(0);
+    }
+  });
 });

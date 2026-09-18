@@ -25,6 +25,13 @@ use any design that makes these properties true and testable.
   back completed side effects.
 - Cancellation cause precedence is parent abort, then deadline, then stall.
 
+## Conversation isolation
+
+- Dispatch MUST NOT extract or inject the parent conversation into children.
+- Obsolete `context` fields MUST reject the whole call before any task starts.
+- Children retain project instructions and their own pooled or explicitly
+  resumed history; freshness relative to the parent MUST NOT reset that history.
+
 ## Session reuse
 
 - Same-ID calls MUST serialize across acquisition, execution, and final state

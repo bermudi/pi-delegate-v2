@@ -39,7 +39,6 @@ A task accepts:
 | `agent` | Named profile; omission selects an inline task |
 | `cwd` | Working directory; relative paths resolve from the parent cwd |
 | `systemPrompt` | Base prompt; project context is added separately |
-| `context` | `fresh` or `with-parent-transcript`; default is `fresh` |
 | `tools` | Exact capability list; `*` = read/write/edit/bash, `ro` = read/grep/find/ls |
 | `thinking` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max` |
 | `sessionId` | Key for a live reusable session |
@@ -61,6 +60,11 @@ The failure is logged and returned with its cause and guidance to restore the
 parent inventory or supply explicit tools. Explicit `tools` (including `[]`),
 `scout`, `coder`, `reviewer`, and inline tasks do not require that probe;
 inline tasks retain their writer default.
+
+Children never inherit the parent conversation: no parent transcript is extracted
+or injected. Supply a self-contained task brief. The obsolete `context` field
+is rejected before any task starts, including `context: "fresh"`; omit it.
+This does not remove a child's own pooled `sessionId` or explicit `resumeFrom` history.
 
 Task fields override profile defaults. Named Markdown profiles use
 first-definition-wins discovery. Project context is rebuilt for the task cwd;

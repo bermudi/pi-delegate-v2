@@ -54,11 +54,6 @@ const taskSchema = Type.Object(
     systemPrompt: Type.Optional(
       Type.String({ description: "Base prompt for the subagent." }),
     ),
-    context: Type.Optional(
-      stringEnum(["fresh", "with-parent-transcript"], {
-        description: "Conversation context supplied to the task.",
-      }),
-    ),
     model: Type.Optional(
       Type.String({
         description:
@@ -148,7 +143,6 @@ const taskFieldNames = [
   "agent",
   "cwd",
   "systemPrompt",
-  "context",
   "model",
   "tools",
   "thinking",
@@ -174,11 +168,23 @@ function normalizeTools(value: string): unknown {
   return token !== "" && !/[\s,]/.test(token) ? [token] : value;
 }
 
+/** Run before host schema coercion so obsolete fields receive migration guidance. */
+function rejectObsoleteContext(record: Record<string, unknown>): void {
+  if (Object.hasOwn(record, "context")) {
+    throw new Error(
+      'The context field has been removed (including "fresh" and "with-parent-transcript"). ' +
+        'Omit context and provide a self-contained task brief; parent conversation history is never shared. ' +
+        'Child-owned sessionId and resumeFrom history remain supported.',
+    );
+  }
+}
+
 function normalizeTask(value: unknown): unknown {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     return value;
   }
   const task = { ...(value as Record<string, unknown>) };
+  rejectObsoleteContext(task);
   if (typeof task.tools === "string") task.tools = normalizeTools(task.tools);
   if (task.agent === "") delete task.agent;
   return task;
@@ -232,6 +238,7 @@ function prepareArguments(value: unknown): DelegateArguments {
   }
 
   const args = { ...(value as Record<string, unknown>) };
+  rejectObsoleteContext(args);
   if (typeof args.tasks === "string") {
     const parsed = parseArray(args.tasks);
     if (parsed) args.tasks = parsed;
@@ -272,7 +279,7 @@ Delegate runs subagent tasks synchronously or as an asynchronous ticket.
   task's result in input order; \`async: true\` returns a ticket immediately
   and runs the batch in the background.
 - Task fields: \`prompt\` (required unless \`resumeFrom\`), \`id\` (correlation
-  key), \`agent\` (named profile), \`cwd\`, \`systemPrompt\`, \`context\`,
+  key), \`agent\` (named profile), \`cwd\`, \`systemPrompt\`,
   \`tools\` (\`*\`/\`ro\` groups or names), \`thinking\`, \`deadlineMs\`,
   \`sessionId\`, \`resumeFrom\`, \`workspace\` (shared/scratch/isolated).
   A top-level \`workspace\` is the batch default.
@@ -280,6 +287,8 @@ Delegate runs subagent tasks synchronously or as an asynchronous ticket.
   agent may instead run on the model the user configured for it under
   "models" in the user-global delegate.json. A task \`model\` field is
   rejected.
+- Children never inherit parent conversation history. Supply a self-contained
+  brief; project instructions and child-owned pooled/resumed history still apply.
 
 ## Workspaces
 - \`shared\` (default): the task edits the caller's tree directly. Writers

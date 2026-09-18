@@ -30,9 +30,9 @@ release notes and migration guidance; it must not arrive as rewrite drift.
   precedence; Markdown discovery order and first-definition wins.
 - User-global `delegate.json` configuration. Project files do not become
   delegate configuration.
-- Parent model/context inheritance and extension isolation, including verified
+- Parent model inheritance and project instructions and extension isolation, including verified
   provider-scoped exceptions and the meanings of `*` and `ro`, subject to the
-  model-selection departure below.
+  model-selection and parent-history departures below.
 
 ### Execution and state
 
@@ -72,6 +72,16 @@ release notes and migration guidance; it must not arrive as rewrite drift.
   databases.
 
 ## v2 deliberate breaking changes
+
+- **Parent conversation sharing removed (#14, user decision).** No parent
+  transcript extraction or injection remains. The task `context` field is no
+  longer advertised or accepted: all supplied values, including `fresh`, reject
+  the entire batch before any task starts. This deliberately replaces the old
+  `with-parent-transcript` capability, not just its failure fallback.
+  Migration: omit `context` and provide a self-contained task brief. Existing
+  `context: "fresh"` callers must also omit the field; their intended freshness
+  is now unconditional relative to the parent. Project instructions, model
+  inheritance, child-owned pooled sessions and explicit `resumeFrom` remain.
 
 Departures from the preserve list above. Each must carry its own motivation
 and migration guidance; none may arrive as silent rewrite drift.
