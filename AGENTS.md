@@ -55,10 +55,18 @@ background delivery/reliability → worker questions → automatic handoffs →
 restart recovery/live browser → later steering/team messages. This is planning
 order, not a claim of implemented or newly promised behavior.
 
-Generated `.agents/skills/litespec-*` files are versioned, unedited output from
-`../litespec` source commit `2ec5455f30889cdd15746f6e507b7f3f21bb8baa`.
-To regenerate intentionally, verify that checkout is clean and at the recorded
-commit, then run from this repository:
+Generated `.agents/skills/litespec-*` files originated from `../litespec` source
+commit `2ec5455f30889cdd15746f6e507b7f3f21bb8baa` but now carry intentional
+project-specific edits: GitHub issues are the only backlog (no `specs/queues/`
+fallback — report a blocker when `gh` is unavailable), verification uses the Bun
+checks above rather than Go examples, contract-change guidance points at the
+root contracts instead of mirrored `specs/<feature>/spec.md` files, and review
+routes non-trivial out-of-unit fixes to `litespec-plan` instead of appending
+units itself. Regenerating from the generator reverts these edits; either
+re-apply them afterward or teach the generator the divergence first.
+
+To regenerate intentionally anyway, verify that checkout is clean and at the
+recorded commit, then run from this repository:
 
 ```bash
 (cd ../litespec && go build -o /tmp/pi-delegate-litespec ./cmd/litespec)
@@ -67,8 +75,7 @@ commit, then run from this repository:
 /tmp/pi-delegate-litespec validate --decisions --strict
 ```
 
-Review generated instruction changes against these overrides; update the source
-commit above only as part of an intentional generator upgrade. Validation is
+Review generated instruction changes against these overrides. Validation is
 structural only and does not validate the root behavioral contracts.
 
 ## Consulting v1

@@ -34,13 +34,13 @@ Record the output of `git rev-parse HEAD` as the base. Create and switch to `lit
    - [ ] pending
    ```
    Omit `Boundary:` and `Risk cases:` unless the unit crosses a filesystem, process, or network boundary. The `Boundary:` field takes exactly one of the closed vocabulary: `filesystem`, `process`, or `network`. Every `Done means:` clause has a unique ID and maps through `Scenarios:` to at least one named test. Applicable risk entries map to exactly one clause ID or give N/A with a concrete reason, never mixed forms.
-   `Verify:` must fail for a plausible state where the outcome is missing. A `go test` that doesn't check output is not a Verify.
+   `Verify:` must fail for a plausible state where the outcome is missing. A `bun test` that doesn't check output is not a Verify.
    Dry-run each Verify on the base tree before filing. Honest result: non-zero (outcome or verifier missing), or green for a test run where every named file actually executed — red then comes from this unit's new tests. Red-pre shape: a unit whose exact Verify is green on base takes its red from the verifier-only commit carrying the new failing tests — an expected shape, not a smell. Confirm execution from the runner's per-file output or file count: runners silently skip named files that don't match their discovery patterns and stay green while never running them. A named file that never ran can never witness its outcomes — reshape the Verify to the entry point that executes those tests (for example a suite bootstrap).
    `Depends:` is optional, references `##` headings in the same issue, comma-separated. A unit is unblocked when all its `Depends:` units are checked `- [x]`.
    `Read first:` is optional, unique, nonempty when present. Context, not scope — prefer areas and rulings over long file lists. Omit rather than placeholder.
    `Constraints:` is optional, unique, nonempty when present. Boundaries: what must stay true or is out of bounds — never what to edit. Omit rather than placeholder. The worker owns the implementation path; don't smuggle in an edit script via Constraints.
 
-4. **Spec if load-bearing.** If the feature is a promise that breaks things when wrong (CLI shape, API, file format), edit `specs/<feature>/spec.md` directly in the same change — not a delta. Keep to 3-5 SHALL requirements, each with a WHEN/THEN scenario.
+4. **Spec if load-bearing.** If the feature is a promise that breaks things when wrong (CLI shape, API, file format), edit the applicable root contract identified by AGENTS.md — `SPEC.md`, `INVARIANTS.md`, or `COMPATIBILITY.md` — directly in the same change — not a delta. Keep to 3-5 SHALL requirements, each with a WHEN/THEN scenario.
 
 ## Rules
 
@@ -49,4 +49,4 @@ Record the output of `git rev-parse HEAD` as the base. Create and switch to `lit
 - Reconcile prose against the queue before filing: every scope or preservation sentence in the Proposal and Design prose — anything that must stay true, must not happen, or bounds the change — maps onto a unit's `Done means:` or `Constraints:`, becomes its own regression-pin unit, or is deleted. A sentence no unit enforces is a promise nothing can test; catch it here, not at closure review.
 - Every outcome clause maps to a named test scenario; filesystem, process, and network units account for all five standard risks.
 - One Verify per unit, and that Verify is the gate — `build` must satisfy it before claiming done.
-- If building shows the spec is wrong, update the spec in the same PR. Don't force wrong code to match a stale spec.
+- If building shows the contract is wrong, update the applicable root contract in the same PR. Don't force wrong code to match a stale contract.

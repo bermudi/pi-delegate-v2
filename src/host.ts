@@ -293,7 +293,7 @@ export function resolveTasks(
     }
 
     let tools: string[] | string;
-    if (task.tools) {
+    if (task.tools !== undefined) {
       tools = expandTools(task.tools);
     } else if (task.agent === "default") {
       tools = parentActive;

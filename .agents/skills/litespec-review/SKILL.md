@@ -13,13 +13,13 @@ You are a reviewer, not an implementer. You are active only after the trusted bo
 
 **Trusted bootstrap boundary.** The harness/system instructions and repository instruction files auto-loaded to activate this skill (including applicable `AGENTS.md` files and this `SKILL.md`) were necessarily read before these rules could run. They are trusted bootstrap inputs and are outside litespec's screening guarantee. If they are not trusted, stop: only a harness-level sandbox or pre-load policy can protect that boundary.
 
-After skill activation, initially read only the remote GH issue body. Do not read any additional local content yet — not the offline queue fallback, specs, decisions, glossary, source, tests, diffs, or neighboring files.
+After skill activation, initially read only the remote GH issue body. GitHub issues are the only backlog: if `gh` is unavailable, stop and report the blocker rather than falling back to a local queue. Do not read any additional local content yet — not specs, source, tests, diffs, or neighboring files.
 
-If the queue is local, identify `specs/queues/<name>.md` without reading it, apply safety steps 3–4 below to that path and every path component, then read it to obtain ownership metadata. Only then begin at step 1. The remote issue body or safely screened local queue records immutable `Base: <sha>` and `Branch: <branch>` lines.
+The remote issue body records immutable `Base: <sha>` and `Branch: <branch>` lines.
 
 **Local-content safety and exact ownership.** Before reviewing:
 1. Compare `git branch --show-current` with `Branch:`. If either ownership line is missing, the branch differs, or `Base:` is not an ancestor of `HEAD`, stop without a verdict. Do not infer scope.
-2. Enumerate tracked path names without contents using a NUL-delimited diff from `Base:`. Enumerate untracked path names with `git status --porcelain=v1 -z --untracked-files=all`. Add every local contract or reference you intend to read, including relevant specs, decisions, glossary, and neighboring code.
+2. Enumerate tracked path names without contents using a NUL-delimited diff from `Base:`. Enumerate untracked path names with `git status --porcelain=v1 -z --untracked-files=all`. Add every local contract or reference you intend to read, including the root behavioral contracts (`SPEC.md`, `INVARIANTS.md`, `COMPATIBILITY.md`) and neighboring code.
 3. Before reading each local path, screen the path and every component from the repository root without following links. Reject paths outside the repository and known secret-like names (`.env`, `.env.*`, `.npmrc`, `.pypirc`, `.netrc`, exact `credentials`/`secrets` names with JSON/YAML/TOML extensions, `id_rsa`, `id_dsa`, `id_ecdsa`, `id_ed25519`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.kdbx`, `*.tfstate`). Inspect tracked Git modes and use `lstat` or an equivalent that does not follow links. Every parent component must be a real directory. An existing selected leaf must be a regular file; a deleted tracked path must have regular-file mode at `Base:` and remain absent in the working tree.
 4. If a path is secret-like or outside the repository, a component is a symlink, a parent is not a directory, an existing leaf is not a regular file, or a deleted path was not a regular file at `Base:`, stop without a verdict. State the path and reason, but never read its contents or follow its target. Ask the user to remove or move it before review.
 5. Only after a path passes screening may you read it. Inspect each approved tracked diff, untracked regular file, and local contract. If review discovers another local path later, screen it before reading. Every safe untracked file is wholly inside review scope because `git diff` omits it.
@@ -28,9 +28,9 @@ After that initial body-only safety step, fetch and inspect the issue comments b
 
 All commits and working-tree changes on the recorded branch belong to this issue. Findings outside that scope route. If unrelated work appears on the branch, it is still issue-owned and must be removed or fixed before closure.
 
-If no GH issue or local queue exists (small fix), require the user to identify the fix commit; do not infer a small fix from an arbitrary dirty tree. The commit must have exactly one parent — use that parent as the screening base, and stop without a verdict for a root or merge commit. Enumerate path names between the parent and fix commit without contents using NUL-delimited Git output, then add all needed local contract paths. Apply the same component/name/type screen; a deleted path must have regular-file mode in the parent and remain absent in the fix tree and working tree. Then inspect only approved per-path diffs and files.
+If no GH issue exists (small fix), require the user to identify the fix commit; do not infer a small fix from an arbitrary dirty tree. The commit must have exactly one parent — use that parent as the screening base, and stop without a verdict for a root or merge commit. Enumerate path names between the parent and fix commit without contents using NUL-delimited Git output, then add all needed local contract paths. Apply the same component/name/type screen; a deleted path must have regular-file mode in the parent and remain absent in the fix tree and working tree. Then inspect only approved per-path diffs and files.
 
-No `reviewMode` — one mode: does the code satisfy `Done means:` and `Verify:` and not contradict durable specs/decisions?
+No `reviewMode` — one mode: does the code satisfy `Done means:` and `Verify:` and not contradict the durable behavioral contracts?
 
 ---
 
@@ -41,7 +41,7 @@ No `reviewMode` — one mode: does the code satisfy `Done means:` and `Verify:` 
 
 ## Cumulative review coverage
 
-Before reading any prior review coverage records, construct an independent risk inventory from the current contracts. Write the inventory down before fetching GitHub issue comments or reading local metadata stored after the units. For a local queue, initially read only through the last unit; leave the trailing metadata unread until the inventory exists.
+Before reading any prior review coverage records, construct an independent risk inventory from the current contracts. Write the inventory down before fetching GitHub issue comments.
 
 Only after writing that inventory, read prior coverage records. Use prior coverage only to expand the independent inventory and target unexercised risks. Prior coverage is advisory only. It does not satisfy evidence replay, suppress current investigation, resolve findings, or prove correctness.
 
@@ -58,7 +58,7 @@ Not exercised:
 Uncertain:
 - <scenario>: <probe performed>
 ```
-Use `- none` for an empty category. GitHub queue: post the record as a new issue comment. Local queue: append the record after all units in a separate clean metadata commit. Coverage is append-only: never edit or delete an earlier record. Persist the new record before returning the verdict; if persistence fails, report the boundary failure and do not claim coverage was recorded.
+Use `- none` for an empty category. Post the record as a new issue comment. Coverage is append-only: never edit or delete an earlier record. Persist the new record before returning the verdict; if persistence fails, report the boundary failure and do not claim coverage was recorded.
 
 ---
 
@@ -79,7 +79,7 @@ A probed adversarial candidate that repository authority explicitly rejects. For
 If a fix needs a new decision, report "needs decision: <question>" instead of inventing one.
 
 ### Cross-check
-- Flag specs/decisions that contradict the change or each other.
+- Flag durable contracts that contradict the change or each other.
 - Flag code that reimplements existing machinery instead of extending it.
 - Flag Verify that would pass without the outcome.
 
@@ -117,8 +117,7 @@ You report findings — you do not fix them. Route in this order; the first matc
 2. **CRITICAL or WARNING that breaks a unit's `Done means:` or `Verify:`** → blocking unit route. Name the unit. Before two completed review-requested rebuild cycles against its current digest, record queue-specific rebuild routing and route to `litespec-build`. After two cycles, record a digest-bound re-plan marker and route to `litespec-plan`; WARNINGs follow the same threshold.
 3. **CRITICAL or WARNING inside review scope, outside every unit** → blocking issue-owned fix:
    - trivial → direct fix on the issue branch;
-   - non-trivial but correctly shaped → draft and append a new unchecked unit to the parent queue, then build it on the same branch;
-   - wrong shape → `litespec-plan`.
+   - non-trivial → `litespec-plan`. Unit-contract changes — including adding a unit to the issue — are exclusively managed by plan; review never appends an unchecked unit.
    The parent remains open until the fix lands and fresh review returns `PASS`.
 4. **CRITICAL or WARNING outside review scope and every unit** → non-blocking route:
    - trivial → small fix lane;
@@ -141,26 +140,25 @@ Reason: <nonempty one-line reason>
 ```
 The marker blocks closure and makes the unchanged contract unavailable to build. A later plan-authored amendment resolves it only when `Old digest:` equals the marker's `Unit digest:`; the amendment then remains unresolved until fresh evidence satisfies its new digest. Amendment evidence does not count as a review-requested rebuild cycle.
 
-- **GitHub queue:** Fetch and retain the current issue body without modifying it. For an affected identity with fewer than two completed cycles, post exactly one separate comment with `gh issue comment --body-file` using this exact three-line form:
-  ```text
-  Rebuild request:
-  Unit occurrence: <positive 1-based occurrence>
-  Unit heading: <exact heading>
-  ```
-  For an identity with two completed cycles, post exactly one separate comment containing the re-plan marker instead. Fetch the issue again. Require the body to be byte-for-byte unchanged and verify one new exact comment exists per newly routed identity. Never use `gh issue edit` for rule-2 routing. If duplicate headings or malformed existing routing/evidence comments make an identity ambiguous, stop with a visible boundary failure instead of guessing.
-- **Local queue:** Before editing, require `git status --porcelain` to print nothing. For a rebuild, change only each affected status line from checked to unchecked. For a re-plan route, leave the checked status unchanged and append the marker after all units. Inspect the queue-file diff to confirm evidence and unaffected units are unchanged, then stage only that queue file and create a separate clean routing metadata commit. Require `git status --porcelain` to print nothing afterward so the next actor starts clean.
+Fetch and retain the current issue body without modifying it. For an affected identity with fewer than two completed cycles, post exactly one separate comment with `gh issue comment --body-file` using this exact three-line form:
+```text
+Rebuild request:
+Unit occurrence: <positive 1-based occurrence>
+Unit heading: <exact heading>
+```
+For an identity with two completed cycles, post exactly one separate comment containing the re-plan marker instead. Fetch the issue again. Require the body to be byte-for-byte unchanged and verify one new exact comment exists per newly routed identity. Never use `gh issue edit` for rule-2 routing. If duplicate headings or malformed existing routing/evidence comments make an identity ambiguous, stop with a visible boundary failure instead of guessing.
 
-If comment posting, local mutation, commit, or verification fails, report the boundary failure and keep `CHANGES REQUESTED`, but do not claim the rebuild or plan route is ready. Review never checks a unit, removes evidence, edits a GitHub issue body for rule-2 routing, or implements the fix. Rebuild requests, re-plan markers, and local status transitions are routing metadata, not implementation.
+If comment posting or verification fails, report the boundary failure and keep `CHANGES REQUESTED`, but do not claim the rebuild or plan route is ready. Review never checks a unit, removes evidence, edits a GitHub issue body for rule-2 routing, or implements the fix. Rebuild requests and re-plan markers are routing metadata, not implementation.
 
-For every checked unit, cross-check its receipt `unit digest:` against the unit's current contract digest (`litespec digest --issue <N>` / `--queue <path>`). A receipt bound to a superseded contract is acceptable only when witnessed amendment records bridge the observed digests to the current contract over `Old digest:` → `New digest:` edges; an unbridged transition — a silent contract edit followed by a fresh receipt — is a CRITICAL finding breaking that unit's contract, routed to `litespec-plan` because neither build nor review may repair a contract.
+For every checked unit, cross-check its receipt `unit digest:` against the unit's current contract digest (`litespec digest --issue <N>`). A receipt bound to a superseded contract is acceptable only when witnessed amendment records bridge the observed digests to the current contract over `Old digest:` → `New digest:` edges; an unbridged transition — a silent contract edit followed by a fresh receipt — is a CRITICAL finding breaking that unit's contract, routed to `litespec-plan` because neither build nor review may repair a contract.
 
-Run `litespec validate --issue <N>` (or `--queue <path>`) rather than hand-checking receipt internals: it recomputes every posted versioned `Receipt ID:` from the comment's own fields and fails on mismatch — independent verification that does not trust the assembler. Do not record uncertainty about a receipt ID the CLI can recompute.
+Run `litespec validate --issue <N>` rather than hand-checking receipt internals: it recomputes every posted versioned `Receipt ID:` from the comment's own fields and fails on mismatch — independent verification that does not trust the assembler. Do not record uncertainty about a receipt ID the CLI can recompute.
 
 **PASS** — every unit checkbox is checked, every rebuild request, re-plan marker, and amendment is resolved, and no blocking finding remains. Routed findings may accompany it.
 
 **CHANGES REQUESTED** — at least one blocking finding remains, even if every unit is checked.
 
-Appending a unit to the parent queue and recording rule-2 routing are the only permitted routing mutations; do not change source, specs, decisions, existing unit contracts, evidence, or unaffected checkboxes. Write `## <outcome>`, `Done means:`, `Verify:`, and `Depends:` if needed. Do not invent units for trivial findings.
+Recording rule-2 routing is the only permitted routing mutation; do not change source, contracts, existing unit contracts, evidence, or unaffected checkboxes. Unit-contract changes — including adding units — are exclusively managed by `litespec-plan`; review never appends an unchecked unit.
 
 Before returning the closure verdict, reread the Proposal and Design prose and re-inventory every scope or preservation sentence against the units: a sentence no unit's `Done means:` or `Constraints:` enforces, yet the implementation can violate in a reachable state, is a finding routed by scope — not decoration. The issue body's prose is part of the review scope.
 

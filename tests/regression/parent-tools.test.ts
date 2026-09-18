@@ -66,6 +66,8 @@ describe("regression: parent tool mirroring", () => {
     const cases = [
       { task: { agent: "default", tools: ["read"] }, tools: ["read"] },
       { task: { agent: "default", tools: [] }, tools: [] },
+      { task: { agent: "scout", tools: [] }, tools: [] },
+      { task: { tools: [] }, tools: [] },
       { task: { agent: "scout" }, tools: ["read", "grep", "find", "ls"] },
       { task: { agent: "coder" }, tools: ["read", "bash", "edit", "write"] },
       { task: { agent: "reviewer" }, tools: ["read", "grep", "find", "ls"] },
