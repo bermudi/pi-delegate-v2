@@ -28,4 +28,4 @@ that its implementation is complete.
    inspect isolated proposals and recovery artifacts when reconciliation fails.
 
 Work planning lives in GitHub issues, not here. See [AGENTS.md](../AGENTS.md)
-for the thin LiteSpec workflow and regeneration rule.
+for the workflow.
