@@ -15,3 +15,10 @@ bun run typecheck
 
 The current implementation is only the initial public-boundary scaffold.
 Dispatch is intentionally not implemented yet.
+
+## Parent conversation isolation (breaking change)
+
+Tasks no longer accept `context`, including `context: "fresh"` or
+`"with-parent-transcript"`. Omit it and supply a self-contained brief. Children
+never inherit parent conversation history; project instructions, model
+inheritance, child-owned pooled sessions and explicit `resumeFrom` still apply.

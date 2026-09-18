@@ -2,7 +2,6 @@ import type { Model, Api, Usage } from "@earendil-works/pi-ai";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 
 export type Workspace = "shared" | "scratch" | "isolated";
-export type ContextMode = "fresh" | "with-parent-transcript";
 
 /** A task after semantic validation and agent/model/tool resolution. */
 export interface ResolvedTask {
@@ -18,7 +17,6 @@ export interface ResolvedTask {
   /** Expanded built-in tool names for the child session. */
   readonly tools: readonly string[];
   readonly systemPrompt: string | undefined;
-  readonly context: ContextMode;
   readonly sessionId: string | undefined;
   readonly resumeFrom: string | undefined;
   readonly deadlineMs: number | undefined;

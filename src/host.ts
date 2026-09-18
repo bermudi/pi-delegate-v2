@@ -3,7 +3,6 @@ import { homedir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { execFileSync } from "node:child_process";
 import {
-  buildSessionContext,
   createAgentSession,
   DefaultResourceLoader,
   ModelRuntime,
@@ -184,65 +183,6 @@ function resolveModel(
   return undefined;
 }
 
-/** Extract only text blocks from a Pi message content value. */
-function extractTextContent(
-  content: unknown,
-): string {
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
-  return content
-    .filter(
-      (b): b is { type: "text"; text: string } =>
-        typeof b === "object" &&
-        b !== null &&
-        (b as { type?: string }).type === "text" &&
-        typeof (b as { text?: string }).text === "string",
-    )
-    .map((b) => b.text)
-    .join("");
-}
-
-/** Render the active parent conversation as compact context for a subagent. */
-function buildParentTranscript(env: HostEnvironment): string | undefined {
-  try {
-    const ctx = buildSessionContext(
-      env.ctx.sessionManager.getEntries(),
-      env.ctx.sessionManager.getLeafId(),
-    );
-    const lines: string[] = [];
-    for (const msg of ctx.messages) {
-      if (msg.role === "user" || msg.role === "assistant") {
-        const text = extractTextContent(msg.content).trim();
-        if (text) {
-          lines.push(msg.role === "user" ? `**User:** ${text}` : `**Assistant:** ${text}`);
-        }
-      }
-    }
-    return lines.length > 0 ? lines.join("\n\n") : undefined;
-  } catch (error) {
-    console.warn(
-      `[delegate] could not build the parent transcript for context "with-parent-transcript"; continuing without it:`,
-      error,
-    );
-    return undefined;
-  }
-}
-
-function wrapWithParentTranscript(transcript: string, prompt: string): string {
-  return [
-    "<parent-session>",
-    "The following is the conversation from the parent session.",
-    "Read this for context, then execute the task below.",
-    "Do not continue the parent conversation or respond to prior messages.",
-    "",
-    transcript,
-    "</parent-session>",
-    "",
-    "## Task",
-    prompt,
-  ].join("\n");
-}
-
 const RESUME_DEFAULT_PROMPT =
   "Continue from where you left off. Pick up the task and keep going.";
 
@@ -277,13 +217,6 @@ export function resolveTasks(
       throw new Error(message, { cause: error });
     }
   }
-
-  const needsParentContext = tasks.some(
-    (task) => task.context === "with-parent-transcript",
-  );
-  const parentTranscript = needsParentContext
-    ? buildParentTranscript(env)
-    : undefined;
 
   return tasks.map((task, index) => {
     const where = `tasks[${index}]${task.id ? ` (id '${task.id}')` : ""}`;
@@ -337,10 +270,7 @@ export function resolveTasks(
     const reserves =
       (workspace === "shared" && isWriter(tools)) || workspace === "isolated";
 
-    let prompt = task.prompt ?? (task.resumeFrom ? RESUME_DEFAULT_PROMPT : "");
-    if (task.context === "with-parent-transcript" && parentTranscript) {
-      prompt = wrapWithParentTranscript(parentTranscript, prompt);
-    }
+    const prompt = task.prompt ?? (task.resumeFrom ? RESUME_DEFAULT_PROMPT : "");
 
     return {
       index,
@@ -352,7 +282,6 @@ export function resolveTasks(
       thinking: task.thinking ?? profile?.thinking ?? env.ctx.thinkingLevel,
       tools,
       systemPrompt: task.systemPrompt ?? profile?.systemPrompt,
-      context: task.context ?? "fresh",
       sessionId: task.sessionId,
       resumeFrom: task.resumeFrom,
       deadlineMs: task.deadlineMs,

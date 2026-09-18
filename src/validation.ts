@@ -8,7 +8,6 @@ export interface TaskInput {
   readonly agent?: string;
   readonly cwd?: string;
   readonly systemPrompt?: string;
-  readonly context?: "fresh" | "with-parent-transcript";
   readonly model?: string;
   readonly tools?: string[];
   readonly thinking?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";

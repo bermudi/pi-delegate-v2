@@ -28,7 +28,6 @@ describe("delegate validation contract", () => {
     // workspace value and sent workspace:"none". Closed enums are the contract.
     for (const arguments_ of [
       { tasks: [{ prompt: "x", workspace: "none" }] },
-      { tasks: [{ prompt: "x", context: "everything" }] },
       { tasks: [{ prompt: "x", thinking: "ultra" }] },
       { ticketAction: "explode" },
       { sessionAction: "restart" },

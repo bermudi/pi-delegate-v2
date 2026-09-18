@@ -58,6 +58,19 @@ copy its fixtures, mocks, call graph, or intermediate assertions.
 
 ## Coverage map
 
+### Parent conversation removal (#14)
+
+- **Contract:** no parent transcript extraction/injection; obsolete `context`
+  fields reject before any task starts, including `fresh`.
+- **Covered now:** public schema omission; normal fresh child dispatch with no
+  parent transcript reads or message injection; sync/async mixed-batch rejection; flat/stringified
+  requests and invalid/null values get migration guidance (`dispatch.test.ts`).
+  Existing `sessions.test.ts` proves child-owned pooled and explicit resume
+  history still continues. Model inheritance tests remain unchanged.
+- **Provenance:** user-directed v2 breaking removal, superseding the former
+  parent-sharing contract test, not a migrated v1 implementation test.
+
+
 Per subsystem: contract behaviors, regression scenarios carried forward,
 internal-only v1 tests discarded, what v2 tests already represent, and known
 gaps.
@@ -436,8 +449,8 @@ Public-boundary regression tests added for defects found in review:
 - `tests/contract/dispatch.test.ts` — the configured bound now actually
   limits (read-only tools keep writers out of serialization); the bound is
   re-read per call in both directions; a `concurrency.models` per-model
-  bound serializes below the global limit; `with-parent-transcript`
-  prepends the parent conversation.
+  bound serializes below the global limit. The former parent-transcript
+  injection test is superseded by the deliberate #14 removal below.
 - `tests/contract/workspaces.test.ts` — `GIT_DIR` redirect +
   bash-capable multi-writer batch fails closed; the Git scope probe
   scrubs inherited `GIT_*`.
