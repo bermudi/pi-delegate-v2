@@ -55,6 +55,13 @@ Omitting `agent` creates an `inline` task with `*` by default. The built-ins are
 - `coder`: shared-tree implementation.
 - `reviewer`: shared-tree review by default.
 
+If reading the parent's active tools throws and any `default`-profile task
+omits `tools`, the whole sync or async dispatch fails before any child starts.
+The failure is logged and returned with its cause and guidance to restore the
+parent inventory or supply explicit tools. Explicit `tools` (including `[]`),
+`scout`, `coder`, `reviewer`, and inline tasks do not require that probe;
+inline tasks retain their writer default.
+
 Task fields override profile defaults. Named Markdown profiles use
 first-definition-wins discovery. Project context is rebuilt for the task cwd;
 the parent's extension inventory, MCP tools, and user-global harness
