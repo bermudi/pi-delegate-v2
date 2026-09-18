@@ -296,7 +296,7 @@ export function resolveTasks(
     if (task.tools) {
       tools = expandTools(task.tools);
     } else if (task.agent === "default") {
-      tools = parentActive.length > 0 ? parentActive : expandTools(undefined);
+      tools = parentActive;
     } else if (profile?.tools) {
       tools = [...profile.tools];
     } else {

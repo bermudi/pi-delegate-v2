@@ -108,7 +108,9 @@ gaps.
   probes reject mixed sync/async batches before any child starts, preserving
   cause, guidance, and logging; explicit tools (including `[]`), built-in
   scout/coder/reviewer, and inline choices bypass the probe; successful
-  restricted-parent mirroring retains read-only tools
+  restricted-parent mirroring retains read-only tools and preserves empty or
+  unsupported-only inventories; a public extension's `setActiveTools(["delegate"])`
+  restriction independently exercises the real host path (review 5722868479)
   (`tests/regression/parent-tools.test.ts`). Host-only injection in
   `tests/support/parent-tools.ts` targets Pi 0.84.2's extension runtime callback
   while retaining the wrapper's live inventory. Calls still use the registered
