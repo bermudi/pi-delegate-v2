@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
-import type { TestSession } from "@marcfargas/pi-test-harness";
+import { createTestSession, type TestSession } from "@marcfargas/pi-test-harness";
+import { join, resolve } from "node:path";
 import { callDelegate, installSubagentModel, openDelegateBoundary, ticketIdOf } from "../support/pi-boundary.ts";
 
 import { mockParentTools } from "../support/parent-tools.ts";
@@ -100,5 +101,51 @@ describe("regression: parent tool mirroring", () => {
     expect(result.text).toContain("READ-ONLY-CHILD");
     expect(observed).toEqual(["read"]);
     expect(subagents.state.callCount).toBe(1);
+  });
+
+  // Independent review #13 (5722868479): a successful empty intersection
+  // must stay empty, whether injected or produced by actual host tool limits.
+  for (const inventory of [[], ["web_search", "delegate"]]) {
+    test(`default profile preserves empty delegatable inventory: ${JSON.stringify(inventory)}`, async () => {
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      const mocked = mockParentTools(session, () => inventory);
+      restores.push(mocked.restore);
+      let observed: string[] | undefined;
+      subagents.respond([(context) => {
+        observed = (context.tools ?? []).map((tool) => tool.name);
+        return fauxAssistantMessage("NO-TOOLS-CHILD");
+      }]);
+      const result = await callDelegate(session, { tasks: [{ prompt: "inspect", agent: "default" }] });
+      expect(result.isError).toBe(false);
+      expect(result.text).toContain("NO-TOOLS-CHILD");
+      expect(subagents.state.callCount).toBe(1);
+      expect(observed).toEqual([]);
+    });
+  }
+
+  test("default profile honors actual host restriction to delegate only", async () => {
+    session = await createTestSession({
+      extensions: [
+        resolve(import.meta.dirname, "../../delegate.ts"),
+        resolve(import.meta.dirname, "../support/restrict-parent-tools.ts"),
+      ],
+      propagateErrors: false,
+    });
+    session.session.sessionManager.getSessionDir = () => join(session!.cwd, "sessions", "--test--");
+    const subagents = await installSubagentModel(session);
+    let parent: string[] | undefined;
+    let observed: string[] | undefined;
+    subagents.respond([(context) => {
+      parent = session!.session.getActiveToolNames();
+      observed = (context.tools ?? []).map((tool) => tool.name);
+      return fauxAssistantMessage("HOST-LIMITED-CHILD");
+    }]);
+    const result = await callDelegate(session, { tasks: [{ prompt: "inspect", agent: "default" }] });
+    expect(result.isError).toBe(false);
+    expect(result.text).toContain("HOST-LIMITED-CHILD");
+    expect(subagents.state.callCount).toBe(1);
+    expect(parent).toEqual(["delegate"]);
+    expect(observed).toEqual([]);
   });
 });
