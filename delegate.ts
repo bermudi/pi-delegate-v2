@@ -20,7 +20,8 @@ import { hostEnvironment, resolveTasks } from "./src/host.ts";
 import { prepareIsolated, type IsolatedPlan } from "./src/isolated.ts";
 import { prepareScratch, type ScratchPlan } from "./src/scratch.ts";
 import { handleSessionRpc, SessionPool } from "./src/sessions.ts";
-import { handleTicketRpc, TicketStore } from "./src/tickets.ts";
+import { handleTicketRpc, TicketStore, ticketView } from "./src/tickets.ts";
+import { Deferred } from "./src/types.ts";
 import { validateCall } from "./src/validation.ts";
 
 function stringEnum<const Values extends readonly string[]>(
@@ -333,9 +334,57 @@ export default function delegateExtension(api: ExtensionAPI): void {
   // Owned by this closure: one fallback warning per extension instance, not
   // per call (see resolveAgentDir for why the fallback exists at all).
   let warnedAgentDirFallback = false;
+  // Shutdown latch: once the host begins teardown, new dispatches reject and
+  // pending results are never delivered.
+  let shuttingDown = false;
+  // Bumped on every observed tree transition — including a vetoed or
+  // cancelled navigation attempt, which conservatively downgrades delivery.
+  let navigationEpoch = 0;
+  // One "all workers confirmed quiesced" barrier per live dispatch; shutdown
+  // holds until every one resolves (INVARIANTS "Ticket state").
+  const liveQuiescence = new Set<Promise<void>>();
 
-  api.on("session_shutdown", () => {
+  const trackQuiescence = (): Deferred => {
+    const barrier = new Deferred();
+    liveQuiescence.add(barrier.promise);
+    void barrier.promise.then(() => {
+      liveQuiescence.delete(barrier.promise);
+    });
+    return barrier;
+  };
+
+  api.on("session_before_tree", () => {
+    navigationEpoch += 1;
+  });
+  api.on("session_tree", () => {
+    navigationEpoch += 1;
+  });
+
+  api.on("session_shutdown", async (_event, ctx) => {
+    shuttingDown = true;
+    // Forced cancellation settles every ticket immediately and resolves its
+    // waiters; delivery is suppressed by the latch above. Checked-out pooled
+    // sessions must get their abort requests before the quiescence wait —
+    // their runs own disposal through settle, and the barrier below is what
+    // confirms they actually stopped (a worker that ignores the abort holds
+    // shutdown for as long as it runs, per COMPATIBILITY.md).
+    for (const ticket of tickets.list()) tickets.cancel(ticket, true);
     sessions.shutdown();
+    const pending = [...liveQuiescence];
+    if (pending.length > 0) {
+      try {
+        ctx.ui.notify(
+          `Delegate: waiting for ${pending.length} dispatch(es) to stop before shutdown…`,
+          "info",
+        );
+      } catch {
+        // The UI may already be gone; the log line below still reports it.
+      }
+      console.error(
+        `[delegate] shutdown waiting for ${pending.length} dispatch(es) to reach quiescence`,
+      );
+      await Promise.all(pending);
+    }
   });
 
   api.registerTool(
@@ -376,6 +425,13 @@ export default function delegateExtension(api: ExtensionAPI): void {
           };
         }
 
+        if (shuttingDown) {
+          throw new Error(
+            "Delegate is shutting down with this session; new dispatches are not accepted. " +
+              "Existing tickets remain pollable for the rest of the session's lifetime.",
+          );
+        }
+
         const agentDirResolution = resolveAgentDir(ctx);
         if (agentDirResolution.source === "cwd" && !warnedAgentDirFallback) {
           warnedAgentDirFallback = true;
@@ -390,6 +446,13 @@ export default function delegateExtension(api: ExtensionAPI): void {
 
         if (call.async) {
           const ticket = tickets.create(tasks);
+          // The session-tree position at dispatch: delivery may wake the
+          // parent only while it is still on this branch with no tree
+          // transition or shutdown observed since.
+          const origin = {
+            leafId: ctx.sessionManager.getLeafId(),
+            epoch: navigationEpoch,
+          };
           let grant: AdmissionGrant | undefined;
           let scratchPlan: ScratchPlan | undefined;
           try {
@@ -405,6 +468,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
               scratchPlan?.tasks ?? tasks,
               join(env.agentDir, "delegate-isolated"),
             );
+            const quiescence = trackQuiescence();
             void coordinator
               .run(plan?.tasks ?? scratchPlan?.tasks ?? tasks, {
                 env,
@@ -412,6 +476,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
                 grant,
                 sessions,
                 ticket,
+                quiescence,
                 finalize:
                   plan || scratchPlan
                     ? async (outcomes) => {
@@ -443,6 +508,84 @@ export default function delegateExtension(api: ExtensionAPI): void {
                 tickets.settle(ticket, "failed");
                 console.error(
                   `[delegate] background ticket ${ticket.id} crashed: ${error instanceof Error ? error.message : String(error)}`,
+                );
+              });
+            // Auto-delivery, armed once the batch is running. It waits for
+            // caller settlement AND the finished gate, so the delivered view
+            // always carries the safe-to-expose outcome: finalized isolated
+            // integrations, retained errors, and (on cancellation) partial
+            // results rather than a bare status.
+            const deliver = async (): Promise<void> => {
+              if (shuttingDown) return;
+              const cancelled = ticket.status === "cancelled";
+              const message = {
+                customType: "delegate-result",
+                content:
+                  ticketView(ticket) +
+                  (cancelled
+                    ? "\nCancellation is cooperative; worker cleanup may still be pending."
+                    : ""),
+                display: true,
+                details: { ticket: ticket.id, originLeafId: origin.leafId },
+              };
+              try {
+                // "Same leaf" means same branch: the parent's own turn
+                // appends entries after dispatch, so the current leaf is a
+                // descendant of the origin leaf — the origin must still lie
+                // on the current branch (a null origin is the root, which
+                // every branch descends from). The epoch separately rules
+                // out any observed transition, cancelled or not.
+                const sameLeaf =
+                  navigationEpoch === origin.epoch &&
+                  (origin.leafId === null ||
+                    ctx.sessionManager
+                      .getBranch()
+                      .some((entry) => entry.id === origin.leafId));
+                if (sameLeaf) {
+                  // Same leaf, no transition observed: a follow-up wakes an
+                  // idle parent and queues behind a busy one's tool calls.
+                  await api.sendMessage(message, {
+                    deliverAs: "followUp",
+                    triggerTurn: true,
+                  });
+                } else {
+                  // Leaf moved or a transition is in flight: append durably
+                  // at the current leaf without triggering a turn — it
+                  // enters model context on the next user turn.
+                  await api.sendMessage(message, { triggerTurn: false });
+                  try {
+                    ctx.ui.notify(
+                      `Delegate ticket "${ticket.id}" settled on a different branch; its result was appended to the current branch for the next turn.`,
+                      "info",
+                    );
+                  } catch {
+                    // The UI may already be gone; the append itself landed.
+                  }
+                }
+              } catch (error) {
+                // Delivery failure never undoes settlement: the ticket stays
+                // terminal and pollable.
+                console.error(
+                  `[delegate] delivering ticket ${ticket.id} failed (result remains pollable): ${error instanceof Error ? error.message : String(error)}`,
+                );
+                try {
+                  ctx.ui.notify(
+                    `Delegate ticket "${ticket.id}" settled but its result could not be delivered; poll it for the result.`,
+                    "error",
+                  );
+                } catch {
+                  // A stale ctx cannot show the notice; the log line stands.
+                }
+              }
+            };
+            void Promise.all([
+              ticket.settledGate.promise,
+              ticket.finishedGate.promise,
+            ])
+              .then(deliver)
+              .catch((error: unknown) => {
+                console.error(
+                  `[delegate] delivering ticket ${ticket.id} crashed (result remains pollable): ${error instanceof Error ? error.message : String(error)}`,
                 );
               });
           } catch (error) {
@@ -509,6 +652,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
             grant,
             sessions,
             signal,
+            quiescence: trackQuiescence(),
             finalize:
               plan || scratchPlan
                 ? async (outcomes) => {
