@@ -161,10 +161,19 @@ gaps.
 - **Covered now:** empty roster; unknown-ticket handling for all actions;
   wait-to-settlement; timeout detach; cancel preview vs force;
   cancelled-ticket retains completed results; pause/resume.
-- **Gap:** leaf-aware delivery after session-tree navigation (needs
-  harness-level session-tree control); delivered-result suppression when a
-  waiter already consumed it; progress/onUpdate frames; roster wording
-  details.
+- **Gap (next slice, contract approved — see `SPEC.md` "Background
+  delivery"):** same-leaf follow-up wake of an idle parent; durable
+  no-wake append plus notice after `/tree` navigation; delivery held until
+  isolated reconciliation/final annotations; delivery failure leaves the
+  ticket pollable and is logged; `session_shutdown` force-cancels tickets,
+  performs no delivery, and holds until worker quiescence; no ticket or
+  reservation survives into the replacement extension instance. Evidence:
+  `f1957cc` `tests/contract/delivery.test.ts` (portable, public-boundary)
+  and the `issue-3-async-delivery` regression suites, which must be
+  re-classified — those pinning `lifecycleSignal`/`hostState`/
+  `navigationState` are internal to a rejected host patch and are discarded.
+- **Gap:** delivered-result suppression when a waiter already consumed it;
+  progress/onUpdate frames; roster wording details.
 
 ### Cancellation
 
@@ -697,8 +706,10 @@ all-or-nothing application; cancellation safety and quarantine.
 
 Remaining:
 
-1. Leaf-aware delivery after session-tree navigation (needs harness-level
-   session-tree control).
+1. Background delivery on the stock Pi extension API (issue #3; contract in
+   `SPEC.md` "Background delivery"). Tests must run against the unpatched
+   pinned `@earendil-works/pi-coding-agent`; no Pi patch may be added to
+   `patches/`.
 2. Usage and telemetry privacy.
 3. The per-subsystem **Gap** entries above.
 

@@ -43,7 +43,11 @@ release notes and migration guidance; it must not arrive as rewrite drift.
 - Frozen session configuration, same-ID serialization, insert-on-success,
   explicit close, and parent-shutdown cleanup.
 - Async fire-and-forget tickets, poll/wait/cancel/pause/resume behavior,
-  idempotent settlement, retained results, and session-tree leaf-aware delivery.
+  idempotent settlement, retained results, and session-tree leaf-aware delivery
+  as specified in `SPEC.md` "Background delivery".
+- Operation on a stock, unmodified Pi installation through its public
+  extension API. Requiring a patched, forked, or unreleased Pi host is a
+  breaking change, not an implementation detail.
 - Pause as a cooperative boundary between tasks/model turns—not OS process
   suspension—and continued counting of explicit deadlines.
 
@@ -112,6 +116,29 @@ guidance toward the config; a configured reference that does not resolve in
   `"models"` — e.g. `{"scout": "<provider/model-id>"}` with references
   taken from your actual configured models; callers stop sending `model`. The
   model-failure recovery hint now addresses the operator, not the caller.
+
+## Known host limitations (accepted 2026-09-19, issue #3)
+
+These follow from Pi's public extension API and are documented rather than
+worked around with a host modification.
+
+- **Ordered lifecycle handlers.** Pi awaits `session_shutdown` and
+  `session_before_tree` handlers one extension at a time. If an extension
+  loaded before Delegate awaits in its handler, a ticket settling in that
+  window is delivered before Delegate learns of the transition and may trigger
+  one turn on the outgoing session; Pi aborts it at teardown. Cost: one wasted
+  model call and an aborted turn in the old transcript. Workspace safety is
+  unaffected because shutdown still waits for worker quiescence.
+- **Blocking shutdown.** Quit and session replacement wait for cancelled
+  workers to actually stop. Cancellation is cooperative, so a worker whose
+  provider or tool ignores the abort delays shutdown for as long as it runs.
+  A visible status names the tickets being waited on.
+- **Host-lifetime tickets.** Tickets and undelivered results do not survive
+  `/reload` or session replacement. Durable recovery is a separate roadmap
+  item, not part of this contract.
+- **Current-leaf append.** A result that cannot wake its origin leaf is
+  appended at whatever leaf is current when it settles, and enters model
+  context there on the next turn.
 
 ## v2 intentionally may change
 

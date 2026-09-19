@@ -128,9 +128,42 @@ delegate({ ticketAction: "cancel", ticket, force? })
 - `cancel` previews unless `force: true`; forced cancellation is cooperative
   and does not undo completed writes or commands.
 
-Tickets remain pollable after settlement. A same-leaf async result may wake the
-parent; after session-tree navigation it is delivered for the next turn and
-announced without waking the wrong branch.
+Tickets remain pollable after settlement.
+
+### Background delivery
+
+Delivery runs on Pi's public extension API only: no Pi source patch, patched
+install, or unreleased host field is required, and loading the extension in a
+stock Pi allows dispatch.
+
+An async result is delivered once, after the ticket has settled *and* its
+outcome is safe to expose (isolated reconciliation applied or retained, final
+annotations recorded). Cancellation settles the ticket at once; its delivery
+still waits for the safe outcome.
+
+- **Same leaf, no transition:** if the parent is still on the session-tree
+  leaf where the ticket was dispatched and no shutdown or tree transition has
+  been observed, the result is sent as a follow-up that wakes an idle parent
+  and queues behind a busy one's remaining tool calls.
+- **Otherwise** (leaf moved, tree transition in progress, shutdown observed):
+  the result is appended to the session as a custom message at the current
+  leaf without triggering a turn, and a notice announces it. It enters model
+  context on the next user turn. Nothing wakes the wrong branch.
+- **Delivery failure** is logged with the ticket id and surfaced as a notice;
+  the ticket stays settled and pollable.
+
+Session shutdown — quit, `/reload`, `/new`, `/resume`, `/fork` — rejects new
+dispatches, force-cancels every running ticket with no follow-up delivery,
+and then holds the shutdown until every worker's quiescence is confirmed,
+showing a visible waiting status. Replacement sessions never inherit tickets
+or workspace reservations; there is nothing left to inherit. Tickets are
+host-lifetime only and are not persisted across shutdown.
+
+Because Pi runs extension lifecycle handlers in order, a preceding
+extension's slow handler can delay Delegate's shutdown or tree hooks. A
+ticket settling inside that window may wake the outgoing session once; Pi
+aborts that turn during teardown. This is an accepted, documented limitation
+(see `COMPATIBILITY.md`), never a workspace-safety gap.
 
 ### Session RPC
 

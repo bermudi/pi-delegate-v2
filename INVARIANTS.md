@@ -64,8 +64,16 @@ use any design that makes these properties true and testable.
   ticket into a successful completion.
 - Shutdown cancellation settles immediately, resolves waiters, and performs no
   follow-up delivery.
+- Session shutdown or replacement MUST NOT complete while any worker's
+  quiescence is unconfirmed. Workspace reservations are released only by
+  confirmed quiescence, never by a session boundary, and are never handed to
+  a replacement extension instance.
 - A terminal cancellation response MUST NOT falsely imply that unsafe worker
   cleanup has completed. Later safe-to-expose results must remain visible.
+- A result MUST NOT be delivered before it is safe to expose: settled, and
+  with isolated reconciliation and final annotations recorded.
+- A delivered result MUST NOT trigger a turn on a session-tree leaf other
+  than the one it was dispatched from.
 - Delivery failure MUST NOT undo settlement or make results unpollable.
 - Wait timeout or caller abort MUST detach only that waiter.
 - Pause is orthogonal to lifecycle: a paused ticket remains running and retains
