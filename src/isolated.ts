@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { canonicalPath } from "./host.ts";
 import type {
   ResolvedTask,
   TaskIntegration,
@@ -406,6 +407,7 @@ export interface IsolatedPlan {
    * A no-op for workers already cleaned up or never marked retained.
    */
   cleanupWorker(taskIndex: number): Promise<void>;
+  dispose(): Promise<void>;
 }
 
 function withIntegration(
@@ -977,6 +979,35 @@ export async function prepareIsolated(
   const workers = new Map<number, IsolatedWorker>();
   const translated = [...tasks];
 
+  let preparationUndone = false;
+  const undoPreparation = async (): Promise<void> => {
+    if (preparationUndone) return;
+    preparationUndone = true;
+    let worktreeCleanupFailed = false;
+    for (const worker of workers.values()) {
+      if (!(await removeWorktree(worker.group.sourceRoot, worker.workerRoot))) {
+        worktreeCleanupFailed = true;
+      }
+    }
+    for (const group of groupsByRoot.values()) {
+      try {
+        await git(["update-ref", "-d", group.baselineRef], {
+          cwd: group.sourceRoot,
+        });
+      } catch (cleanupError) {
+        log("failed to clean isolated baseline ref after preparation error", cleanupError);
+      }
+      group.finishReconcile();
+    }
+    if (!worktreeCleanupFailed) {
+      await fs.promises
+        .rm(batchRoot, { recursive: true, force: true })
+        .catch((cleanupError: unknown) =>
+          log("failed to remove isolated artifacts after preparation error", cleanupError),
+        );
+    }
+  };
+
   try {
     for (const taskIndex of isolatedIndexes) {
       const task = tasks[taskIndex]!;
@@ -997,8 +1028,13 @@ export async function prepareIsolated(
         // into a proposal. The batch root is excluded separately for the
         // pathological case where the artifact base IS the source root.
         const excluded: string[] = [];
-        for (const base of [artifactBase, batchRoot]) {
-          const relative = path.relative(sourceRoot, base);
+        for (const base of [
+          artifactBase,
+          batchRoot,
+          path.join(path.dirname(artifactBase), "delegate-scratch"),
+          path.join(path.dirname(artifactBase), "delegate-sessions"),
+        ]) {
+          const relative = path.relative(sourceRoot, canonicalPath(base));
           if (
             relative !== "" &&
             relative !== ".." &&
@@ -1069,29 +1105,7 @@ export async function prepareIsolated(
       translated[taskIndex] = { ...task, cwd: workerCwd };
     }
   } catch (error) {
-    let worktreeCleanupFailed = false;
-    for (const worker of workers.values()) {
-      if (!(await removeWorktree(worker.group.sourceRoot, worker.workerRoot))) {
-        worktreeCleanupFailed = true;
-      }
-    }
-    for (const group of groupsByRoot.values()) {
-      try {
-        await git(["update-ref", "-d", group.baselineRef], {
-          cwd: group.sourceRoot,
-        });
-      } catch (cleanupError) {
-        log("failed to clean isolated baseline ref after preparation error", cleanupError);
-      }
-      group.finishReconcile();
-    }
-    if (!worktreeCleanupFailed) {
-      await fs.promises
-        .rm(batchRoot, { recursive: true, force: true })
-        .catch((cleanupError: unknown) =>
-          log("failed to remove isolated artifacts after preparation error", cleanupError),
-        );
-    }
+    await undoPreparation();
     throw error;
   }
 
@@ -1145,5 +1159,6 @@ export async function prepareIsolated(
           .catch(() => undefined);
       }
     },
+    dispose: undoPreparation,
   };
 }

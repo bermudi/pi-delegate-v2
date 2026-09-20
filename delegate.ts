@@ -1,4 +1,3 @@
-import { join } from "node:path";
 import {
   Type,
   type Static,
@@ -28,8 +27,6 @@ import {
   resolveTasks,
   type HostEnvironment,
 } from "./src/host.ts";
-import { prepareIsolated } from "./src/isolated.ts";
-import { prepareScratch, type ScratchPlan } from "./src/scratch.ts";
 import { handleSessionRpc, SessionPool } from "./src/sessions.ts";
 import { handleTicketRpc, TicketStore, ticketView } from "./src/tickets.ts";
 import {
@@ -38,6 +35,11 @@ import {
   type Ticket,
 } from "./src/types.ts";
 import { validateCall } from "./src/validation.ts";
+import {
+  prepareWorkspaces,
+  workspaceNeedsSettlementHold,
+  type WorkspacePlan,
+} from "./src/workspaces.ts";
 
 function stringEnum<const Values extends readonly string[]>(
   values: Values,
@@ -401,66 +403,43 @@ export default function delegateExtension(api: ExtensionAPI): void {
     const grant = admission.admit(tasks, owner);
     const notices = serializedNotices(tasks, grant.serialized);
     if (ticket) ticket.notices = [...notices];
-    options.onNotices?.(notices);
-    let scratchPlan: ScratchPlan | undefined;
+    let plan: WorkspacePlan | undefined;
     try {
-      // Scratch before isolated: file copies are cheaper than Git
-      // setup, and a later preparation failure can dispose() them.
-      scratchPlan = await prepareScratch(
-        tasks,
-        join(env.agentDir, "delegate-scratch"),
+      options.onNotices?.(notices);
+      plan = await prepareWorkspaces(tasks, env.agentDir, signal);
+      const prepared = plan;
+      const run = coordinator.run(prepared.tasks, {
+        env,
+        config,
+        grant,
+        sessions,
         signal,
-      );
-      const plan = await prepareIsolated(
-        scratchPlan?.tasks ?? tasks,
-        join(env.agentDir, "delegate-isolated"),
-        signal,
-      );
+        ticket,
+        quiescence,
+        finalize: (outcomes) =>
+          prepared.finalize(outcomes, {
+            shouldApplySource: () => !dispatchSignal?.aborted,
+            retainedReason: ticket
+              ? "The ticket was cancelled before source application."
+              : "The call was aborted before source application.",
+            signal: dispatchSignal,
+          }),
+        onWorkerQuiesced: (taskIndex) => prepared.cleanupWorker(taskIndex),
+      });
       return {
         notices,
-        completion: coordinator.run(
-          plan?.tasks ?? scratchPlan?.tasks ?? tasks,
-          {
-            env,
-            config,
-            grant,
-            sessions,
-            signal,
-            ticket,
-            quiescence,
-            finalize:
-              plan || scratchPlan
-                ? async (outcomes) => {
-                    if (plan) {
-                      await plan.reconcile(outcomes, {
-                        shouldApplySource: () => !dispatchSignal?.aborted,
-                        retainedReason: ticket
-                          ? "The ticket was cancelled before source application."
-                          : "The call was aborted before source application.",
-                        signal: dispatchSignal,
-                      });
-                    }
-                    if (scratchPlan) await scratchPlan.finalize(outcomes);
-                    return outcomes;
-                  }
-                : undefined,
-            onWorkerQuiesced:
-              plan || scratchPlan
-                ? async (taskIndex) => {
-                    await Promise.all([
-                      plan?.cleanupWorker(taskIndex),
-                      scratchPlan?.cleanupWorker(taskIndex),
-                    ]);
-                  }
-                : undefined,
-          },
-        ),
+        completion: run.finally(() => {
+          if (ticket) tickets.releaseSettlement(ticket);
+        }),
       };
     } catch (error) {
       // Preparation failed before coordinator.run took over the
       // barrier; the outer catch resolves it after this cleanup.
-      await scratchPlan?.dispose();
-      grant.release();
+      try {
+        await plan?.dispose();
+      } finally {
+        grant.release();
+      }
       throw error;
     }
   };
@@ -576,7 +555,9 @@ export default function delegateExtension(api: ExtensionAPI): void {
           sessions.validateReuse(tasks);
 
           if (call.async) {
-            const ticket = tickets.create(tasks);
+            const ticket = tickets.create(tasks, {
+              holdSettlement: workspaceNeedsSettlementHold(tasks),
+            });
             // The barrier now has its durable name for the shutdown status.
             relabel(`ticket "${ticket.id}"`);
             // The session-tree position at dispatch: delivery may wake the

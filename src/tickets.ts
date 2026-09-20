@@ -76,7 +76,10 @@ export class TicketStore {
     return `t-${this.seq.toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   }
 
-  create(tasks: readonly ResolvedTask[]): Ticket {
+  create(
+    tasks: readonly ResolvedTask[],
+    options: { readonly holdSettlement: boolean },
+  ): Ticket {
     const ticket: Ticket = {
       id: this.newTicketId(),
       status: "running",
@@ -89,7 +92,7 @@ export class TicketStore {
       cancellation: new AbortController(),
       // Isolated batches settle only after reconciliation has annotated the
       // outcomes — a terminal ticket must already show applied/conflict state.
-      holdSettlement: tasks.some((task) => task.workspace === "isolated"),
+      holdSettlement: options.holdSettlement,
       notices: [],
       settledGate: new Deferred(),
       finishedGate: new Deferred(),

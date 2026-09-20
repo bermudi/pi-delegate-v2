@@ -5,6 +5,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -734,6 +735,70 @@ describe("delegate workspace and shared-write contract", () => {
       expect(readFileSync(target, "utf8")).toBe("human-change");
       expect(result.text).toMatch(/conflict|retained|recover/i);
       expect(readFileSync(join(dir, "ok.txt"), "utf8")).toBe("ok");
+    },
+  );
+
+  test(
+    "isolated baselines never contain delegate-owned workspace trees",
+    async () => {
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      gitInit(session.cwd);
+      const agentDir = join(tempDir(), "agent-link");
+      symlinkSync(session.cwd, agentDir, "dir");
+      mkdirSync(join(agentDir, "delegate-sessions"), { recursive: true });
+      writeFileSync(
+        join(agentDir, "delegate-sessions", "private.txt"),
+        "private",
+      );
+      const scratchSource = tempDir();
+
+      const forPrompt: FauxResponseFactory = async (context) => {
+        if (context.messages.some((m) => m.role === "toolResult")) {
+          return fauxAssistantMessage("DONE");
+        }
+        if (
+          JSON.stringify(context.messages).includes("probe owned roots")
+        ) {
+          return fauxAssistantMessage([
+            fauxToolCall("bash", {
+              command:
+                "if [ ! -e delegate-scratch ] && [ ! -e delegate-sessions ]; then printf absent > owned-check.txt; else printf present > owned-check.txt; fi",
+            }),
+          ]);
+        }
+        return fauxAssistantMessage("SCRATCH-DONE");
+      };
+      subagents.respond([forPrompt, forPrompt, forPrompt, forPrompt]);
+
+      const previous = process.env.DELEGATE_AGENT_DIR;
+      process.env.DELEGATE_AGENT_DIR = agentDir;
+      let result: Awaited<ReturnType<typeof callDelegate>> | undefined;
+      try {
+        result = await callDelegate(session, {
+          tasks: [
+            {
+              prompt: "scratch work",
+              cwd: scratchSource,
+              tools: ["write"],
+              workspace: "scratch",
+            },
+            {
+              prompt: "probe owned roots",
+              cwd: session.cwd,
+              tools: ["bash"],
+              workspace: "isolated",
+            },
+          ],
+        });
+      } finally {
+        if (previous === undefined) delete process.env.DELEGATE_AGENT_DIR;
+        else process.env.DELEGATE_AGENT_DIR = previous;
+      }
+      expect(result?.isError).toBe(false);
+      expect(
+        readFileSync(join(session.cwd, "owned-check.txt"), "utf8"),
+      ).toBe("absent");
     },
   );
 });

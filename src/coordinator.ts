@@ -199,7 +199,6 @@ export class DispatchCoordinator {
             for (const outcome of outcomes) {
               if (outcome) this.tickets.recordOutcome(ticket, outcome);
             }
-            this.tickets.releaseSettlement(ticket);
           }
         }
       }
