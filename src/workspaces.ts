@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { DELEGATE_TREES } from "./fsx.ts";
 import {
   prepareIsolated,
   type IsolatedPlan,
@@ -33,14 +34,14 @@ export async function prepareWorkspaces(
   // setup, and a later preparation failure can dispose() them.
   const scratchPlan = await prepareScratch(
     tasks,
-    join(agentDir, "delegate-scratch"),
+    join(agentDir, DELEGATE_TREES.scratch),
     signal,
   );
   let isolatedPlan: IsolatedPlan | undefined;
   try {
     isolatedPlan = await prepareIsolated(
       scratchPlan?.tasks ?? tasks,
-      join(agentDir, "delegate-isolated"),
+      join(agentDir, DELEGATE_TREES.isolated),
       signal,
       excludedPaths,
     );

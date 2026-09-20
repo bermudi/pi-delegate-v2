@@ -1,14 +1,20 @@
-import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { canonicalPath } from "./host.ts";
-import { stopWorkspaceProcesses } from "./isolated.ts";
+import {
+  canonicalPath,
+  exec,
+  gitProbeEnv,
+  isWithin,
+  stopWorkspaceProcesses,
+} from "./fsx.ts";
 import type { ResolvedTask, TaskOutcome } from "./types.ts";
 
-const PROBE_TIMEOUT_MS = 5_000;
+// Probes fail fast and produce tiny output; the shared exec takes explicit
+// limits so the per-use divergence from the copy path stays visible.
+const PROBE_EXEC = { timeoutMs: 5_000, maxBuffer: 4 * 1024 * 1024 } as const;
 // A full (non-reflink) copy of a big tree legitimately takes a while.
-const COPY_TIMEOUT_MS = 5 * 60 * 1000;
+const COPY_EXEC = { timeoutMs: 5 * 60 * 1000, maxBuffer: 4 * 1024 * 1024 } as const;
 
 const FALLBACK_REMEDY =
   `Resubmit with workspace: "shared" to run in the source tree, ` +
@@ -18,66 +24,6 @@ function log(context: string, error: unknown): void {
   console.error(
     `[delegate] ${context}: ${error instanceof Error ? error.message : String(error)}`,
   );
-}
-
-function isWithin(root: string, candidate: string): boolean {
-  const relative = path.relative(root, candidate);
-  return (
-    relative === "" ||
-    (relative !== ".." &&
-      !relative.startsWith(`..${path.sep}`) &&
-      !path.isAbsolute(relative))
-  );
-}
-
-function exec(
-  file: string,
-  args: string[],
-  options: {
-    cwd?: string;
-    env?: NodeJS.ProcessEnv;
-    signal?: AbortSignal;
-    timeout?: number;
-  } = {},
-): Promise<{ stdout: string; stderr: string }> {
-  return new Promise((resolve, reject) => {
-    execFile(
-      file,
-      args,
-      {
-        cwd: options.cwd,
-        env: options.env,
-        signal: options.signal,
-        timeout: options.timeout ?? PROBE_TIMEOUT_MS,
-        maxBuffer: 4 * 1024 * 1024,
-        encoding: "utf8",
-      },
-      (error, stdout, stderr) => {
-        if (error) {
-          reject(
-            new Error(
-              `${file} ${args.join(" ")} failed${String(stderr).trim() ? `: ${String(stderr).trim()}` : ""}`,
-            ),
-          );
-          return;
-        }
-        resolve({ stdout: String(stdout), stderr: String(stderr) });
-      },
-    );
-  });
-}
-
-/** Probe environment: inherited GIT_* redirects must not name the wrong root. */
-function probeEnv(): NodeJS.ProcessEnv {
-  return {
-    ...Object.fromEntries(
-      Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_")),
-    ),
-    LC_ALL: "C",
-    LANG: "C",
-    GIT_OPTIONAL_LOCKS: "0",
-    GIT_DISCOVERY_ACROSS_FILESYSTEM: "1",
-  };
 }
 
 /**
@@ -101,7 +47,8 @@ async function copySourceOf(
   try {
     const top = (
       await exec("git", ["-C", physicalCwd, "rev-parse", "--show-toplevel"], {
-        env: probeEnv(),
+        ...PROBE_EXEC,
+        env: gitProbeEnv(),
         signal,
       })
     ).stdout.trim();
@@ -139,8 +86,8 @@ async function copyTree(
 ): Promise<void> {
   try {
     await exec("cp", ["-a", "--reflink=auto", source, destination], {
+      ...COPY_EXEC,
       signal,
-      timeout: COPY_TIMEOUT_MS,
     });
     return;
   } catch (error) {
@@ -174,7 +121,10 @@ async function sweepStaleCopies(scratchBase: string): Promise<void> {
   let entries: fs.Dirent[];
   try {
     entries = await fs.promises.readdir(scratchBase, { withFileTypes: true });
-  } catch {
+  } catch (error) {
+    // Nothing to sweep is normal; an unreadable base is worth a line, but
+    // litter cleanup must never fail a dispatch.
+    log(`failed to list scratch copies in '${scratchBase}'`, error);
     return;
   }
   for (const entry of entries) {

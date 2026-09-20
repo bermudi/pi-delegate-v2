@@ -1,16 +1,26 @@
-import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { canonicalPath } from "./host.ts";
+import {
+  canonicalPath,
+  DELEGATE_TREES,
+  exec,
+  type ExecOptions,
+  type ExecResult,
+  gitEnv,
+  isWithin,
+  stopWorkspaceProcesses,
+} from "./fsx.ts";
 import type {
   ResolvedTask,
   TaskIntegration,
   TaskOutcome,
 } from "./types.ts";
 
-const GIT_TIMEOUT_MS = 5 * 60 * 1000;
-const PROCESS_GRACE_MS = 500;
+// Snapshot traffic is real tree data; Git over big trees legitimately runs
+// long and emits large output. Deliberately larger than the scratch/probe
+// exec limits — the divergence is per use case, stated here at the call site.
+const GIT_EXEC = { timeoutMs: 5 * 60 * 1000, maxBuffer: 32 * 1024 * 1024 } as const;
 
 class GitCommandError extends Error {
   constructor(
@@ -21,84 +31,16 @@ class GitCommandError extends Error {
   }
 }
 
-/**
- * Git always runs with inherited `GIT_*` redirects scrubbed — the isolated
- * machinery drives Git itself, and a polluted environment must not redirect
- * its repository access. Explicit per-command overrides (the temporary
- * index/worktree used for index-only operations) are applied after the scrub.
- */
-function gitEnv(extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
-  const env = Object.fromEntries(
-    Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_")),
-  );
-  return { ...env, ...extra };
-}
-
-function run(
-  file: string,
-  args: string[],
-  options: {
-    cwd?: string;
-    env?: NodeJS.ProcessEnv;
-    signal?: AbortSignal;
-    input?: string;
-    buffer?: boolean;
-  } = {},
-): Promise<{ stdout: string; stderr: string; stdoutBuffer: Buffer }> {
-  return new Promise((resolve, reject) => {
-    const child = execFile(
-      file,
-      args,
-      {
-        cwd: options.cwd,
-        env: options.env,
-        signal: options.signal,
-        timeout: GIT_TIMEOUT_MS,
-        maxBuffer: 32 * 1024 * 1024,
-        encoding: options.buffer ? "buffer" : "utf8",
-      },
-      (error, stdout, stderr) => {
-        const out = options.buffer
-          ? (stdout as Buffer)
-          : Buffer.from((stdout as string) ?? "");
-        if (error) {
-          reject(
-            new GitCommandError(
-              `${file} ${args.join(" ")} failed${String(stderr).trim() ? `: ${String(stderr).trim()}` : ""}`,
-              String(stderr),
-            ),
-          );
-          return;
-        }
-        resolve({
-          stdout: out.toString("utf8"),
-          stderr: String(stderr),
-          stdoutBuffer: out,
-        });
-      },
-    );
-    if (options.input !== undefined) child.stdin?.end(options.input);
-  });
-}
-
 function git(
   args: string[],
-  options: Parameters<typeof run>[2] = {},
-): ReturnType<typeof run> {
-  return run("git", args, {
+  options: Omit<ExecOptions, "timeoutMs" | "maxBuffer" | "errorClass"> = {},
+): Promise<ExecResult> {
+  return exec("git", args, {
+    ...GIT_EXEC,
     ...options,
     env: gitEnv(options.env),
+    errorClass: GitCommandError,
   });
-}
-
-function isWithin(root: string, candidate: string): boolean {
-  const relative = path.relative(root, candidate);
-  return (
-    relative === "" ||
-    (relative !== ".." &&
-      !relative.startsWith(`..${path.sep}`) &&
-      !path.isAbsolute(relative))
-  );
 }
 
 function log(context: string, error: unknown): void {
@@ -289,57 +231,6 @@ async function writePatch(
   await fs.promises.writeFile(destination, await diffPatch(root, from, to), {
     mode: 0o600,
   });
-}
-
-/**
- * Processes still rooted in a workspace — leftover bash children can keep
- * mutating files after the model run ends, so output must not be accepted
- * while any survive. Linux-only evidence; elsewhere there is nothing to kill.
- */
-async function processesIn(root: string): Promise<number[]> {
-  if (process.platform !== "linux" || !fs.existsSync("/proc")) return [];
-  const pids: number[] = [];
-  for (const entry of await fs.promises.readdir("/proc")) {
-    if (!/^\d+$/.test(entry)) continue;
-    const pid = Number(entry);
-    if (pid === process.pid) continue;
-    try {
-      const cwd = await fs.promises.realpath(path.join("/proc", entry, "cwd"));
-      if (isWithin(root, cwd)) pids.push(pid);
-    } catch {
-      // Processes exit or become unreadable while /proc is scanned.
-    }
-  }
-  return pids;
-}
-
-export async function stopWorkspaceProcesses(root: string): Promise<void> {
-  let pids = await processesIn(root);
-  if (!pids.length) return;
-  log(`terminating ${pids.length} process(es) left in delegated workspace '${root}'`, "");
-  for (const pid of pids) {
-    try {
-      process.kill(pid, "SIGTERM");
-    } catch {
-      // Already gone.
-    }
-  }
-  await new Promise((resolve) => setTimeout(resolve, PROCESS_GRACE_MS));
-  pids = await processesIn(root);
-  for (const pid of pids) {
-    try {
-      process.kill(pid, "SIGKILL");
-    } catch {
-      // Already gone.
-    }
-  }
-  await new Promise((resolve) => setTimeout(resolve, 50));
-  const survivors = await processesIn(root);
-  if (survivors.length) {
-    throw new Error(
-      `Could not quiesce isolated workspace; process(es) ${survivors.join(", ")} remain.`,
-    );
-  }
 }
 
 interface IsolatedGroup {
@@ -1088,23 +979,21 @@ export async function prepareIsolated(
         // The artifact root can live inside the source tree (e.g. an
         // agentDir under the repo): never snapshot retained artifacts or
         // live worktrees into a baseline, or a worker could "delete" them
-        // into a proposal. The batch root is excluded separately for the
-        // pathological case where the artifact base IS the source root.
+        // into a proposal. Sibling delegate trees are excluded by name via
+        // DELEGATE_TREES so a future workspace mode cannot reintroduce the
+        // leak. The batch root is excluded separately for the pathological
+        // case where the artifact base IS the source root.
         const excluded: string[] = [];
         for (const base of [
           artifactBase,
           batchRoot,
-          path.join(path.dirname(artifactBase), "delegate-scratch"),
-          path.join(path.dirname(artifactBase), "delegate-sessions"),
+          path.join(path.dirname(artifactBase), DELEGATE_TREES.scratch),
+          path.join(path.dirname(artifactBase), DELEGATE_TREES.sessions),
           ...excludedPaths,
         ]) {
-          const relative = path.relative(sourceRoot, canonicalPath(base));
-          if (
-            relative !== "" &&
-            relative !== ".." &&
-            !relative.startsWith(`..${path.sep}`) &&
-            !path.isAbsolute(relative)
-          ) {
+          const resolved = canonicalPath(base);
+          const relative = path.relative(sourceRoot, resolved);
+          if (relative !== "" && isWithin(sourceRoot, resolved)) {
             excluded.push(relative);
           }
         }

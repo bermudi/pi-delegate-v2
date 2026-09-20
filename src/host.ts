@@ -1,7 +1,13 @@
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { join, relative, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
+import {
+  canonicalPath,
+  DELEGATE_TREES,
+  gitProbeEnv,
+  isWithin,
+} from "./fsx.ts";
 import {
   createAgentSession,
   DefaultResourceLoader,
@@ -66,24 +72,7 @@ export function hostEnvironment(
   };
 }
 
-/** Canonical path for admission comparisons (resolves symlinks). */
-export function canonicalPath(path: string): string {
-  try {
-    return realpathSync.native(path);
-  } catch {
-    return resolve(path);
-  }
-}
-
 const GIT_TIMEOUT_MS = 5_000;
-
-function isWithin(directory: string, candidate: string): boolean {
-  const rel = relative(directory, candidate);
-  return (
-    rel === "" ||
-    (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel))
-  );
-}
 
 /**
  * The scopes a task's writes can reach. Inside a Git worktree the top-level
@@ -99,9 +88,6 @@ function isWithin(directory: string, candidate: string): boolean {
  */
 export function writeRootsOf(cwd: string): readonly string[] {
   const physicalCwd = canonicalPath(cwd);
-  const env = Object.fromEntries(
-    Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_")),
-  );
   let top: string;
   try {
     top = execFileSync(
@@ -111,13 +97,7 @@ export function writeRootsOf(cwd: string): readonly string[] {
         encoding: "utf8",
         stdio: ["ignore", "pipe", "pipe"],
         timeout: GIT_TIMEOUT_MS,
-        env: {
-          ...env,
-          LC_ALL: "C",
-          LANG: "C",
-          GIT_OPTIONAL_LOCKS: "0",
-          GIT_DISCOVERY_ACROSS_FILESYSTEM: "1",
-        },
+        env: gitProbeEnv(),
       },
     ).trim();
   } catch (error) {
@@ -311,7 +291,7 @@ export async function createSubagentSession(
     : task.sessionId !== undefined
       ? SessionManager.create(
           task.cwd,
-          join(env.agentDir, "delegate-sessions"),
+          join(env.agentDir, DELEGATE_TREES.sessions),
         )
       : SessionManager.inMemory(task.cwd);
   const { session } = await createAgentSession({
