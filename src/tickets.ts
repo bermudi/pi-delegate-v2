@@ -54,13 +54,6 @@ function rosterView(tickets: readonly Ticket[]): string {
   return `Tickets:\n${lines.join("\n")}`;
 }
 
-function aborted(signal: AbortSignal): Promise<void> {
-  if (signal.aborted) return Promise.resolve();
-  return new Promise((resolve) =>
-    signal.addEventListener("abort", () => resolve(), { once: true }),
-  );
-}
-
 /**
  * The ticket registry and lifecycle state machine. Ticket status moves
  * running → terminal exactly once; pause is orthogonal. Worker completion
@@ -228,6 +221,7 @@ export class TicketStore {
     signal: AbortSignal | undefined,
   ): Promise<{ timedOut: boolean }> {
     if (isTerminal(ticket.status)) return { timedOut: false };
+    if (signal?.aborted === true) return { timedOut: true };
     let notify!: () => void;
     const onSettled = new Promise<void>((resolve) => {
       notify = () => {
@@ -237,15 +231,30 @@ export class TicketStore {
       ticket.waiters.add(notify);
     });
     const races: Promise<unknown>[] = [onSettled];
+    let timeout: ReturnType<typeof setTimeout> | undefined;
     if (timeoutMs !== undefined) {
       races.push(
-        new Promise((resolve) => setTimeout(() => resolve("timeout"), timeoutMs)),
+        new Promise((resolve) => {
+          timeout = setTimeout(() => resolve("timeout"), timeoutMs);
+        }),
       );
     }
-    if (signal) races.push(aborted(signal));
+    let onAbort: (() => void) | undefined;
+    if (signal !== undefined) {
+      races.push(
+        new Promise((resolve) => {
+          onAbort = () => resolve("aborted");
+          signal.addEventListener("abort", onAbort);
+        }),
+      );
+    }
     try {
       await Promise.race(races);
     } finally {
+      if (timeout !== undefined) clearTimeout(timeout);
+      if (onAbort !== undefined) {
+        signal?.removeEventListener("abort", onAbort);
+      }
       ticket.waiters.delete(notify);
     }
     return { timedOut: !isTerminal(ticket.status) };

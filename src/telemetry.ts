@@ -204,10 +204,9 @@ function batchStatus(outcomes: readonly TaskOutcome[]): TicketStatus {
 }
 
 export interface DispatchTelemetrySpan {
+  readonly ownedPaths: readonly string[];
   finish(result: DispatchOutcome, ticketStatus?: TicketStatus): void;
 }
-
-const NOOP_SPAN: DispatchTelemetrySpan = { finish() {} };
 
 export class TelemetryStore {
   private db: DatabaseSync | undefined;
@@ -228,6 +227,10 @@ export class TelemetryStore {
     const destination = config.enabled
       ? destinationOf(config, agentDir)
       : undefined;
+    const ownedPaths =
+      destination === undefined
+        ? []
+        : [destination, `${destination}-wal`, `${destination}-shm`];
     if (destination !== this.destination) {
       this.closeBackend();
       this.destination = destination;
@@ -237,14 +240,15 @@ export class TelemetryStore {
     if (
       destination === undefined ||
       this.closed ||
-      destination === this.failedDestination
+      destination === this.failedDestination ||
+      this.backend(destination) === undefined
     ) {
-      return NOOP_SPAN;
+      return { ownedPaths, finish() {} };
     }
-    if (this.backend(destination) === undefined) return NOOP_SPAN;
     const generation = this.generation;
     const callId = randomUUID();
     return {
+      ownedPaths,
       finish: (result: DispatchOutcome, ticketStatus?: TicketStatus) => {
         if (
           this.closed ||

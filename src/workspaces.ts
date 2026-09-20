@@ -27,6 +27,7 @@ export async function prepareWorkspaces(
   tasks: readonly ResolvedTask[],
   agentDir: string,
   signal?: AbortSignal,
+  excludedPaths: readonly string[] = [],
 ): Promise<WorkspacePlan> {
   // Scratch before isolated: file copies are cheaper than Git
   // setup, and a later preparation failure can dispose() them.
@@ -41,6 +42,7 @@ export async function prepareWorkspaces(
       scratchPlan?.tasks ?? tasks,
       join(agentDir, "delegate-isolated"),
       signal,
+      excludedPaths,
     );
   } catch (error) {
     await scratchPlan?.dispose();

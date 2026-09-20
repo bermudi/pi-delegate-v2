@@ -444,7 +444,12 @@ export default function delegateExtension(api: ExtensionAPI): void {
         env.agentDir,
         { async: ticket !== undefined, startedAt: Date.now(), tasks },
       );
-      plan = await prepareWorkspaces(tasks, env.agentDir, signal);
+      plan = await prepareWorkspaces(
+        tasks,
+        env.agentDir,
+        signal,
+        telemetrySpan.ownedPaths,
+      );
       const prepared = plan;
       const run = coordinator.run(prepared.tasks, {
         env,
@@ -587,6 +592,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
           const { barrier: quiescence, relabel } = trackQuiescence(
             call.async ? "async dispatch (preparing)" : "dispatch (preparing)",
           );
+          let quiescenceHandedOff = false;
           try {
             const agentDirResolution = resolveAgentDir(ctx);
             if (agentDirResolution.source === "cwd" && !warnedAgentDirFallback) {
@@ -624,11 +630,12 @@ export default function delegateExtension(api: ExtensionAPI): void {
                   ticket,
                   quiescence,
                 }));
+                quiescenceHandedOff = true;
                 void completion.then(() => undefined).catch((error: unknown) => {
-                  // The run promise rejected without (or after) handing the
-                  // barrier to the task quiescence chain: resolve it so a
-                  // later shutdown cannot wait forever on a dead dispatch.
-                  quiescence.resolve();
+                  // Once startDispatch returns, the coordinator's
+                  // task-quiescence chain owns the barrier and resolves it
+                  // on this same rejection path; here the ticket just
+                  // settles failed and the crash is reported.
                   tickets.settle(ticket, "failed");
                   console.error(
                     `[delegate] background ticket ${ticket.id} crashed: ${error instanceof Error ? error.message : String(error)}`,
@@ -719,7 +726,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
                     );
                   });
               } catch (error) {
-                tickets.remove(ticket.id);
+                if (ticket.status === "running") tickets.remove(ticket.id);
                 throw error;
               }
               return {
@@ -766,6 +773,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
                 }
               },
             });
+            quiescenceHandedOff = true;
             const result = await completion;
             const allFailed = result.outcomes.every(
               (outcome) => outcome.status !== "ok",
@@ -792,10 +800,9 @@ export default function delegateExtension(api: ExtensionAPI): void {
             };
           } catch (error) {
             // coordinator.run wires the barrier to task quiescence the moment
-            // it starts; if execution never got there (or the run promise
-            // itself rejected pre-wiring), resolve it here — a leaked
-            // barrier would hold every future shutdown forever.
-            quiescence.resolve();
+            // it starts; a failure before that handoff resolves it here — a
+            // leaked barrier would hold every future shutdown forever.
+            if (!quiescenceHandedOff) quiescence.resolve();
             throw error;
           }
         };

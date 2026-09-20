@@ -967,6 +967,7 @@ export async function prepareIsolated(
   tasks: readonly ResolvedTask[],
   artifactBase: string,
   signal?: AbortSignal,
+  excludedPaths: readonly string[] = [],
 ): Promise<IsolatedPlan | undefined> {
   const isolatedIndexes = tasks
     .map((task, index) => (task.workspace === "isolated" ? index : -1))
@@ -1033,6 +1034,7 @@ export async function prepareIsolated(
           batchRoot,
           path.join(path.dirname(artifactBase), "delegate-scratch"),
           path.join(path.dirname(artifactBase), "delegate-sessions"),
+          ...excludedPaths,
         ]) {
           const relative = path.relative(sourceRoot, canonicalPath(base));
           if (

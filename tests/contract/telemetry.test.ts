@@ -792,4 +792,52 @@ describe("delegate telemetry contract", () => {
       release();
     },
   );
+
+  test(
+    "isolated baselines exclude the active telemetry database and sidecars",
+    async () => {
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      const repo = trackedTempDir();
+      gitInit(repo);
+      const dbPath = join(repo, "telemetry-state", "usage.db");
+      configureDelegate(session, {
+        telemetry: { enabled: true, dbPath },
+      });
+      subagents.respond([
+        fauxAssistantMessage([
+          fauxToolCall("bash", {
+            command:
+              "if [ ! -e telemetry-state/usage.db ] && [ ! -e telemetry-state/usage.db-wal ] && [ ! -e telemetry-state/usage.db-shm ]; then printf absent > telemetry-owned-check.txt; else printf present > telemetry-owned-check.txt; fi",
+          }),
+        ]),
+        fauxAssistantMessage("CHECK-DONE"),
+      ]);
+
+      const result = await callDelegate(session, {
+        tasks: [
+          {
+            prompt: "check telemetry files",
+            cwd: repo,
+            tools: ["bash"],
+            workspace: "isolated",
+          },
+        ],
+      });
+
+      expect(result.isError).toBe(false);
+      expect(
+        readFileSync(join(repo, "telemetry-owned-check.txt"), "utf8"),
+      ).toBe("absent");
+      expect(existsSync(dbPath)).toBe(true);
+      const db = new DatabaseSync(dbPath);
+      try {
+        const tasks = rowsOf(db, "tasks");
+        expect(tasks).toHaveLength(1);
+        expect(tasks[0]?.integration).toBe("applied_unverified");
+      } finally {
+        db.close();
+      }
+    },
+  );
 });
