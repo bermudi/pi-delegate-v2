@@ -694,6 +694,9 @@ export async function runTask(
     if (last.status !== "failed" || controls.isAborted()) break;
     if (retries + 1 >= MAX_TASK_ATTEMPTS || !canRetryWholeTask(task, last)) break;
     retries += 1;
+    console.error(
+      `[delegate] retrying task ${task.id} after transient failure (attempt ${retries + 1} of ${MAX_TASK_ATTEMPTS}): ${last.error ?? "unknown error"}`,
+    );
     try {
       // The backoff shares the deadline window: never sleep past it.
       const remaining =

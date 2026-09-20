@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { canonicalPath } from "./host.ts";
 import type {
   ResolvedTask,
   TaskIntegration,
@@ -131,6 +132,7 @@ async function repositoryRoot(cwd: string, signal?: AbortSignal): Promise<string
       })
     ).stdout.trim();
   } catch (error) {
+    if (signal?.aborted) throw error;
     throw new Error(
       `workspace "isolated" requires a Git repository: ${error instanceof Error ? error.message : String(error)}`,
     );
@@ -146,7 +148,8 @@ async function repositoryRoot(cwd: string, signal?: AbortSignal): Promise<string
       cwd: physicalRoot,
       signal,
     });
-  } catch {
+  } catch (error) {
+    if (signal?.aborted) throw error;
     throw new Error(
       `workspace "isolated" requires a repository with at least one commit; '${physicalRoot}' has none.`,
     );
@@ -376,6 +379,8 @@ interface AcceptedProposal {
   readonly parent: string;
   readonly commit: string;
   readonly files: readonly string[];
+  /** True when the worker worktree was removed during collection. */
+  readonly workerRemoved: boolean;
 }
 
 export interface IsolatedReconcileOptions {
@@ -406,6 +411,7 @@ export interface IsolatedPlan {
    * A no-op for workers already cleaned up or never marked retained.
    */
   cleanupWorker(taskIndex: number): Promise<void>;
+  dispose(): Promise<void>;
 }
 
 function withIntegration(
@@ -651,14 +657,13 @@ async function collectProposals(
         parent: integratedCommit,
         commit: chainCommit,
         files: proposedFiles,
+        workerRemoved,
       });
       integratedCommit = chainCommit;
-      setIntegration({
-        status: "applied_unverified",
-        proposedFiles,
-        appliedFiles: proposedFiles,
-        ...(workerRemoved ? {} : { worktreePath: worker.workerRoot }),
-      });
+      // No integration is recorded yet: source application (Phase 2) still
+      // has to run. Recording applied_unverified here would falsely report
+      // success — and let cleanup delete the recovery net — if Phase 2
+      // never reaches this proposal because an earlier Git call fails.
     } catch (error) {
       // A mid-snapshot abort is a cancellation, not a proposal failure:
       // retain whatever evidence exists for recovery.
@@ -747,11 +752,37 @@ async function applyToSource(
     // e.g. an earlier proposal made the identical change — so the desired
     // end state holds and there is nothing to write. `git apply` rejects
     // empty input, so this must be detected before reaching it.
-    const deltaPaths = await changedFiles(
-      group.sourceRoot,
-      proposal.parent,
-      proposal.commit,
-    );
+    //
+    // Every Git call between collecting the patch and applying it can fail.
+    // Such a failure must never leave the optimistic Phase-1 state (or no
+    // state) standing as a false success: mark apply_failed honestly and
+    // keep the recovery artifacts.
+    let deltaPaths: string[];
+    let delta: string;
+    try {
+      deltaPaths = await changedFiles(
+        group.sourceRoot,
+        proposal.parent,
+        proposal.commit,
+      );
+    } catch (error) {
+      results[proposal.taskIndex] = withIntegration(outcome, {
+        status: "apply_failed",
+        proposedFiles: proposal.files,
+        appliedFiles: [],
+        conflicts: [
+          {
+            path: "(source apply)",
+            reason: error instanceof Error ? error.message : String(error),
+          },
+        ],
+        baselineRef: group.baselineRef,
+        proposalRef: worker.proposalRef,
+        patchPath: worker.patchPath,
+        ...(proposal.workerRemoved ? {} : { worktreePath: worker.workerRoot }),
+      });
+      continue;
+    }
     if (!deltaPaths.length) {
       results[proposal.taskIndex] = withIntegration(outcome, {
         status: "applied_unverified",
@@ -760,14 +791,34 @@ async function applyToSource(
         baselineRef: group.baselineRef,
         proposalRef: worker.proposalRef,
         patchPath: worker.patchPath,
+        ...(proposal.workerRemoved ? {} : { worktreePath: worker.workerRoot }),
       });
       continue;
     }
-    const delta = await diffPatch(
-      group.sourceRoot,
-      proposal.parent,
-      proposal.commit,
-    );
+    try {
+      delta = await diffPatch(
+        group.sourceRoot,
+        proposal.parent,
+        proposal.commit,
+      );
+    } catch (error) {
+      results[proposal.taskIndex] = withIntegration(outcome, {
+        status: "apply_failed",
+        proposedFiles: proposal.files,
+        appliedFiles: [],
+        conflicts: [
+          {
+            path: "(source apply)",
+            reason: error instanceof Error ? error.message : String(error),
+          },
+        ],
+        baselineRef: group.baselineRef,
+        proposalRef: worker.proposalRef,
+        patchPath: worker.patchPath,
+        ...(proposal.workerRemoved ? {} : { worktreePath: worker.workerRoot }),
+      });
+      continue;
+    }
     // Read-only verification: does this proposal's expected pre-state still
     // match the source? A mismatch is a conflict, never a partial write.
     try {
@@ -872,6 +923,19 @@ async function applyToSource(
       });
       continue;
     }
+
+    // The write succeeded: only now is applied_unverified honest. It is
+    // recorded here (not during collection) so a Git failure between
+    // collecting the patch and applying it can never stand as success.
+    results[proposal.taskIndex] = withIntegration(outcome, {
+      status: "applied_unverified",
+      proposedFiles: proposal.files,
+      appliedFiles: proposal.files,
+      baselineRef: group.baselineRef,
+      proposalRef: worker.proposalRef,
+      patchPath: worker.patchPath,
+      ...(proposal.workerRemoved ? {} : { worktreePath: worker.workerRoot }),
+    });
   }
 }
 
@@ -965,6 +1029,7 @@ export async function prepareIsolated(
   tasks: readonly ResolvedTask[],
   artifactBase: string,
   signal?: AbortSignal,
+  excludedPaths: readonly string[] = [],
 ): Promise<IsolatedPlan | undefined> {
   const isolatedIndexes = tasks
     .map((task, index) => (task.workspace === "isolated" ? index : -1))
@@ -976,6 +1041,35 @@ export async function prepareIsolated(
   const groupsByRoot = new Map<string, IsolatedGroup>();
   const workers = new Map<number, IsolatedWorker>();
   const translated = [...tasks];
+
+  let preparationUndone = false;
+  const undoPreparation = async (): Promise<void> => {
+    if (preparationUndone) return;
+    preparationUndone = true;
+    let worktreeCleanupFailed = false;
+    for (const worker of workers.values()) {
+      if (!(await removeWorktree(worker.group.sourceRoot, worker.workerRoot))) {
+        worktreeCleanupFailed = true;
+      }
+    }
+    for (const group of groupsByRoot.values()) {
+      try {
+        await git(["update-ref", "-d", group.baselineRef], {
+          cwd: group.sourceRoot,
+        });
+      } catch (cleanupError) {
+        log("failed to clean isolated baseline ref after preparation error", cleanupError);
+      }
+      group.finishReconcile();
+    }
+    if (!worktreeCleanupFailed) {
+      await fs.promises
+        .rm(batchRoot, { recursive: true, force: true })
+        .catch((cleanupError: unknown) =>
+          log("failed to remove isolated artifacts after preparation error", cleanupError),
+        );
+    }
+  };
 
   try {
     for (const taskIndex of isolatedIndexes) {
@@ -997,8 +1091,14 @@ export async function prepareIsolated(
         // into a proposal. The batch root is excluded separately for the
         // pathological case where the artifact base IS the source root.
         const excluded: string[] = [];
-        for (const base of [artifactBase, batchRoot]) {
-          const relative = path.relative(sourceRoot, base);
+        for (const base of [
+          artifactBase,
+          batchRoot,
+          path.join(path.dirname(artifactBase), "delegate-scratch"),
+          path.join(path.dirname(artifactBase), "delegate-sessions"),
+          ...excludedPaths,
+        ]) {
+          const relative = path.relative(sourceRoot, canonicalPath(base));
           if (
             relative !== "" &&
             relative !== ".." &&
@@ -1069,29 +1169,7 @@ export async function prepareIsolated(
       translated[taskIndex] = { ...task, cwd: workerCwd };
     }
   } catch (error) {
-    let worktreeCleanupFailed = false;
-    for (const worker of workers.values()) {
-      if (!(await removeWorktree(worker.group.sourceRoot, worker.workerRoot))) {
-        worktreeCleanupFailed = true;
-      }
-    }
-    for (const group of groupsByRoot.values()) {
-      try {
-        await git(["update-ref", "-d", group.baselineRef], {
-          cwd: group.sourceRoot,
-        });
-      } catch (cleanupError) {
-        log("failed to clean isolated baseline ref after preparation error", cleanupError);
-      }
-      group.finishReconcile();
-    }
-    if (!worktreeCleanupFailed) {
-      await fs.promises
-        .rm(batchRoot, { recursive: true, force: true })
-        .catch((cleanupError: unknown) =>
-          log("failed to remove isolated artifacts after preparation error", cleanupError),
-        );
-    }
+    await undoPreparation();
     throw error;
   }
 
@@ -1145,5 +1223,6 @@ export async function prepareIsolated(
           .catch(() => undefined);
       }
     },
+    dispose: undoPreparation,
   };
 }

@@ -36,6 +36,15 @@ export function integrationLines(integration: TaskIntegration): string[] {
   const lines = [
     `[INTEGRATION: ${integration.status} · proposed ${integration.proposedFiles.length} file(s) · applied ${integration.appliedFiles.length} file(s)]`,
   ];
+  if (integration.proposedFiles.length > 0) {
+    lines.push(`proposed: ${integration.proposedFiles.join(", ")}`);
+  }
+  if (
+    integration.appliedFiles.length > 0 &&
+    integration.appliedFiles.join("\0") !== integration.proposedFiles.join("\0")
+  ) {
+    lines.push(`applied: ${integration.appliedFiles.join(", ")}`);
+  }
   if (integration.baselineRef) {
     lines.push(`baseline ref: ${integration.baselineRef}`);
   }

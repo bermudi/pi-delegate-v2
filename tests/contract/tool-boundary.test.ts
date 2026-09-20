@@ -36,6 +36,7 @@ describe("delegate public tool contract", () => {
       [
         "async",
         "force",
+        "operationId",
         "sessionAction",
         "sessionId",
         "tasks",
@@ -103,6 +104,7 @@ describe("delegate public tool contract", () => {
     expect(top.action).toBeUndefined();
     expect(top.unsafeSharedWrites).toBeUndefined();
     expect(taskFields.async).toBeUndefined();
+    expect(taskFields.operationId).toBeUndefined();
     expect(taskFields.sessionAction).toBeUndefined();
     expect(taskFields.unsafeSharedWrites).toBeUndefined();
   });

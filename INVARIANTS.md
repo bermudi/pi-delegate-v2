@@ -25,6 +25,30 @@ use any design that makes these properties true and testable.
   back completed side effects.
 - Cancellation cause precedence is parent abort, then deadline, then stall.
 
+## Dispatch identity
+
+- The same live `operationId` and normalized request MUST share one
+  execution and one result — the original in-flight promise or settled
+  value, never a second run.
+- The same `operationId` with a changed normalized request MUST conflict
+  before any work, admission, or config resolution starts.
+- Unkeyed dispatches MUST never be deduplicated; identical requests without
+  an `operationId` execute independently.
+- An in-flight operation MUST never be evicted or dropped by retention
+  bounds; an async operation remains in-flight until its ticket's batch
+  finishes.
+- The first caller MUST own the dispatch signal, host context, progress
+  reporting, and delivery origin; a duplicate dispatch call's signal MUST
+  NOT cancel the original operation. Ticket RPC cancellation authority is
+  unchanged: any caller holding the ticket id MAY cancel it through the
+  ordinary ticket RPC.
+- Cancellation or failure MUST be retained as the operation's result and
+  MUST NOT restart the operation while the record lives.
+- Settled-record retention MUST be bounded: expiry after one hour, at most
+  256 settled records, oldest-settled evicted first.
+- Operation identity MUST live only as long as the host extension/session;
+  no persistence, crash recovery, or exactly-once claim may be made.
+
 ## Conversation isolation
 
 - Dispatch MUST NOT extract or inject the parent conversation into children.

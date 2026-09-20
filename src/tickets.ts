@@ -34,7 +34,7 @@ function taskSection(outcome: TaskOutcome): string {
 /** Poll/wait view of one ticket. Poll is observational — never mutates. */
 export function ticketView(ticket: Ticket): string {
   const lines = [
-    `Ticket "${ticket.id}": ${statusWord(ticket)} — ${completedCount(ticket)}/${ticket.totalTasks} tasks completed.`,
+    `Ticket "${ticket.id}": ${statusWord(ticket)} — ${completedCount(ticket)}/${ticket.totalTasks} tasks finished.`,
     ...ticket.notices,
   ];
   for (const outcome of ticket.outcomes) {
@@ -49,16 +49,9 @@ function rosterView(tickets: readonly Ticket[]): string {
   }
   const lines = tickets.map(
     (ticket) =>
-      `- "${ticket.id}" ${statusWord(ticket)} — ${completedCount(ticket)}/${ticket.totalTasks} tasks completed`,
+      `- "${ticket.id}" ${statusWord(ticket)} — ${completedCount(ticket)}/${ticket.totalTasks} tasks finished`,
   );
   return `Tickets:\n${lines.join("\n")}`;
-}
-
-function aborted(signal: AbortSignal): Promise<void> {
-  if (signal.aborted) return Promise.resolve();
-  return new Promise((resolve) =>
-    signal.addEventListener("abort", () => resolve(), { once: true }),
-  );
 }
 
 /**
@@ -76,7 +69,10 @@ export class TicketStore {
     return `t-${this.seq.toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   }
 
-  create(tasks: readonly ResolvedTask[]): Ticket {
+  create(
+    tasks: readonly ResolvedTask[],
+    options: { readonly holdSettlement: boolean },
+  ): Ticket {
     const ticket: Ticket = {
       id: this.newTicketId(),
       status: "running",
@@ -89,7 +85,7 @@ export class TicketStore {
       cancellation: new AbortController(),
       // Isolated batches settle only after reconciliation has annotated the
       // outcomes — a terminal ticket must already show applied/conflict state.
-      holdSettlement: tasks.some((task) => task.workspace === "isolated"),
+      holdSettlement: options.holdSettlement,
       notices: [],
       settledGate: new Deferred(),
       finishedGate: new Deferred(),
@@ -129,7 +125,7 @@ export class TicketStore {
         : ticket.outcomes.every((o) => o!.status === "cancelled")
           ? "cancelled"
           : ticket.outcomes.some((o) => o!.status === "ok")
-            ? "completed"
+            ? "partial"
             : "failed",
     );
   }
@@ -217,14 +213,16 @@ export class TicketStore {
 
   /**
    * Wait for settlement. A timeout or caller abort detaches only this
-   * waiter — the ticket and its work are untouched.
+   * waiter — the ticket and its work are untouched. Timeout and abort are
+   * distinct: only a timeout is a timeout.
    */
   async wait(
     ticket: Ticket,
     timeoutMs: number | undefined,
     signal: AbortSignal | undefined,
-  ): Promise<{ timedOut: boolean }> {
-    if (isTerminal(ticket.status)) return { timedOut: false };
+  ): Promise<{ timedOut: boolean; aborted: boolean }> {
+    if (isTerminal(ticket.status)) return { timedOut: false, aborted: false };
+    if (signal?.aborted === true) return { timedOut: false, aborted: true };
     let notify!: () => void;
     const onSettled = new Promise<void>((resolve) => {
       notify = () => {
@@ -234,18 +232,38 @@ export class TicketStore {
       ticket.waiters.add(notify);
     });
     const races: Promise<unknown>[] = [onSettled];
+    let timeout: ReturnType<typeof setTimeout> | undefined;
     if (timeoutMs !== undefined) {
       races.push(
-        new Promise((resolve) => setTimeout(() => resolve("timeout"), timeoutMs)),
+        new Promise((resolve) => {
+          timeout = setTimeout(() => resolve("timeout"), timeoutMs);
+        }),
       );
     }
-    if (signal) races.push(aborted(signal));
+    let onAbort: (() => void) | undefined;
+    if (signal !== undefined) {
+      races.push(
+        new Promise((resolve) => {
+          onAbort = () => resolve("aborted");
+          signal.addEventListener("abort", onAbort);
+        }),
+      );
+    }
+    let outcome: unknown;
     try {
-      await Promise.race(races);
+      outcome = await Promise.race(races);
     } finally {
+      if (timeout !== undefined) clearTimeout(timeout);
+      if (onAbort !== undefined) {
+        signal?.removeEventListener("abort", onAbort);
+      }
       ticket.waiters.delete(notify);
     }
-    return { timedOut: !isTerminal(ticket.status) };
+    if (isTerminal(ticket.status)) return { timedOut: false, aborted: false };
+    if (outcome === "aborted" || signal?.aborted) {
+      return { timedOut: false, aborted: true };
+    }
+    return { timedOut: true, aborted: false };
   }
 }
 
@@ -272,17 +290,23 @@ export async function handleTicketRpc(
   if (!ticket) {
     return {
       text: `Ticket '${call.ticket ?? ""}' not found.`,
-      isError: false,
+      isError: true,
     };
   }
   switch (call.action) {
     case "poll":
       return { text: ticketView(ticket), isError: false };
     case "wait": {
-      const { timedOut } = await store.wait(ticket, call.timeoutMs, signal);
+      const { timedOut, aborted } = await store.wait(
+        ticket,
+        call.timeoutMs,
+        signal,
+      );
       const text = timedOut
         ? `${ticketView(ticket)}\n\nWait timed out; the ticket is still ${statusWord(ticket)}.`
-        : ticketView(ticket);
+        : aborted
+          ? `${ticketView(ticket)}\n\nWait detached; the caller aborted the wait. The ticket is still ${statusWord(ticket)}.`
+          : ticketView(ticket);
       return { text, isError: false };
     }
     case "cancel":

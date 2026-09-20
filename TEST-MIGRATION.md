@@ -152,15 +152,20 @@ gaps.
 
 - **Contract:** `async: true` returns a ticket immediately; auto-delivery;
   poll roster and single-ticket views; wait blocks to settlement or timeout;
-  tickets stay pollable after settlement; not-found semantics.
+  tickets stay pollable after settlement; natural settlement is `completed`
+  (every task ok), `partial` (at least one ok and at least one not),
+  `cancelled` (all cancelled), or `failed` (none ok, at least one failed)
+  while forced cancellation stays `cancelled`; a singular ticket RPC on an
+  unknown id is a tool error while an empty roster poll succeeds.
 - **Regression:** cancelled tickets retain partial results with index
   alignment; a late worker cannot flip a cancelled ticket to done; wait
   timeout/abort detaches only that waiter; delivery failure never unsettles.
 - **Internal:** ticket id generation, TTL sweeping, roster/format string
   composition, busy-index internals, waiter plumbing.
-- **Covered now:** empty roster; unknown-ticket handling for all actions;
-  wait-to-settlement; timeout detach; cancel preview vs force;
-  cancelled-ticket retains completed results; pause/resume.
+- **Covered now:** empty roster; error-valued unknown-ticket handling for
+  all singular actions; wait-to-settlement; timeout detach; cancel preview
+  vs force; explicit `partial` mixed-batch and `failed` all-failure
+  settlement; cancelled-ticket retains completed results; pause/resume.
 - **Covered now (`tests/contract/delivery.test.ts`, `SPEC.md` "Background
   delivery"):** same-leaf follow-up wake of an idle parent (`deliverAs:
   "followUp"` + `triggerTurn: true`), including after a prior navigation;
@@ -356,9 +361,21 @@ gaps.
   meaningful.
 - **Internal:** SQLite layout, sweep cadence, record-once mechanics — all
   free to change; only privacy and outcome-meaning are contract.
-- **Covered now:** aggregate usage present on the sync tool result.
-- **Gap:** async-no-usage property; the privacy property is only assertable
-  once v2 chooses its telemetry surface; TUI/status rendering is
+- **Covered now:** aggregate usage present on the sync tool result;
+  telemetry is disabled by default and creates no file; explicit opt-in
+  writes call/task rows carrying only the allowed metadata with legacy
+  privacy columns NULL; `telemetry.dbPath` > `DELEGATE_TELEMETRY_DB` >
+  `<agentDir>/delegate-usage.db` precedence; open/write failure is
+  fail-open and leaves dispatch results intact; DB/WAL/SHM files are
+  owner-only; a v1 database migrates in place preserving existing rows;
+  simultaneous first-open writers each persist exactly one call and one
+  task row per batch; malformed telemetry config rejects before provider work;
+  force-cancelled calls record authoritative cancellation; a failed destination
+  retries after the identity changes; isolated integration status records only
+  after reconciliation; an unfinished span is dropped when the destination
+  changes before its batch finishes; task rows whose workers have unconfirmed
+  quiescence are marked provisional.
+- **Gap:** async-no-usage property; TUI/status rendering is
   intentionally out of scope for boundary tests.
 
 ### Agent directory resolution
@@ -383,6 +400,32 @@ gaps.
   regression: overlapping harness sessions keep configuration reads and
   pooled transcript writes in their own directories without changing the
   process environment.
+- **Gap:** none.
+
+### Explicit dispatch identity (#16)
+
+- **Contract:** `operationId` scopes a dispatch to one execution per live
+  key+request: the same normalized `{async, tasks}` reuses the in-flight
+  promise or settled result (sync result or async ticket), a changed
+  request conflicts before any work, retention is bounded (one-hour
+  expiry, 256 settled records, in-flight never evicted), the first caller
+  owns cancellation/context/progress/delivery, and unkeyed dispatches are
+  never deduplicated. Host-lifetime only; no crash or exactly-once claim.
+- **Regression:** concurrent retries share one gated execution; a
+  duplicate caller's aborted signal cannot cancel the shared operation;
+  post-settlement retries reuse; same-id changed requests conflict while
+  running and after settlement; forced-cancel results are reused, never
+  restarted; an in-flight async operation survives settled-cap pressure
+  and retries to the same ticket; expiry and capacity eviction permit
+  fresh operations; intentional unkeyed repeats always execute;
+  equivalent supported normalizations (flat task vs one-task array,
+  batch workspace default vs task workspace) count as identical.
+- **Internal:** the map, the fingerprint hash (SHA-256 today), and prune
+  mechanics are free to change; only the identity semantics and bounds
+  are contract.
+- **Covered now:** `tests/contract/operations.test.ts`, including
+  failed-result reuse after the configuration that caused the failure is
+  fixed, alongside forced-cancel result reuse.
 - **Gap:** none.
 
 ## First tranche
@@ -713,11 +756,15 @@ shutdown; shared-write admission and same-call serialization; isolated
 all-or-nothing application; cancellation safety and quarantine; background
 delivery on the stock Pi extension API (issue #3; `SPEC.md` "Background
 delivery", `tests/contract/delivery.test.ts`) — no Pi patch was added to
-`patches/`.
+`patches/`; opt-in content-free local telemetry with privacy exclusions and
+v1 migration preservation (issue #8; `SPEC.md` "Telemetry",
+`tests/contract/telemetry.test.ts`); bounded duplicate-safe dispatch
+identity via `operationId` (issue #16; `SPEC.md` "Explicit operation
+identity", `tests/contract/operations.test.ts`).
 
 Remaining:
 
-1. Usage and telemetry privacy.
+1. Usage properties.
 2. The per-subsystem **Gap** entries above.
 
 Each slice should add only the public test driver capabilities it needs. Tests

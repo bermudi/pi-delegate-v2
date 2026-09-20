@@ -1,4 +1,3 @@
-import { join } from "node:path";
 import {
   Type,
   type Static,
@@ -7,22 +6,46 @@ import {
 } from "typebox";
 import {
   defineTool,
+  type AgentToolResult,
   type ExtensionAPI,
 } from "@earendil-works/pi-coding-agent";
-import { AdmissionController, type AdmissionGrant } from "./src/admission.ts";
-import { loadDelegateConfig, resolveAgentDir } from "./src/config.ts";
-import { DispatchCoordinator } from "./src/coordinator.ts";
+import { AdmissionController } from "./src/admission.ts";
+import {
+  loadDelegateConfig,
+  resolveAgentDir,
+  type DelegateConfig,
+} from "./src/config.ts";
+import {
+  DispatchCoordinator,
+  type DispatchOutcome,
+} from "./src/coordinator.ts";
 import {
   formatDispatchResult,
   serializedNotices,
 } from "./src/format.ts";
-import { hostEnvironment, resolveTasks } from "./src/host.ts";
-import { prepareIsolated, type IsolatedPlan } from "./src/isolated.ts";
-import { prepareScratch, type ScratchPlan } from "./src/scratch.ts";
+import {
+  hostEnvironment,
+  resolveTasks,
+  type HostEnvironment,
+} from "./src/host.ts";
+import {
+  dispatchFingerprint,
+  OperationStore,
+} from "./src/operations.ts";
 import { handleSessionRpc, SessionPool } from "./src/sessions.ts";
+import { TelemetryStore } from "./src/telemetry.ts";
 import { handleTicketRpc, TicketStore, ticketView } from "./src/tickets.ts";
-import { Deferred } from "./src/types.ts";
+import {
+  Deferred,
+  type ResolvedTask,
+  type Ticket,
+} from "./src/types.ts";
 import { validateCall } from "./src/validation.ts";
+import {
+  prepareWorkspaces,
+  workspaceNeedsSettlementHold,
+  type WorkspacePlan,
+} from "./src/workspaces.ts";
 
 function stringEnum<const Values extends readonly string[]>(
   values: Values,
@@ -125,6 +148,13 @@ const argumentsSchema = Type.Object(
         description: "Tasks to run; omit or pass [] for help.",
       }),
     ),
+    operationId: Type.Optional(
+      Type.String({
+        pattern: "^[A-Za-z0-9._-]{1,64}$",
+        description:
+          "Bounded duplicate-safe dispatch key; same key/request reuses the original operation.",
+      }),
+    ),
     workspace: Type.Optional(
       stringEnum(["shared", "scratch", "isolated"], {
         description:
@@ -137,6 +167,7 @@ const argumentsSchema = Type.Object(
 
 type DelegateArguments = Static<typeof argumentsSchema>;
 type DelegateDetails = Record<string, unknown>;
+type DelegateResult = AgentToolResult<DelegateDetails>;
 
 const taskFieldNames = [
   "id",
@@ -205,6 +236,14 @@ function normalizeTask(value: unknown): unknown {
  * a throw surfaces to the caller as a normal whole-call tool error.
  */
 function rejectAmbiguousShapes(args: Record<string, unknown>): void {
+  if (
+    args.operationId !== undefined &&
+    typeof args.operationId !== "string"
+  ) {
+    throw new Error(
+      `'operationId' must be a string of 1-64 letters, digits, dots, underscores, or hyphens, not ${JSON.stringify(args.operationId)}.`,
+    );
+  }
   for (const field of ["async", "force", "timeoutMs"] as const) {
     const value = args[field];
     if (typeof value === "string") {
@@ -284,6 +323,9 @@ Delegate runs subagent tasks synchronously or as an asynchronous ticket.
   \`tools\` (\`*\`/\`ro\` groups or names), \`thinking\`, \`deadlineMs\`,
   \`sessionId\`, \`resumeFrom\`, \`workspace\` (shared/scratch/isolated).
   A top-level \`workspace\` is the batch default.
+- \`operationId\` (1-64 letters/digits/./_/-) makes a dispatch duplicate-safe:
+  same id + same request returns the original in-flight or settled result;
+  same id + a changed request is an error. Dispatch-only.
 - Models: you never pick models. Tasks run on the parent's model; a named
   agent may instead run on the model the user configured for it under
   "models" in the user-global delegate.json. A task \`model\` field is
@@ -323,6 +365,12 @@ Delegate runs subagent tasks synchronously or as an asynchronous ticket.
   incompatible reuse is rejected.
 - \`sessionAction: "list"\` lists live sessions; \`sessionAction: "close"\`
   with \`sessionId\` closes one.
+
+## Telemetry
+- Disabled by default; enable only via "telemetry" in delegate.json.
+- Local content-free metadata only: batch and task outcome records in a
+  SQLite database at telemetry.dbPath, DELEGATE_TELEMETRY_DB, or
+  <agentDir>/delegate-usage.db. Failures never block work.
 `;
 
 export default function delegateExtension(api: ExtensionAPI): void {
@@ -330,6 +378,8 @@ export default function delegateExtension(api: ExtensionAPI): void {
   const admission = new AdmissionController();
   const sessions = new SessionPool();
   const coordinator = new DispatchCoordinator(tickets);
+  const telemetry = new TelemetryStore();
+  const operations = new OperationStore<DelegateResult>();
   let callSeq = 0;
   // Owned by this closure: one fallback warning per extension instance, not
   // per call (see resolveAgentDir for why the fallback exists at all).
@@ -368,6 +418,87 @@ export default function delegateExtension(api: ExtensionAPI): void {
     };
   };
 
+  const startDispatch = async (options: {
+    tasks: readonly ResolvedTask[];
+    env: HostEnvironment;
+    config: DelegateConfig;
+    owner: string;
+    signal?: AbortSignal;
+    ticket?: Ticket;
+    quiescence: Deferred;
+    onNotices?: (notices: readonly string[]) => void;
+  }): Promise<{
+    completion: Promise<DispatchOutcome>;
+    notices: readonly string[];
+  }> => {
+    const { tasks, env, config, owner, signal, ticket, quiescence } = options;
+    const dispatchSignal = signal ?? ticket?.cancellation.signal;
+    const grant = admission.admit(tasks, owner);
+    const notices = serializedNotices(tasks, grant.serialized);
+    if (ticket) ticket.notices = [...notices];
+    let plan: WorkspacePlan | undefined;
+    try {
+      options.onNotices?.(notices);
+      const telemetrySpan = telemetry.beginDispatch(
+        config.telemetry,
+        env.agentDir,
+        { async: ticket !== undefined, startedAt: Date.now(), tasks },
+      );
+      plan = await prepareWorkspaces(
+        tasks,
+        env.agentDir,
+        dispatchSignal,
+        telemetrySpan.ownedPaths,
+      );
+      const prepared = plan;
+      const run = coordinator.run(prepared.tasks, {
+        env,
+        config,
+        grant,
+        sessions,
+        signal: dispatchSignal,
+        ticket,
+        quiescence,
+        finalize: (outcomes) =>
+          prepared.finalize(outcomes, {
+            shouldApplySource: () => !dispatchSignal?.aborted,
+            retainedReason: ticket
+              ? "The ticket was cancelled before source application."
+              : "The call was aborted before source application.",
+            signal: dispatchSignal,
+          }),
+        onWorkerQuiesced: (taskIndex) => prepared.cleanupWorker(taskIndex),
+      });
+      return {
+        notices,
+        completion: run
+          .then((outcome) => {
+            telemetrySpan.finish(outcome, ticket?.status);
+            return outcome;
+          })
+          .finally(() => {
+            if (ticket) tickets.releaseSettlement(ticket);
+          }),
+      };
+    } catch (error) {
+      // Preparation failed before coordinator.run took over the
+      // barrier; the outer catch resolves it after this cleanup. A disposal
+      // failure must never erase the root cause: log it and throw the
+      // original.
+      try {
+        await plan?.dispose();
+      } catch (cleanupError) {
+        console.error(
+          `[delegate] workspace disposal after preparation failure failed (root cause preserved): ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`,
+          cleanupError,
+        );
+      } finally {
+        grant.release();
+      }
+      throw error;
+    }
+  };
+
   api.on("session_before_tree", () => {
     navigationEpoch += 1;
   });
@@ -404,6 +535,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
       );
       await Promise.all(pending.map(([promise]) => promise));
     }
+    telemetry.close();
   });
 
   api.registerTool(
@@ -444,118 +576,73 @@ export default function delegateExtension(api: ExtensionAPI): void {
           };
         }
 
-        if (shuttingDown) {
-          throw new Error(
-            "Delegate is shutting down with this session; new dispatches are not accepted. " +
-              "Existing tickets remain pollable for the rest of the session's lifetime.",
-          );
-        }
-
-        // The dispatch barrier is tracked before anything between the
-        // latch check and the coordinator handoff can throw or yield:
-        // task resolution probes Git for each writer/isolated task's
-        // write scope, admission grants reservations, and workspace
-        // preparation awaits subprocesses. A shutdown that starts while
-        // this dispatch sits anywhere in that range must already count it
-        // in the liveQuiescence snapshot, or the session boundary could
-        // complete before the dispatch starts workers or releases its
-        // reservations. The same barrier is handed to the coordinator;
-        // every path below that ends without that handoff resolves it in
-        // the catch.
-        const { barrier: quiescence, relabel } = trackQuiescence(
-          call.async ? "async dispatch (preparing)" : "dispatch (preparing)",
-        );
-        try {
-          const agentDirResolution = resolveAgentDir(ctx);
-          if (agentDirResolution.source === "cwd" && !warnedAgentDirFallback) {
-            warnedAgentDirFallback = true;
-            console.warn(
-              `[delegate] Falling back to '${agentDirResolution.dir}' as the agent directory: delegate.json will be read from there, and delegate-sessions/, delegate-scratch/, delegate-isolated/ may be created under it. Set DELEGATE_AGENT_DIR to choose an agent directory explicitly. This warning appears once.`,
+        let operationTicket: Ticket | undefined;
+        const executeDispatch = async () => {
+          if (shuttingDown) {
+            throw new Error(
+              "Delegate is shutting down with this session; new dispatches are not accepted. " +
+                "Existing tickets remain pollable for the rest of the session's lifetime.",
             );
           }
-          const env = hostEnvironment(ctx, () => api.getActiveTools());
-          const config = loadDelegateConfig(ctx);
-          const tasks = resolveTasks(call.tasks, env, config);
-          sessions.validateReuse(tasks);
 
-          if (call.async) {
-            const ticket = tickets.create(tasks);
-            // The barrier now has its durable name for the shutdown status.
-            relabel(`ticket "${ticket.id}"`);
-            // The session-tree position at dispatch: delivery may wake the
-            // parent only while it is still on this branch with no tree
-            // transition or shutdown observed since.
-            const origin = {
-              leafId: ctx.sessionManager.getLeafId(),
-              epoch: navigationEpoch,
-            };
-            let grant: AdmissionGrant | undefined;
-            let scratchPlan: ScratchPlan | undefined;
-            try {
-              grant = admission.admit(tasks, ticket.id);
-              ticket.notices = serializedNotices(tasks, grant.serialized);
-              // Scratch before isolated: file copies are cheaper than Git
-              // setup, and a later preparation failure can dispose() them.
-              scratchPlan = await prepareScratch(
-                tasks,
-                join(env.agentDir, "delegate-scratch"),
+          // The dispatch barrier is tracked before anything between the
+          // latch check and the coordinator handoff can throw or yield:
+          // task resolution probes Git for each writer/isolated task's
+          // write scope, admission grants reservations, and workspace
+          // preparation awaits subprocesses. A shutdown that starts while
+          // this dispatch sits anywhere in that range must already count it
+          // in the liveQuiescence snapshot, or the session boundary could
+          // complete before the dispatch starts workers or releases its
+          // reservations. The same barrier is handed to the coordinator;
+          // every path below that ends without that handoff resolves it in
+          // the catch.
+          const { barrier: quiescence, relabel } = trackQuiescence(
+            call.async ? "async dispatch (preparing)" : "dispatch (preparing)",
+          );
+          let quiescenceHandedOff = false;
+          try {
+            const agentDirResolution = resolveAgentDir(ctx);
+            if (agentDirResolution.source === "cwd" && !warnedAgentDirFallback) {
+              warnedAgentDirFallback = true;
+              console.warn(
+                `[delegate] Falling back to '${agentDirResolution.dir}' as the agent directory: delegate.json will be read from there, and delegate-sessions/, delegate-scratch/, delegate-isolated/ may be created under it. Set DELEGATE_AGENT_DIR to choose an agent directory explicitly. This warning appears once.`,
               );
-              const plan = await prepareIsolated(
-                scratchPlan?.tasks ?? tasks,
-                join(env.agentDir, "delegate-isolated"),
-              );
-              void coordinator
-                .run(plan?.tasks ?? scratchPlan?.tasks ?? tasks, {
-                  env,
-                  config,
-                  grant,
-                  sessions,
-                  ticket,
-                  quiescence,
-                  finalize:
-                    plan || scratchPlan
-                      ? async (outcomes) => {
-                          if (plan) {
-                            await plan.reconcile(outcomes, {
-                              shouldApplySource: () =>
-                                !ticket.cancellation.signal.aborted,
-                              retainedReason:
-                                "The ticket was cancelled before source application.",
-                              signal: ticket.cancellation.signal,
-                            });
-                          }
-                          if (scratchPlan) await scratchPlan.finalize(outcomes);
-                          return outcomes;
-                        }
-                      : undefined,
-                  onWorkerQuiesced:
-                    plan || scratchPlan
-                      ? async (taskIndex) => {
-                          await Promise.all([
-                            plan?.cleanupWorker(taskIndex),
-                            scratchPlan?.cleanupWorker(taskIndex),
-                          ]);
-                        }
-                      : undefined,
-                })
-                .then(() => undefined)
-                .catch((error: unknown) => {
-                  // The run promise rejected without (or after) handing the
-                  // barrier to the task quiescence chain: resolve it so a
-                  // later shutdown cannot wait forever on a dead dispatch.
-                  quiescence.resolve();
-                  tickets.settle(ticket, "failed");
-                  console.error(
-                    `[delegate] background ticket ${ticket.id} crashed: ${error instanceof Error ? error.message : String(error)}`,
-                  );
-                });
+            }
+            const env = hostEnvironment(ctx, () => api.getActiveTools());
+            const config = loadDelegateConfig(ctx);
+            const tasks = resolveTasks(call.tasks, env, config);
+            sessions.validateReuse(tasks);
+
+            if (call.async) {
+              const ticket = tickets.create(tasks, {
+                holdSettlement: workspaceNeedsSettlementHold(tasks),
+              });
+              operationTicket = ticket;
+              // The barrier now has its durable name for the shutdown status.
+              relabel(`ticket "${ticket.id}"`);
+              // The session-tree position at dispatch: delivery may wake the
+              // parent only while it is still on this branch with no tree
+              // transition or shutdown observed since. Recorded on the ticket
+              // so delivery diagnostics can be reconstructed from the ticket
+              // alone.
+              const origin = {
+                leafId: ctx.sessionManager.getLeafId(),
+                epoch: navigationEpoch,
+              };
+              ticket.originLeafId = origin.leafId;
+              ticket.originEpoch = origin.epoch;
               // Auto-delivery, armed once the batch is running. It waits for
               // caller settlement AND the finished gate, so the delivered view
               // always carries the safe-to-expose outcome: finalized isolated
               // integrations, retained errors, and (on cancellation) partial
               // results rather than a bare status.
               const deliver = async (): Promise<void> => {
-                if (shuttingDown) return;
+                if (shuttingDown) {
+                  console.error(
+                    `[delegate] delivery for ticket ${ticket.id} suppressed during shutdown (result remains pollable)`,
+                  );
+                  return;
+                }
                 const cancelled = ticket.status === "cancelled";
                 const message = {
                   customType: "delegate-result",
@@ -623,141 +710,158 @@ export default function delegateExtension(api: ExtensionAPI): void {
                   }
                 }
               };
-              void Promise.all([
-                ticket.settledGate.promise,
-                ticket.finishedGate.promise,
-              ])
-                .then(deliver)
-                .catch((error: unknown) => {
+              const armDelivery = (): void => {
+                void Promise.all([
+                  ticket.settledGate.promise,
+                  ticket.finishedGate.promise,
+                ])
+                  .then(deliver)
+                  .catch((error: unknown) => {
+                    console.error(
+                      `[delegate] delivering ticket ${ticket.id} crashed (result remains pollable): ${error instanceof Error ? error.message : String(error)}`,
+                    );
+                  });
+              };
+              let completion: Promise<DispatchOutcome>;
+              try {
+                ({ completion } = await startDispatch({
+                  tasks,
+                  env,
+                  config,
+                  owner: ticket.id,
+                  ticket,
+                  quiescence,
+                }));
+                quiescenceHandedOff = true;
+                void completion.then(() => undefined).catch((error: unknown) => {
+                  // Once startDispatch returns, the coordinator's
+                  // task-quiescence chain owns the barrier and resolves it
+                  // on this same rejection path; here the ticket just
+                  // settles failed and the crash is reported.
+                  tickets.settle(ticket, "failed");
                   console.error(
-                    `[delegate] delivering ticket ${ticket.id} crashed (result remains pollable): ${error instanceof Error ? error.message : String(error)}`,
+                    `[delegate] background ticket ${ticket.id} crashed: ${error instanceof Error ? error.message : String(error)}`,
                   );
                 });
-            } catch (error) {
-              // Preparation failed before coordinator.run took over the
-              // barrier; the outer catch resolves it after this cleanup.
-              await scratchPlan?.dispose();
-              grant?.release();
-              tickets.remove(ticket.id);
-              throw error;
+                armDelivery();
+              } catch (error) {
+                if (ticket.status === "running") {
+                  tickets.remove(ticket.id);
+                  throw error;
+                }
+                // Preparation was cancelled alongside the ticket (shutdown or
+                // a force-cancel racing the workspace copy/worktree): the
+                // ticket is already terminal cancelled and the caller still
+                // needs its id. Record cancelled outcomes so the terminal view
+                // is complete, finish the bookkeeping the coordinator would
+                // have owned, and fall through to the Ticket-created return —
+                // never throw the prep symptom and lose the ticket.
+                console.error(
+                  `[delegate] async dispatch preparation for ticket ${ticket.id} aborted after cancellation; settling as cancelled: ${error instanceof Error ? error.message : String(error)}`,
+                );
+                for (const task of tasks) {
+                  if (ticket.outcomes[task.index] === undefined) {
+                    tickets.recordOutcome(ticket, {
+                      index: task.index,
+                      id: task.id,
+                      status: "cancelled",
+                      retries: 0,
+                    });
+                  }
+                }
+                tickets.releaseSettlement(ticket);
+                ticket.finishedGate.resolve();
+                // No workers started: quiescence is already confirmed. The
+                // outer catch would resolve this on a throw, but this path
+                // returns normally, so resolve it here.
+                quiescence.resolve();
+                armDelivery();
+              }
+              return {
+                content: [
+                  {
+                    type: "text" as const,
+                    text:
+                      `Ticket "${ticket.id}" created: ${tasks.length} task(s) running in the background.\n` +
+                      `Check progress with delegate({ ticketAction: "poll", ticket: "${ticket.id}" }).` +
+                      (ticket.notices.length > 0
+                        ? `\n${ticket.notices.join("\n")}`
+                        : ""),
+                  },
+                ],
+                details: {
+                  mode: "dispatch" as const,
+                  async: true,
+                  ticket: ticket.id,
+                  tasks: tasks.map((task) => task.id),
+                },
+              };
             }
+
+            callSeq += 1;
+            const owner = `call-${callSeq}`;
+            relabel(owner);
+            const { completion, notices } = await startDispatch({
+              tasks,
+              env,
+              config,
+              owner,
+              signal,
+              quiescence,
+              // Surface same-call serialization immediately — a serialized batch of
+              // independent writers is the expensive way to learn about "isolated".
+              onNotices: (current) => {
+                if (current.length > 0) {
+                  onUpdate?.({
+                    content: [
+                      { type: "text" as const, text: current.join("\n") },
+                    ],
+                    details: {},
+                  });
+                }
+              },
+            });
+            quiescenceHandedOff = true;
+            const result = await completion;
+            const allFailed = result.outcomes.every(
+              (outcome) => outcome.status !== "ok",
+            );
             return {
               content: [
                 {
                   type: "text" as const,
                   text:
-                    `Ticket "${ticket.id}" created: ${tasks.length} task(s) running in the background.\n` +
-                    `Check progress with delegate({ ticketAction: "poll", ticket: "${ticket.id}" }).` +
-                    (ticket.notices.length > 0
-                      ? `\n${ticket.notices.join("\n")}`
-                      : ""),
+                    (notices.length > 0 ? `${notices.join("\n")}\n\n` : "") +
+                    formatDispatchResult(result.outcomes),
                 },
               ],
               details: {
                 mode: "dispatch" as const,
-                async: true,
-                ticket: ticket.id,
-                tasks: tasks.map((task) => task.id),
+                async: false,
+                tasks: result.outcomes.map((outcome) => ({
+                  id: outcome.id,
+                  status: outcome.status,
+                })),
               },
+              usage: result.usage,
+              isError: allFailed,
             };
-          }
-
-          callSeq += 1;
-          relabel(`call-${callSeq}`);
-          const grant = admission.admit(tasks, `call-${callSeq}`);
-          // Surface same-call serialization immediately — a serialized batch of
-          // independent writers is the expensive way to learn about "isolated".
-          const notices = serializedNotices(tasks, grant.serialized);
-          if (notices.length > 0) {
-            onUpdate?.({
-              content: [{ type: "text" as const, text: notices.join("\n") }],
-              details: {},
-            });
-          }
-          let plan: IsolatedPlan | undefined;
-          let scratchPlan: ScratchPlan | undefined;
-          try {
-            scratchPlan = await prepareScratch(
-              tasks,
-              join(env.agentDir, "delegate-scratch"),
-              signal,
-            );
-            plan = await prepareIsolated(
-              scratchPlan?.tasks ?? tasks,
-              join(env.agentDir, "delegate-isolated"),
-              signal,
-            );
           } catch (error) {
-            await scratchPlan?.dispose();
-            grant.release();
+            // coordinator.run wires the barrier to task quiescence the moment
+            // it starts; a failure before that handoff resolves it here — a
+            // leaked barrier would hold every future shutdown forever.
+            if (!quiescenceHandedOff) quiescence.resolve();
             throw error;
           }
-          const result = await coordinator.run(
-            plan?.tasks ?? scratchPlan?.tasks ?? tasks,
-            {
-              env,
-              config,
-              grant,
-              sessions,
-              signal,
-              quiescence,
-              finalize:
-                plan || scratchPlan
-                  ? async (outcomes) => {
-                      if (plan) {
-                        await plan.reconcile(outcomes, {
-                          shouldApplySource: () => !signal?.aborted,
-                          retainedReason:
-                            "The call was aborted before source application.",
-                          signal,
-                        });
-                      }
-                      if (scratchPlan) await scratchPlan.finalize(outcomes);
-                      return outcomes;
-                    }
-                  : undefined,
-              onWorkerQuiesced:
-                plan || scratchPlan
-                  ? async (taskIndex) => {
-                      await Promise.all([
-                        plan?.cleanupWorker(taskIndex),
-                        scratchPlan?.cleanupWorker(taskIndex),
-                      ]);
-                    }
-                  : undefined,
-            },
-          );
-          const allFailed = result.outcomes.every(
-            (outcome) => outcome.status !== "ok",
-          );
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text:
-                  (notices.length > 0 ? `${notices.join("\n")}\n\n` : "") +
-                  formatDispatchResult(result.outcomes),
-              },
-            ],
-            details: {
-              mode: "dispatch" as const,
-              async: false,
-              tasks: result.outcomes.map((outcome) => ({
-                id: outcome.id,
-                status: outcome.status,
-              })),
-            },
-            usage: result.usage,
-            isError: allFailed,
-          };
-        } catch (error) {
-          // coordinator.run wires the barrier to task quiescence the moment
-          // it starts; if execution never got there (or the run promise
-          // itself rejected pre-wiring), resolve it here — a leaked
-          // barrier would hold every future shutdown forever.
-          quiescence.resolve();
-          throw error;
-        }
+        };
+
+        if (call.operationId === undefined) return executeDispatch();
+        return operations.run(
+          call.operationId,
+          dispatchFingerprint({ async: call.async, tasks: call.tasks }),
+          executeDispatch,
+          () => operationTicket?.finishedGate.promise ?? Promise.resolve(),
+        );
       },
     }),
   );

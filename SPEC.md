@@ -21,7 +21,7 @@ task starts.
 ### Dispatch
 
 ```ts
-delegate({ tasks: [task, ...], async?: boolean, workspace?: "shared" | "scratch" | "isolated" })
+delegate({ tasks: [task, ...], async?: boolean, workspace?: "shared" | "scratch" | "isolated", operationId?: string })
 ```
 
 Dispatch is synchronous by default. `async: true` applies to the whole batch,
@@ -96,6 +96,41 @@ serialized tasks and scope with the `isolated` remedy — independent same-repo
 edits are meant to run in parallel worktrees. Overlap with active work, or
 between shared and isolated work, rejects the whole call before execution.
 
+### Explicit operation identity
+
+`operationId` is an optional top-level dispatch key of 1–64 ASCII letters,
+digits, `.`, `_`, or `-`. It is dispatch-only; ticket, session, and help calls
+reject it.
+
+Its scope is one extension/session lifetime: it is never persisted across
+reload, replacement, or restart. Two requests are equivalent when their
+normalized validated `{async, tasks}` structures are identical after
+supported boundary repairs and batch workspace-default application, before
+config/profile/model/cwd resolution; `operationId` itself is excluded.
+
+The same id plus the same normalized request reuses the exact original
+in-flight promise or settled result — the sync result or the async ticket —
+and only one execution ever runs. The same id plus a changed request
+conflicts before config resolution, admission, or work starts.
+
+The first caller owns the dispatch invocation's signal, host context,
+progress callback, and delivery origin. A duplicate dispatch call cannot
+contribute its own signal, recontextualize, or replay progress. For async
+results, the reused ticket remains cancelable through the ordinary ticket
+RPC by any caller holding its id. Cancellation or failure is itself a
+result and is reused; an operation is never restarted inside its
+retention.
+
+Settled records expire one hour after settlement and at most 256 settled
+records are retained, evicting the oldest-settled first; in-flight records
+are never evicted. An async operation's record counts as in-flight — and
+its retention clock has not started — until its ticket's batch finishes,
+so it survives capacity and expiry pressure while the ticket runs. After
+expiry or eviction, reuse may start a new operation.
+
+Unkeyed identical dispatches always execute independently: there is no
+content deduplication and no exactly-once crash guarantee.
+
 ### Workspaces
 
 - **shared** operates directly in the source tree.
@@ -129,6 +164,16 @@ delegate({ ticketAction: "cancel", ticket, force? })
   and does not undo completed writes or commands.
 
 Tickets remain pollable after settlement.
+
+A naturally settled batch is `completed` only when every task succeeded. It is
+`partial` when at least one task succeeded and at least one did not,
+`cancelled` when every task was cancelled, and `failed` when no task succeeded
+and at least one failed. Forced ticket cancellation remains authoritative and
+settles the ticket as `cancelled` regardless of late worker outcomes.
+
+A singular ticket RPC (poll with a ticket id, wait, cancel, pause, or resume)
+for an unknown id returns a tool error naming the missing ticket. Roster
+polling without a ticket id remains a successful empty/list response.
 
 ### Background delivery
 
@@ -167,6 +212,42 @@ extension's slow handler can delay Delegate's shutdown or tree hooks. A
 ticket settling inside that window may wake the outgoing session once; Pi
 aborts that turn during teardown. This is an accepted, documented limitation
 (see `COMPATIBILITY.md`), never a workspace-safety gap.
+
+### Telemetry
+
+Telemetry is disabled by default. Only an explicit
+`"telemetry": { "enabled": true }` in the user-global `delegate.json` enables
+it.
+
+Telemetry writes to a local SQLite database only; nothing is transmitted
+remotely. The destination resolves as `telemetry.dbPath`, then
+`DELEGATE_TELEMETRY_DB`, then `<agentDir>/delegate-usage.db`.
+
+Each dispatch pins the resolved destination when the batch is accepted. If a
+later dispatch disables telemetry or selects another destination before the
+first finishes, the unfinished span is dropped rather than reopening or
+writing the obsolete destination.
+
+Rows are written only for dispatches that reach a completed batch outcome;
+rejected calls and failed admission or preparation record nothing. For each
+such dispatch it records the batch start timestamp and wall duration,
+sync/async mode, task count, terminal call status, caller-visible task status,
+agent/model/thinking/tools/workspace selections, integration status, retry
+count, and numeric token/cost usage. Task records capture metadata and outcomes
+at batch finish; v2 leaves the legacy per-task duration field NULL. A task row
+whose worker could not be confirmed stopped is marked provisional and may later
+be superseded in the live ticket.
+
+It never stores prompt, system-prompt, output, or error text; cwd or session
+paths; caller task IDs; operation IDs; or parent transcript content. Legacy v1
+rows may retain older values; v2 does not rewrite or delete them.
+
+Telemetry is fail-open: an open, schema, write, or close failure logs and
+disables telemetry for that destination; delegation results never change.
+
+An existing v1 database migrates in place with old rows preserved. Disabled
+telemetry leaves existing files unopened and untouched. On intentional enable
+the database, WAL, and SHM files are owner-only.
 
 ### Session RPC
 

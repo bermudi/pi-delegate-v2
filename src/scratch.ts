@@ -109,7 +109,8 @@ async function copySourceOf(
       const resolved = await fs.promises.realpath(top);
       if (isWithin(resolved, physicalCwd)) root = resolved;
     }
-  } catch {
+  } catch (error) {
+    if (signal?.aborted) throw error;
     // Not a repository, or Git unusable: the cwd alone is the copy.
   }
   root ??= physicalCwd;
@@ -260,6 +261,9 @@ export async function prepareScratch(
         mode: 0o700,
       });
       await copyTree(root, copyRoot, signal);
+      if (signal?.aborted) {
+        throw new Error("aborted");
+      }
       const workerCwd = path.join(copyRoot, path.relative(root, cwd));
       await fs.promises.mkdir(workerCwd, { recursive: true });
       workers.set(taskIndex, { taskIndex, copyRoot, retained: false });

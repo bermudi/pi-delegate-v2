@@ -71,9 +71,26 @@ release notes and migration guidance; it must not arrive as rewrite drift.
   changes.
 - Aggregate usage on synchronous tool results where supported. Async delivered
   messages still cannot add usage to the parent total.
-- Fail-open telemetry that never stores prompt/output content, with stable
-  call/task outcome meaning and explicit migration or versioning for existing
-  databases.
+- Optional duplicate-safe dispatch identity (`operationId`, issue #16): an
+  additive contract — a keyed call with the same normalized request reuses
+  the original in-flight or settled result, and a keyed call with a changed
+  request conflicts. This is not content deduplication — unkeyed dispatches
+  always execute — and not an exactly-once crash/restart guarantee —
+  identity is host-lifetime only with bounded retention.
+- Opt-in, fail-open local telemetry that never stores prompt/output content,
+  with stable call/task outcome meaning and explicit migration or versioning
+  for existing databases. Telemetry stays disabled unless the user sets
+  `telemetry.enabled: true` in `delegate.json`; v2 records only dispatch and
+  outcome metadata for batches that reach a completed outcome — the batch
+  start timestamp and wall duration, sync/async mode, task count, terminal call
+  status, caller-visible task status, agent/model/thinking/tools/workspace
+  selections, integration status, retry count, and numeric token/cost usage —
+  plus caller-visible task outcomes with unconfirmed-quiescence rows marked
+  provisional — and never prompt, system-prompt, output or error text, cwd or
+  session paths, caller task IDs, operation IDs, or parent transcript content.
+  Existing databases migrate in place and existing rows are preserved; legacy
+  sensitive fields are not continued on new v2 rows, and v2 leaves the legacy
+  per-task duration column NULL.
 
 ## v2 deliberate breaking changes
 
@@ -86,6 +103,26 @@ release notes and migration guidance; it must not arrive as rewrite drift.
   `context: "fresh"` callers must also omit the field; their intended freshness
   is now unconditional relative to the parent. Project instructions, model
   inheritance, child-owned pooled sessions and explicit `resumeFrom` remain.
+
+- **Mixed-outcome async batches settle as `partial` (#6, user decision).**
+  A naturally settled batch where at least one task succeeded and at least
+  one did not now reports terminal `partial` instead of v1's implicit
+  `completed` — a partially failed batch must never look like a clean
+  success. `completed` means every task succeeded, `failed` means no task
+  succeeded and at least one failed, and `cancelled` means every task was
+  cancelled or the ticket was force-cancelled, which stays authoritative over
+  late outcomes.
+  Migration: treat `partial` as terminal like `completed`, and inspect the
+  per-task outcomes for the failures instead of trusting the headline.
+
+- **Unknown singular ticket RPCs are errors (#6, user decision).** Poll
+  with a ticket id, wait, cancel, pause, and resume on a missing id now
+  return a tool error naming the ticket instead of a successful "not
+  found" response — a lookup miss must never read as success. Roster
+  polling without a ticket id is unchanged and still succeeds with an
+  empty or populated list.
+  Migration: handle singular misses as tool errors; do not rely on
+  scanning response text for "not found".
 
 Departures from the preserve list above. Each must carry its own motivation
 and migration guidance; none may arrive as silent rewrite drift.

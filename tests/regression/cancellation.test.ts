@@ -726,14 +726,13 @@ test(
 );
 
 test(
-  "shutdown while an async dispatch is parked in workspace preparation holds the boundary until it quiesces",
+  "shutdown while an async dispatch is parked in workspace preparation aborts the prep and still returns its ticket",
   async () => {
-    // Same regression, parked one step later: inside prepareIsolated (call
-    // 2 — the repository probe), after the ticket exists and admission has
-    // granted. Shutdown force-cancels the ticket; once released,
-    // preparation finishes and the coordinator records cancelled outcomes
-    // for tasks whose workers never start. The barrier resolves only at
-    // that confirmed quiescence.
+    // Async preparation runs under the ticket's cancellation signal, so a
+    // shutdown force-cancel aborts the parked Git call instead of letting
+    // the copy/worktree run to completion. The dispatch still returns its
+    // ticket (cancelled, workers never started) and the shutdown barrier
+    // resolves without waiting for the release file.
     const repo = mkdtempSync(join(tmpdir(), "delegate-shutdown-prep-"));
     gitInitForShutdownRace(repo);
     const hold = installGitHold(2);
@@ -757,11 +756,14 @@ test(
           settled = true;
         });
 
-      await Promise.race([shutdown, Bun.sleep(200)]);
-      expect(settled).toBe(false);
-
-      writeFileSync(hold.releasePath, "");
-      const dispatched = await pending;
+      // The abort kills the parked Git shim: both the dispatch (Ticket,
+      // cancelled) and the shutdown settle without the release file.
+      const dispatched = await Promise.race([
+        pending,
+        Bun.sleep(15_000).then(() => {
+          throw new Error("parked async dispatch never aborted its prep");
+        }),
+      ]);
       expect(dispatched.text).toContain("Ticket");
       const ticket = ticketIdOf(dispatched.text);
       const poll = await callDelegate(session, {
@@ -774,7 +776,7 @@ test(
         shutdown,
         Bun.sleep(15_000).then(() => {
           throw new Error(
-            "shutdown never settled after the parked dispatch quiesced",
+            "shutdown never settled after the parked dispatch aborted",
           );
         }),
       ]);
