@@ -21,19 +21,34 @@ function onAbort(signal: AbortSignal): Promise<void> {
   );
 }
 
+/**
+ * Compose abort sources into one signal. The returned `dispose` removes the
+ * listeners this call attached to the (possibly long-lived) source signals —
+ * call it only once the task is fully done (every execution truly settled),
+ * never earlier: until then the sources must keep propagating aborts.
+ */
 function combineSignals(
   ...signals: (AbortSignal | undefined)[]
-): AbortSignal {
+): { signal: AbortSignal; dispose(): void } {
   const controller = new AbortController();
+  const disposers: (() => void)[] = [];
   for (const signal of signals) {
     if (!signal) continue;
     if (signal.aborted) {
       controller.abort();
       break;
     }
-    signal.addEventListener("abort", () => controller.abort(), { once: true });
+    const onAbort = () => controller.abort();
+    signal.addEventListener("abort", onAbort, { once: true });
+    disposers.push(() => signal.removeEventListener("abort", onAbort));
   }
-  return controller.signal;
+  return {
+    signal: controller.signal,
+    dispose: () => {
+      for (const dispose of disposers) dispose();
+      disposers.length = 0;
+    },
+  };
 }
 
 export interface DispatchOutcome {
@@ -44,7 +59,8 @@ export interface DispatchOutcome {
 /**
  * Schedules tasks for one call or ticket: pause gates, same-call writer
  * serialization, the global concurrency semaphore, then execution. Task
- * outcomes land index-aligned; lifecycle state lives in the ticket, not here.
+ * outcomes land index-aligned; ticket lifecycle and its live machinery live
+ * in the ticket store, not here.
  */
 export class DispatchCoordinator {
   private readonly semaphore = new Semaphore(3);
@@ -229,7 +245,7 @@ export class DispatchCoordinator {
         if (outcome?.quarantined) retained.add(outcome.index);
       }
       grant.release(retained);
-      options.ticket?.finishedGate.resolve();
+      if (options.ticket) this.tickets.finishBatch(options.ticket);
       // Only now is the batch fully quiesced for a shutdown barrier:
       // finalization and every admission reservation release have run.
       bodySettled.resolve();
@@ -261,10 +277,25 @@ export class DispatchCoordinator {
     fullyQuiesced: Map<number, Deferred>,
   ): Promise<void> {
     const ticket = options.ticket;
-    const signal = combineSignals(
+    // The composed signal propagates the (long-lived) dispatch and ticket
+    // cancellation signals to this task's controls. Its listeners on those
+    // sources are removed once the task is fully done: every created
+    // execution has truly settled AND the run body has ended. Until both
+    // hold, removal could silence a still-live worker's abort propagation;
+    // after both, nothing listens to the composed signal anymore.
+    const combined = combineSignals(
       options.signal,
-      ticket?.cancellation.signal,
+      ticket ? this.tickets.cancellationSignal(ticket) : undefined,
     );
+    const signal = combined.signal;
+    let liveExecutions = 0;
+    let runEnded = false;
+    let disposed = false;
+    const disposeSignal = () => {
+      if (disposed) return;
+      disposed = true;
+      combined.dispose();
+    };
     const confirmed = quiescence.get(task.index)!;
     const fully = fullyQuiesced.get(task.index)!;
     // True once a worker session may exist; below that point a failure is
@@ -301,8 +332,12 @@ export class DispatchCoordinator {
       handle: ExecutionHandle,
       late: TaskOutcome | undefined,
     ) => {
-      if (ticket?.executions.get(task.index) === handle) {
-        ticket.executions.delete(task.index);
+      // The worker's true settlement: it can no longer observe the composed
+      // signal, so this attempt's propagation listeners become droppable.
+      liveExecutions -= 1;
+      if (liveExecutions === 0 && runEnded) disposeSignal();
+      if (ticket) {
+        this.tickets.dropExecution(ticket, task.index, handle);
       }
       if (late === undefined) return;
       workerTruthRecorded = true;
@@ -404,7 +439,10 @@ export class DispatchCoordinator {
               loaders,
               (handle) => {
                 workerCreated = true;
-                ticket?.executions.set(task.index, handle);
+                liveExecutions += 1;
+                if (ticket) {
+                  this.tickets.registerExecution(ticket, task.index, handle);
+                }
               },
               onWorkerSettled,
             );
@@ -428,6 +466,11 @@ export class DispatchCoordinator {
         retries: 0,
         quarantined: workerCreated || undefined,
       });
+    } finally {
+      // The run body is over; only executions still winding down (settled()
+      // pending) keep the propagation listeners alive past this point.
+      runEnded = true;
+      if (liveExecutions === 0) disposeSignal();
     }
   }
 
@@ -437,9 +480,9 @@ export class DispatchCoordinator {
   ): Promise<void> {
     return (async () => {
       while (ticket.paused && ticket.status === "running" && !signal.aborted) {
-        const gate = ticket.pauseGate;
-        if (!gate) break;
-        await Promise.race([gate.promise, onAbort(signal)]);
+        const gate = this.tickets.pauseGatePromise(ticket);
+        if (gate === undefined) break;
+        await Promise.race([gate, onAbort(signal)]);
       }
     })();
   }

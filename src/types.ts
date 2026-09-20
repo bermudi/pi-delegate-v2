@@ -80,49 +80,38 @@ export type TicketStatus =
   | "failed"
   | "cancelled";
 
-/** Guarded ticket record. `status` only moves running → terminal, once. */
+/**
+ * Caller-visible ticket record: identity, lifecycle status, and per-task
+ * results — the persistable-shaped half. The `TicketStore` is its sole
+ * writer: every property is readonly, so any out-of-store write is a compile
+ * error, and all live machinery (cancellation, pause/settled/finished gates,
+ * waiters, executions) lives in a store-private runtime half reached only
+ * through store methods. Reads from anywhere are fine. `status` only moves
+ * running → terminal, once.
+ */
 export interface Ticket {
   readonly id: string;
-  status: TicketStatus;
+  readonly status: TicketStatus;
   /** Orthogonal to lifecycle: a paused ticket remains `running`. */
-  paused: boolean;
-  pauseGate: Deferred | undefined;
+  readonly paused: boolean;
   readonly totalTasks: number;
   /** Index-aligned per-task outcomes; entries appear as tasks finish. */
-  readonly outcomes: (TaskOutcome | undefined)[];
+  readonly outcomes: readonly (TaskOutcome | undefined)[];
   readonly tasks: readonly ResolvedTask[];
   readonly createdAt: number;
-  /** Aborts in-flight executions when force-cancelled. */
-  readonly cancellation: AbortController;
-  /**
-   * When true, recorded outcomes never settle the ticket — an explicit
-   * `releaseSettlement` is required after post-run reconciliation lands, so
-   * the terminal view includes integration results.
-   */
-  holdSettlement: boolean;
   /**
    * Advisory notices attached at dispatch (e.g. same-call shared writers
    * serializing); rendered at the top of ticket views.
    */
-  notices: string[];
-  /** Resolves when the ticket reaches a terminal status. */
-  readonly settledGate: Deferred;
-  /**
-   * Resolves when every task has a caller-visible outcome. Quarantined
-   * workers may still be winding down — this is caller settlement, not
-   * confirmed quiescence.
-   */
-  readonly finishedGate: Deferred;
-  readonly waiters: Set<() => void>;
-  /** Live executions by task index, for cooperative abort. */
-  readonly executions: Map<number, ExecutionHandle>;
+  readonly notices: readonly string[];
   /**
    * Session-tree origin at dispatch: the leaf id (null for the root) and the
    * navigation epoch. Delivery diagnostics reconstruct same-leaf vs moved
-   * from these; set by the dispatcher right after creation.
+   * from these; recorded by the dispatcher right after creation via the
+   * store.
    */
-  originLeafId?: string | null;
-  originEpoch?: number;
+  readonly originLeafId?: string | null;
+  readonly originEpoch?: number;
 }
 
 export interface ExecutionHandle {

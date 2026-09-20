@@ -425,11 +425,11 @@ export default function delegateExtension(api: ExtensionAPI): void {
   /**
    * The one dispatch pipeline, from barrier tracking to the coordinator
    * handoff, for sync and async batches alike — the optional ticket is the
-   * only mode input, and the batch runs on `signal ??
-   * ticket.cancellation.signal`. Mode-specific edges stay with the caller:
-   * ticket creation (via `createTicket`, invoked at the one seam between
-   * task validation and admission), origin capture, delivery arming, and
-   * response formatting all live outside.
+   * only mode input, and the batch runs on `signal ?? the ticket's
+   * cancellation signal` (reached through the store). Mode-specific edges
+   * stay with the caller: ticket creation (via `createTicket`, invoked at
+   * the one seam between task validation and admission), origin capture,
+   * delivery arming, and response formatting all live outside.
    *
    * Barrier ownership (INVARIANTS "Ticket state"): the pipeline owns the
    * barrier's resolve until the coordinator accepts the batch; the
@@ -513,10 +513,11 @@ export default function delegateExtension(api: ExtensionAPI): void {
         owner = `call-${callSeq}`;
         relabel(owner);
       }
-      const dispatchSignal = signal ?? ticket?.cancellation.signal;
+      const dispatchSignal = signal ??
+        (ticket ? tickets.cancellationSignal(ticket) : undefined);
       const grant = admission.admit(tasks, owner);
       const notices = serializedNotices(tasks, grant.serialized);
-      if (ticket) ticket.notices = [...notices];
+      if (ticket) tickets.setNotices(ticket, notices);
       batch = { tasks, env, config, grant, dispatchSignal, notices };
       onNotices?.(notices);
       const telemetrySpan = telemetry.beginDispatch(
@@ -793,8 +794,8 @@ export default function delegateExtension(api: ExtensionAPI): void {
           };
           const armDelivery = (ticket: Ticket): void => {
             void Promise.all([
-              ticket.settledGate.promise,
-              ticket.finishedGate.promise,
+              tickets.settledPromise(ticket),
+              tickets.finishedPromise(ticket),
             ])
               .then(() => deliver(ticket))
               .catch((error: unknown) => {
@@ -844,8 +845,10 @@ export default function delegateExtension(api: ExtensionAPI): void {
                     // since. Recorded on the ticket so delivery
                     // diagnostics can be reconstructed from the ticket
                     // alone.
-                    created.originLeafId = ctx.sessionManager.getLeafId();
-                    created.originEpoch = navigationEpoch;
+                    tickets.recordOrigin(created, {
+                      leafId: ctx.sessionManager.getLeafId(),
+                      epoch: navigationEpoch,
+                    });
                     return created;
                   },
           });
@@ -915,7 +918,10 @@ export default function delegateExtension(api: ExtensionAPI): void {
           call.operationId,
           dispatchFingerprint({ async: call.async, tasks: call.tasks }),
           executeDispatch,
-          () => operationTicket?.finishedGate.promise ?? Promise.resolve(),
+          () =>
+            operationTicket
+              ? tickets.finishedPromise(operationTicket)
+              : Promise.resolve(),
         );
       },
     }),

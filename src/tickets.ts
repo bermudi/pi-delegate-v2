@@ -1,7 +1,49 @@
 import { integrationLines } from "./format.ts";
-import type { TaskOutcome, Ticket, TicketStatus } from "./types.ts";
+import type {
+  ExecutionHandle,
+  TaskOutcome,
+  Ticket,
+  TicketStatus,
+} from "./types.ts";
 import { Deferred } from "./types.ts";
 import type { ResolvedTask } from "./types.ts";
+
+/** The store-private, writable form of the caller-visible record. */
+type Writable<T> = { -readonly [K in keyof T]: T[K] };
+
+/**
+ * Live machinery for one ticket: cancellation, settlement gates, waiters,
+ * and in-flight executions. Owned by the store and never exposed — callers
+ * reach it only through the store's methods, so the caller-visible `Ticket`
+ * stays free of it.
+ */
+interface TicketRuntime {
+  /** Aborts in-flight executions when force-cancelled. */
+  readonly cancellation: AbortController;
+  /**
+   * When true, recorded outcomes never settle the ticket — an explicit
+   * `releaseSettlement` is required after post-run reconciliation lands, so
+   * the terminal view includes integration results.
+   */
+  holdSettlement: boolean;
+  pauseGate: Deferred | undefined;
+  /** Resolves when the ticket reaches a terminal status. */
+  readonly settledGate: Deferred;
+  /**
+   * Resolves when every task has a caller-visible outcome. Quarantined
+   * workers may still be winding down — this is caller settlement, not
+   * confirmed quiescence.
+   */
+  readonly finishedGate: Deferred;
+  readonly waiters: Set<() => void>;
+  /** Live executions by task index, for cooperative abort. */
+  readonly executions: Map<number, ExecutionHandle>;
+}
+
+interface TicketEntry {
+  readonly record: Writable<Ticket>;
+  readonly rt: TicketRuntime;
+}
 
 function isTerminal(status: TicketStatus): boolean {
   return status !== "running";
@@ -55,13 +97,15 @@ function rosterView(tickets: readonly Ticket[]): string {
 }
 
 /**
- * The ticket registry and lifecycle state machine. Ticket status moves
- * running → terminal exactly once; pause is orthogonal. Worker completion
- * arriving after a terminal transition is recorded for visibility but can
- * never change the status.
+ * The ticket registry and lifecycle state machine, and the sole writer of
+ * both ticket halves: the caller-visible record (returned as `Ticket`) and
+ * the store-private runtime half reached through the methods below. Ticket
+ * status moves running → terminal exactly once; pause is orthogonal. Worker
+ * completion arriving after a terminal transition is recorded for visibility
+ * but can never change the status.
  */
 export class TicketStore {
-  private readonly tickets = new Map<string, Ticket>();
+  private readonly tickets = new Map<string, TicketEntry>();
   private seq = 0;
 
   private newTicketId(): string {
@@ -69,35 +113,46 @@ export class TicketStore {
     return `t-${this.seq.toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   }
 
+  /** Live machinery for `ticket`; entries share the record's lifetime. */
+  private entry(ticket: Ticket): TicketEntry {
+    const entry = this.tickets.get(ticket.id);
+    if (entry === undefined) {
+      throw new Error(`internal: unknown ticket '${ticket.id}'`);
+    }
+    return entry;
+  }
+
   create(
     tasks: readonly ResolvedTask[],
     options: { readonly holdSettlement: boolean },
   ): Ticket {
-    const ticket: Ticket = {
+    const record: Writable<Ticket> = {
       id: this.newTicketId(),
       status: "running",
       paused: false,
-      pauseGate: undefined,
       totalTasks: tasks.length,
       outcomes: new Array<TaskOutcome | undefined>(tasks.length).fill(undefined),
       tasks,
       createdAt: Date.now(),
-      cancellation: new AbortController(),
-      // Isolated batches settle only after reconciliation has annotated the
-      // outcomes — a terminal ticket must already show applied/conflict state.
-      holdSettlement: options.holdSettlement,
       notices: [],
+    };
+    // Isolated batches settle only after reconciliation has annotated the
+    // outcomes — a terminal ticket must already show applied/conflict state.
+    const rt: TicketRuntime = {
+      cancellation: new AbortController(),
+      holdSettlement: options.holdSettlement,
+      pauseGate: undefined,
       settledGate: new Deferred(),
       finishedGate: new Deferred(),
       waiters: new Set(),
       executions: new Map(),
     };
-    this.tickets.set(ticket.id, ticket);
-    return ticket;
+    this.tickets.set(record.id, { record, rt });
+    return record;
   }
 
   get(id: string): Ticket | undefined {
-    return this.tickets.get(id);
+    return this.tickets.get(id)?.record;
   }
 
   /** Drop a ticket that never started (e.g. admission failed after create). */
@@ -106,25 +161,53 @@ export class TicketStore {
   }
 
   list(): Ticket[] {
-    return [...this.tickets.values()];
+    return [...this.tickets.values()].map((entry) => entry.record);
   }
 
   /** Record a task outcome. Never changes a terminal ticket's status. */
   recordOutcome(ticket: Ticket, outcome: TaskOutcome): void {
-    ticket.outcomes[outcome.index] = outcome;
+    // Sole-writer cast: the exposed view freezes the array; the store owns
+    // the one legal write path.
+    const outcomes = this.entry(ticket).record
+      .outcomes as (TaskOutcome | undefined)[];
+    outcomes[outcome.index] = outcome;
     this.maybeSettle(ticket);
   }
 
+  /**
+   * Replace the dispatch notices (e.g. same-call shared writers
+   * serializing). The sole write path for the ticket's notices.
+   */
+  setNotices(ticket: Ticket, notices: readonly string[]): void {
+    this.entry(ticket).record.notices = [...notices];
+  }
+
+  /**
+   * Record the session-tree origin at dispatch: the leaf id (null for the
+   * root) and the navigation epoch, captured by the dispatcher right after
+   * creation so delivery diagnostics can be reconstructed from the ticket
+   * alone. The sole write path for the origin fields.
+   */
+  recordOrigin(
+    ticket: Ticket,
+    origin: { readonly leafId: string | null; readonly epoch: number },
+  ): void {
+    const record = this.entry(ticket).record;
+    record.originLeafId = origin.leafId;
+    record.originEpoch = origin.epoch;
+  }
+
   private maybeSettle(ticket: Ticket): void {
-    if (ticket.status !== "running" || ticket.holdSettlement) return;
-    if (!ticket.outcomes.every((recorded) => recorded !== undefined)) return;
+    const { record, rt } = this.entry(ticket);
+    if (record.status !== "running" || rt.holdSettlement) return;
+    if (!record.outcomes.every((recorded) => recorded !== undefined)) return;
     this.settle(
       ticket,
-      ticket.outcomes.every((o) => o!.status === "ok")
+      record.outcomes.every((o) => o!.status === "ok")
         ? "completed"
-        : ticket.outcomes.every((o) => o!.status === "cancelled")
+        : record.outcomes.every((o) => o!.status === "cancelled")
           ? "cancelled"
-          : ticket.outcomes.some((o) => o!.status === "ok")
+          : record.outcomes.some((o) => o!.status === "ok")
             ? "partial"
             : "failed",
     );
@@ -136,46 +219,49 @@ export class TicketStore {
    * A ticket already settled by cancellation is unaffected.
    */
   releaseSettlement(ticket: Ticket): void {
-    ticket.holdSettlement = false;
+    this.entry(ticket).rt.holdSettlement = false;
     this.maybeSettle(ticket);
   }
 
   /** The single owner of the terminal transition; idempotent. */
   settle(ticket: Ticket, status: TicketStatus): boolean {
-    if (isTerminal(ticket.status) || status === "running") return false;
-    ticket.status = status;
-    ticket.paused = false;
-    ticket.pauseGate?.resolve();
-    ticket.settledGate.resolve();
-    for (const notify of [...ticket.waiters]) notify();
+    const { record, rt } = this.entry(ticket);
+    if (isTerminal(record.status) || status === "running") return false;
+    record.status = status;
+    record.paused = false;
+    rt.pauseGate?.resolve();
+    rt.settledGate.resolve();
+    for (const notify of [...rt.waiters]) notify();
     return true;
   }
 
   pause(ticket: Ticket): string {
-    if (isTerminal(ticket.status)) {
+    const { record, rt } = this.entry(ticket);
+    if (isTerminal(record.status)) {
       throw new Error(
-        `Ticket '${ticket.id}' is already ${ticket.status}; it cannot be paused.`,
+        `Ticket '${ticket.id}' is already ${record.status}; it cannot be paused.`,
       );
     }
-    if (!ticket.paused) {
-      ticket.paused = true;
-      ticket.pauseGate = new Deferred();
+    if (!record.paused) {
+      record.paused = true;
+      rt.pauseGate = new Deferred();
     }
     return `Ticket "${ticket.id}" paused. Queued tasks and upcoming model turns are held; in-flight work continues.`;
   }
 
   resume(ticket: Ticket): string {
-    if (isTerminal(ticket.status)) {
+    const { record, rt } = this.entry(ticket);
+    if (isTerminal(record.status)) {
       throw new Error(
-        `Ticket '${ticket.id}' is already ${ticket.status}; it cannot be resumed.`,
+        `Ticket '${ticket.id}' is already ${record.status}; it cannot be resumed.`,
       );
     }
-    if (!ticket.paused) {
+    if (!record.paused) {
       return `Ticket "${ticket.id}" is already running.`;
     }
-    ticket.paused = false;
-    ticket.pauseGate?.resolve();
-    ticket.pauseGate = undefined;
+    record.paused = false;
+    rt.pauseGate?.resolve();
+    rt.pauseGate = undefined;
     return `Ticket "${ticket.id}" resumed.`;
   }
 
@@ -185,20 +271,21 @@ export class TicketStore {
    * cooperatively in the background. Their late outcomes stay visible.
    */
   cancel(ticket: Ticket, force: boolean): string {
-    if (isTerminal(ticket.status)) {
-      return `Ticket "${ticket.id}" is already ${ticket.status}.`;
+    const { record, rt } = this.entry(ticket);
+    if (isTerminal(record.status)) {
+      return `Ticket "${ticket.id}" is already ${record.status}.`;
     }
     if (!force) {
-      const inFlight = ticket.executions.size;
+      const inFlight = rt.executions.size;
       return (
-        `Ticket "${ticket.id}" is ${statusWord(ticket)} with ${inFlight} task(s) in flight. ` +
+        `Ticket "${ticket.id}" is ${statusWord(record)} with ${inFlight} task(s) in flight. ` +
         `Cancellation is cooperative: in-flight work is asked to stop and queued tasks are dropped; ` +
         `completed writes and commands are not rolled back. Re-run with force: true to cancel.`
       );
     }
-    ticket.cancellation.abort();
+    rt.cancellation.abort();
     this.settle(ticket, "cancelled");
-    for (const handle of [...ticket.executions.values()]) {
+    for (const handle of [...rt.executions.values()]) {
       void handle.abort("cancelled").catch((error) => {
         console.error(
           `[delegate] aborting task on ticket ${ticket.id} failed: ${error instanceof Error ? error.message : String(error)}`,
@@ -221,15 +308,16 @@ export class TicketStore {
     timeoutMs: number | undefined,
     signal: AbortSignal | undefined,
   ): Promise<{ timedOut: boolean; aborted: boolean }> {
-    if (isTerminal(ticket.status)) return { timedOut: false, aborted: false };
+    const { record, rt } = this.entry(ticket);
+    if (isTerminal(record.status)) return { timedOut: false, aborted: false };
     if (signal?.aborted === true) return { timedOut: false, aborted: true };
     let notify!: () => void;
     const onSettled = new Promise<void>((resolve) => {
       notify = () => {
-        ticket.waiters.delete(notify);
+        rt.waiters.delete(notify);
         resolve();
       };
-      ticket.waiters.add(notify);
+      rt.waiters.add(notify);
     });
     const races: Promise<unknown>[] = [onSettled];
     let timeout: ReturnType<typeof setTimeout> | undefined;
@@ -257,13 +345,76 @@ export class TicketStore {
       if (onAbort !== undefined) {
         signal?.removeEventListener("abort", onAbort);
       }
-      ticket.waiters.delete(notify);
+      rt.waiters.delete(notify);
     }
-    if (isTerminal(ticket.status)) return { timedOut: false, aborted: false };
+    if (isTerminal(record.status)) return { timedOut: false, aborted: false };
     if (outcome === "aborted" || signal?.aborted) {
       return { timedOut: false, aborted: true };
     }
     return { timedOut: true, aborted: false };
+  }
+
+  /**
+   * The ticket's cancellation signal: aborts when the ticket is
+   * force-cancelled (including shutdown). Long-lived — it outlives any one
+   * task — so listeners attached to it must be removed by their owner once
+   * the task is fully done.
+   */
+  cancellationSignal(ticket: Ticket): AbortSignal {
+    return this.entry(ticket).rt.cancellation.signal;
+  }
+
+  /**
+   * The active pause gate's promise while the ticket is paused, else
+   * undefined. Schedulers park on it and race it against their own abort;
+   * only the store resolves or replaces it (pause/resume/settle).
+   */
+  pauseGatePromise(ticket: Ticket): Promise<void> | undefined {
+    return this.entry(ticket).rt.pauseGate?.promise;
+  }
+
+  /** Register a live execution for a task, for cooperative abort. */
+  registerExecution(
+    ticket: Ticket,
+    taskIndex: number,
+    handle: ExecutionHandle,
+  ): void {
+    this.entry(ticket).rt.executions.set(taskIndex, handle);
+  }
+
+  /**
+   * Drop a task's live execution at its true settlement — but only if it is
+   * still the registered handle: a replacement (retry attempt) registered in
+   * the meantime stays live.
+   */
+  dropExecution(
+    ticket: Ticket,
+    taskIndex: number,
+    handle: ExecutionHandle,
+  ): void {
+    const executions = this.entry(ticket).rt.executions;
+    if (executions.get(taskIndex) === handle) {
+      executions.delete(taskIndex);
+    }
+  }
+
+  /**
+   * Resolve the finished gate: every task has a caller-visible outcome.
+   * Quarantined workers may still be winding down — this is caller
+   * settlement, not confirmed quiescence. Idempotent.
+   */
+  finishBatch(ticket: Ticket): void {
+    this.entry(ticket).rt.finishedGate.resolve();
+  }
+
+  /** Resolves when the ticket reaches a terminal status. */
+  settledPromise(ticket: Ticket): Promise<void> {
+    return this.entry(ticket).rt.settledGate.promise;
+  }
+
+  /** Resolves when every task has a caller-visible outcome. */
+  finishedPromise(ticket: Ticket): Promise<void> {
+    return this.entry(ticket).rt.finishedGate.promise;
   }
 }
 
