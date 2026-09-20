@@ -113,22 +113,19 @@ export function resolveAgentDir(ctx: ExtensionContext): AgentDirResolution {
   return { dir: ctx.cwd, source: "cwd" };
 }
 
-/** The resolved agent directory (see `resolveAgentDir` for provenance). */
-export function agentDirOf(ctx: ExtensionContext): string {
-  return resolveAgentDir(ctx).dir;
-}
-
-export function configPathOf(ctx: ExtensionContext): string {
-  return join(agentDirOf(ctx), CONFIG_FILE);
+/** Path of the user-global delegate.json under a resolved agent directory. */
+export function configPathOf(agentDir: string): string {
+  return join(agentDir, CONFIG_FILE);
 }
 
 /**
- * Load `<agentDir>/delegate.json`. A missing file yields defaults; malformed
- * JSON, a non-positive `maxConcurrent`, or a negative `stallTimeoutMs` fails
- * loudly — a half-applied limit is worse than an error.
+ * Load `delegate.json` from a resolved agent directory. A missing file
+ * yields defaults; malformed JSON, a non-positive `maxConcurrent`, or a
+ * negative `stallTimeoutMs` fails loudly — a half-applied limit is worse
+ * than an error.
  */
-export function loadDelegateConfig(ctx: ExtensionContext): DelegateConfig {
-  const path = configPathOf(ctx);
+export function loadDelegateConfig(agentDir: string): DelegateConfig {
+  const path = configPathOf(agentDir);
   if (!existsSync(path)) return DEFAULT_CONFIG;
   let raw: unknown;
   try {

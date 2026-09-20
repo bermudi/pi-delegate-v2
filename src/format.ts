@@ -12,7 +12,7 @@ export function serializedNotices(
 ): string[] {
   return groups.map((group) => {
     const names = group.tasks
-      .map((index) => `'${tasks[index]?.id ?? `task-${index + 1}`}'`)
+      .map((index) => `'${tasks[index]!.id}'`)
       .join(", ");
     const roots = group.roots.join(", ");
     return (

@@ -1,10 +1,10 @@
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, relative, resolve } from "node:path";
-import { execFileSync } from "node:child_process";
 import {
   canonicalPath,
   DELEGATE_TREES,
+  exec,
   gitProbeEnv,
   isWithin,
 } from "./fsx.ts";
@@ -24,7 +24,7 @@ import {
   getBuiltinProfile,
   isWriter,
 } from "./profiles.ts";
-import { agentDirOf, configPathOf, configuredModelFor, type DelegateConfig } from "./config.ts";
+import { configPathOf, configuredModelFor, type DelegateConfig } from "./config.ts";
 import type { TaskInput } from "./validation.ts";
 import type { ResolvedTask, Workspace } from "./types.ts";
 
@@ -60,19 +60,37 @@ export interface HostEnvironment {
   readonly getActiveTools: () => readonly string[];
 }
 
+/**
+ * Assemble the host environment from an already-resolved agent directory:
+ * the dispatch pipeline resolves the agent dir once (its fallback warning
+ * needs the provenance) and threads it here, so no path re-derives it.
+ */
 export function hostEnvironment(
   ctx: ExtensionContext,
+  agentDir: string,
   getActiveTools: () => readonly string[],
 ): HostEnvironment {
   return {
     ctx,
     modelRuntime: parentModelRuntime(ctx),
-    agentDir: agentDirOf(ctx),
+    agentDir,
     getActiveTools,
   };
 }
 
-const GIT_TIMEOUT_MS = 5_000;
+// Probes fail fast and produce tiny output; the shared exec takes explicit
+// limits so the per-use divergence from snapshot-sized traffic stays visible.
+const PROBE_EXEC = { timeoutMs: 5_000, maxBuffer: 4 * 1024 * 1024 } as const;
+
+/** Probe failure carrying Git's stderr for fail-closed classification. */
+class GitProbeError extends Error {
+  constructor(
+    message: string,
+    readonly stderr: string,
+  ) {
+    super(message);
+  }
+}
 
 /**
  * The scopes a task's writes can reach. Inside a Git worktree the top-level
@@ -86,23 +104,19 @@ const GIT_TIMEOUT_MS = 5_000;
  * with all `GIT_*` inherited redirects scrubbed so a polluted environment
  * cannot shrink the discovered scope.
  */
-export function writeRootsOf(cwd: string): readonly string[] {
+export async function writeRootsOf(cwd: string): Promise<readonly string[]> {
   const physicalCwd = canonicalPath(cwd);
   let top: string;
   try {
-    top = execFileSync(
-      "git",
-      ["-C", physicalCwd, "rev-parse", "--show-toplevel"],
-      {
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "pipe"],
-        timeout: GIT_TIMEOUT_MS,
+    top = (
+      await exec("git", ["-C", physicalCwd, "rev-parse", "--show-toplevel"], {
+        ...PROBE_EXEC,
         env: gitProbeEnv(),
-      },
-    ).trim();
+        errorClass: GitProbeError,
+      })
+    ).stdout.trim();
   } catch (error) {
-    const stderr =
-      (error as { stderr?: Buffer | string }).stderr?.toString().trim() ?? "";
+    const stderr = error instanceof GitProbeError ? error.stderr.trim() : "";
     if (/not a git repository/i.test(stderr)) {
       return [physicalCwd];
     }
@@ -177,11 +191,11 @@ const RESUME_DEFAULT_PROMPT =
  * parent's model, unconditionally. The model registry knowing a reference
  * is not authorization — only the user's configuration is.
  */
-export function resolveTasks(
+export async function resolveTasks(
   tasks: readonly TaskInput[],
   env: HostEnvironment,
   config: DelegateConfig,
-): ResolvedTask[] {
+): Promise<ResolvedTask[]> {
   let parentActive: string[] = [];
   if (tasks.some((task) => task.agent === "default" && task.tools === undefined)) {
     try {
@@ -198,7 +212,8 @@ export function resolveTasks(
     }
   }
 
-  return tasks.map((task, index) => {
+  const resolved: ResolvedTask[] = [];
+  for (const [index, task] of tasks.entries()) {
     const where = `tasks[${index}]${task.id ? ` (id '${task.id}')` : ""}`;
     const profile = task.agent ? getBuiltinProfile(task.agent) : undefined;
     if (task.agent && !profile) {
@@ -229,10 +244,10 @@ export function resolveTasks(
     if (!model) {
       throw new Error(
         modelSpec
-          ? `${where}: models.${agentName} is configured as '${modelSpec}' in ${configPathOf(env.ctx)} but is not available in this session's model registry.`
+          ? `${where}: models.${agentName} is configured as '${modelSpec}' in ${configPathOf(env.agentDir)} but is not available in this session's model registry.`
           : agentName === "default"
             ? `${where}: no parent model is selected — inline/default tasks inherit it and are not configurable otherwise.`
-            : `${where}: no model is configured for agent '${agentName}' and no parent model is selected; add models.${agentName} under "models" in ${configPathOf(env.ctx)}.`,
+            : `${where}: no model is configured for agent '${agentName}' and no parent model is selected; add models.${agentName} under "models" in ${configPathOf(env.agentDir)}.`,
       );
     }
 
@@ -252,7 +267,7 @@ export function resolveTasks(
 
     const prompt = task.prompt ?? (task.resumeFrom ? RESUME_DEFAULT_PROMPT : "");
 
-    return {
+    resolved.push({
       index,
       id: task.id ?? `task-${index + 1}`,
       prompt,
@@ -266,9 +281,10 @@ export function resolveTasks(
       resumeFrom: task.resumeFrom,
       deadlineMs: task.deadlineMs,
       workspace,
-      writeRoots: reserves ? writeRootsOf(cwd) : undefined,
-    } satisfies ResolvedTask;
-  });
+      writeRoots: reserves ? await writeRootsOf(cwd) : undefined,
+    } satisfies ResolvedTask);
+  }
+  return resolved;
 }
 
 /**

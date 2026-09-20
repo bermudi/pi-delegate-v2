@@ -1,7 +1,11 @@
 import type { DefaultResourceLoader } from "@earendil-works/pi-coding-agent";
 import type { Usage } from "@earendil-works/pi-ai";
 import type { AdmissionGrant } from "./admission.ts";
-import { modelConcurrencyLimit, type DelegateConfig } from "./config.ts";
+import {
+  DEFAULT_CONFIG,
+  modelConcurrencyLimit,
+  type DelegateConfig,
+} from "./config.ts";
 import { runTask, type RunControls } from "./execution.ts";
 import type { HostEnvironment } from "./host.ts";
 import type { SessionPool } from "./sessions.ts";
@@ -63,7 +67,7 @@ export interface DispatchOutcome {
  * in the ticket store, not here.
  */
 export class DispatchCoordinator {
-  private readonly semaphore = new Semaphore(3);
+  private readonly semaphore = new Semaphore(DEFAULT_CONFIG.maxConcurrent);
   private readonly modelSemaphores = new Map<string, Semaphore>();
 
   constructor(private readonly tickets: TicketStore) {}
