@@ -9,19 +9,34 @@ import {
   defineTool,
   type ExtensionAPI,
 } from "@earendil-works/pi-coding-agent";
-import { AdmissionController, type AdmissionGrant } from "./src/admission.ts";
-import { loadDelegateConfig, resolveAgentDir } from "./src/config.ts";
-import { DispatchCoordinator } from "./src/coordinator.ts";
+import { AdmissionController } from "./src/admission.ts";
+import {
+  loadDelegateConfig,
+  resolveAgentDir,
+  type DelegateConfig,
+} from "./src/config.ts";
+import {
+  DispatchCoordinator,
+  type DispatchOutcome,
+} from "./src/coordinator.ts";
 import {
   formatDispatchResult,
   serializedNotices,
 } from "./src/format.ts";
-import { hostEnvironment, resolveTasks } from "./src/host.ts";
-import { prepareIsolated, type IsolatedPlan } from "./src/isolated.ts";
+import {
+  hostEnvironment,
+  resolveTasks,
+  type HostEnvironment,
+} from "./src/host.ts";
+import { prepareIsolated } from "./src/isolated.ts";
 import { prepareScratch, type ScratchPlan } from "./src/scratch.ts";
 import { handleSessionRpc, SessionPool } from "./src/sessions.ts";
 import { handleTicketRpc, TicketStore, ticketView } from "./src/tickets.ts";
-import { Deferred } from "./src/types.ts";
+import {
+  Deferred,
+  type ResolvedTask,
+  type Ticket,
+} from "./src/types.ts";
 import { validateCall } from "./src/validation.ts";
 
 function stringEnum<const Values extends readonly string[]>(
@@ -368,6 +383,88 @@ export default function delegateExtension(api: ExtensionAPI): void {
     };
   };
 
+  const startDispatch = async (options: {
+    tasks: readonly ResolvedTask[];
+    env: HostEnvironment;
+    config: DelegateConfig;
+    owner: string;
+    signal?: AbortSignal;
+    ticket?: Ticket;
+    quiescence: Deferred;
+    onNotices?: (notices: readonly string[]) => void;
+  }): Promise<{
+    completion: Promise<DispatchOutcome>;
+    notices: readonly string[];
+  }> => {
+    const { tasks, env, config, owner, signal, ticket, quiescence } = options;
+    const dispatchSignal = signal ?? ticket?.cancellation.signal;
+    const grant = admission.admit(tasks, owner);
+    const notices = serializedNotices(tasks, grant.serialized);
+    if (ticket) ticket.notices = [...notices];
+    options.onNotices?.(notices);
+    let scratchPlan: ScratchPlan | undefined;
+    try {
+      // Scratch before isolated: file copies are cheaper than Git
+      // setup, and a later preparation failure can dispose() them.
+      scratchPlan = await prepareScratch(
+        tasks,
+        join(env.agentDir, "delegate-scratch"),
+        signal,
+      );
+      const plan = await prepareIsolated(
+        scratchPlan?.tasks ?? tasks,
+        join(env.agentDir, "delegate-isolated"),
+        signal,
+      );
+      return {
+        notices,
+        completion: coordinator.run(
+          plan?.tasks ?? scratchPlan?.tasks ?? tasks,
+          {
+            env,
+            config,
+            grant,
+            sessions,
+            signal,
+            ticket,
+            quiescence,
+            finalize:
+              plan || scratchPlan
+                ? async (outcomes) => {
+                    if (plan) {
+                      await plan.reconcile(outcomes, {
+                        shouldApplySource: () => !dispatchSignal?.aborted,
+                        retainedReason: ticket
+                          ? "The ticket was cancelled before source application."
+                          : "The call was aborted before source application.",
+                        signal: dispatchSignal,
+                      });
+                    }
+                    if (scratchPlan) await scratchPlan.finalize(outcomes);
+                    return outcomes;
+                  }
+                : undefined,
+            onWorkerQuiesced:
+              plan || scratchPlan
+                ? async (taskIndex) => {
+                    await Promise.all([
+                      plan?.cleanupWorker(taskIndex),
+                      scratchPlan?.cleanupWorker(taskIndex),
+                    ]);
+                  }
+                : undefined,
+          },
+        ),
+      };
+    } catch (error) {
+      // Preparation failed before coordinator.run took over the
+      // barrier; the outer catch resolves it after this cleanup.
+      await scratchPlan?.dispose();
+      grant.release();
+      throw error;
+    }
+  };
+
   api.on("session_before_tree", () => {
     navigationEpoch += 1;
   });
@@ -489,66 +586,26 @@ export default function delegateExtension(api: ExtensionAPI): void {
               leafId: ctx.sessionManager.getLeafId(),
               epoch: navigationEpoch,
             };
-            let grant: AdmissionGrant | undefined;
-            let scratchPlan: ScratchPlan | undefined;
+            let completion: Promise<DispatchOutcome>;
             try {
-              grant = admission.admit(tasks, ticket.id);
-              ticket.notices = serializedNotices(tasks, grant.serialized);
-              // Scratch before isolated: file copies are cheaper than Git
-              // setup, and a later preparation failure can dispose() them.
-              scratchPlan = await prepareScratch(
+              ({ completion } = await startDispatch({
                 tasks,
-                join(env.agentDir, "delegate-scratch"),
-              );
-              const plan = await prepareIsolated(
-                scratchPlan?.tasks ?? tasks,
-                join(env.agentDir, "delegate-isolated"),
-              );
-              void coordinator
-                .run(plan?.tasks ?? scratchPlan?.tasks ?? tasks, {
-                  env,
-                  config,
-                  grant,
-                  sessions,
-                  ticket,
-                  quiescence,
-                  finalize:
-                    plan || scratchPlan
-                      ? async (outcomes) => {
-                          if (plan) {
-                            await plan.reconcile(outcomes, {
-                              shouldApplySource: () =>
-                                !ticket.cancellation.signal.aborted,
-                              retainedReason:
-                                "The ticket was cancelled before source application.",
-                              signal: ticket.cancellation.signal,
-                            });
-                          }
-                          if (scratchPlan) await scratchPlan.finalize(outcomes);
-                          return outcomes;
-                        }
-                      : undefined,
-                  onWorkerQuiesced:
-                    plan || scratchPlan
-                      ? async (taskIndex) => {
-                          await Promise.all([
-                            plan?.cleanupWorker(taskIndex),
-                            scratchPlan?.cleanupWorker(taskIndex),
-                          ]);
-                        }
-                      : undefined,
-                })
-                .then(() => undefined)
-                .catch((error: unknown) => {
-                  // The run promise rejected without (or after) handing the
-                  // barrier to the task quiescence chain: resolve it so a
-                  // later shutdown cannot wait forever on a dead dispatch.
-                  quiescence.resolve();
-                  tickets.settle(ticket, "failed");
-                  console.error(
-                    `[delegate] background ticket ${ticket.id} crashed: ${error instanceof Error ? error.message : String(error)}`,
-                  );
-                });
+                env,
+                config,
+                owner: ticket.id,
+                ticket,
+                quiescence,
+              }));
+              void completion.then(() => undefined).catch((error: unknown) => {
+                // The run promise rejected without (or after) handing the
+                // barrier to the task quiescence chain: resolve it so a
+                // later shutdown cannot wait forever on a dead dispatch.
+                quiescence.resolve();
+                tickets.settle(ticket, "failed");
+                console.error(
+                  `[delegate] background ticket ${ticket.id} crashed: ${error instanceof Error ? error.message : String(error)}`,
+                );
+              });
               // Auto-delivery, armed once the batch is running. It waits for
               // caller settlement AND the finished gate, so the delivered view
               // always carries the safe-to-expose outcome: finalized isolated
@@ -634,10 +691,6 @@ export default function delegateExtension(api: ExtensionAPI): void {
                   );
                 });
             } catch (error) {
-              // Preparation failed before coordinator.run took over the
-              // barrier; the outer catch resolves it after this cleanup.
-              await scratchPlan?.dispose();
-              grant?.release();
               tickets.remove(ticket.id);
               throw error;
             }
@@ -663,70 +716,29 @@ export default function delegateExtension(api: ExtensionAPI): void {
           }
 
           callSeq += 1;
-          relabel(`call-${callSeq}`);
-          const grant = admission.admit(tasks, `call-${callSeq}`);
-          // Surface same-call serialization immediately — a serialized batch of
-          // independent writers is the expensive way to learn about "isolated".
-          const notices = serializedNotices(tasks, grant.serialized);
-          if (notices.length > 0) {
-            onUpdate?.({
-              content: [{ type: "text" as const, text: notices.join("\n") }],
-              details: {},
-            });
-          }
-          let plan: IsolatedPlan | undefined;
-          let scratchPlan: ScratchPlan | undefined;
-          try {
-            scratchPlan = await prepareScratch(
-              tasks,
-              join(env.agentDir, "delegate-scratch"),
-              signal,
-            );
-            plan = await prepareIsolated(
-              scratchPlan?.tasks ?? tasks,
-              join(env.agentDir, "delegate-isolated"),
-              signal,
-            );
-          } catch (error) {
-            await scratchPlan?.dispose();
-            grant.release();
-            throw error;
-          }
-          const result = await coordinator.run(
-            plan?.tasks ?? scratchPlan?.tasks ?? tasks,
-            {
-              env,
-              config,
-              grant,
-              sessions,
-              signal,
-              quiescence,
-              finalize:
-                plan || scratchPlan
-                  ? async (outcomes) => {
-                      if (plan) {
-                        await plan.reconcile(outcomes, {
-                          shouldApplySource: () => !signal?.aborted,
-                          retainedReason:
-                            "The call was aborted before source application.",
-                          signal,
-                        });
-                      }
-                      if (scratchPlan) await scratchPlan.finalize(outcomes);
-                      return outcomes;
-                    }
-                  : undefined,
-              onWorkerQuiesced:
-                plan || scratchPlan
-                  ? async (taskIndex) => {
-                      await Promise.all([
-                        plan?.cleanupWorker(taskIndex),
-                        scratchPlan?.cleanupWorker(taskIndex),
-                      ]);
-                    }
-                  : undefined,
+          const owner = `call-${callSeq}`;
+          relabel(owner);
+          const { completion, notices } = await startDispatch({
+            tasks,
+            env,
+            config,
+            owner,
+            signal,
+            quiescence,
+            // Surface same-call serialization immediately — a serialized batch of
+            // independent writers is the expensive way to learn about "isolated".
+            onNotices: (current) => {
+              if (current.length > 0) {
+                onUpdate?.({
+                  content: [
+                    { type: "text" as const, text: current.join("\n") },
+                  ],
+                  details: {},
+                });
+              }
             },
-          );
+          });
+          const result = await completion;
           const allFailed = result.outcomes.every(
             (outcome) => outcome.status !== "ok",
           );
