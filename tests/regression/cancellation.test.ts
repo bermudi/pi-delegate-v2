@@ -33,6 +33,7 @@ import {
   callDelegate,
   callDelegateDetached,
   configureDelegate,
+  delegateTool,
   installSubagentModel,
   openDelegateBoundary,
   ticketIdOf,
@@ -783,6 +784,227 @@ test(
       expect(settled).toBe(true);
     } finally {
       teardownGitHold(hold);
+      rmSync(repo, { recursive: true, force: true });
+    }
+  },
+  30_000,
+);
+
+test(
+  "forced cancellation racing workspace preparation still returns its ticket",
+  async () => {
+    // The non-shutdown variant of the prep race: force-cancelling the
+    // ticket while preparation is parked aborts the prep, and the caller
+    // must still get the ticket id with the batch-end bookkeeping done —
+    // cancelled outcomes recorded, gates finished (INVARIANTS "Ticket
+    // state": a terminal cancellation response must not falsely imply
+    // unsafe cleanup completed, and later results stay visible).
+    const repo = mkdtempSync(join(tmpdir(), "delegate-shutdown-prep-"));
+    gitInitForShutdownRace(repo);
+    const hold = installGitHold(2);
+    try {
+      session = await openDelegateBoundary();
+      await installSubagentModel(session);
+      // Direct execute of the registered tool: the dispatch must stay
+      // parked while a second call force-cancels it, which the awaited
+      // session.run API cannot express.
+      const tool = delegateTool(session) as unknown as {
+        execute(
+          toolCallId: string,
+          params: Record<string, unknown>,
+          signal: AbortSignal,
+          onUpdate: (update: unknown) => void,
+          ctx: unknown,
+        ): Promise<{
+          readonly content: readonly { readonly text?: string }[];
+        }>;
+      };
+      const ctx = (session.session as AgentSession).extensionRunner
+        .createContext();
+      const textOf = (result: {
+        readonly content: readonly { readonly text?: string }[];
+      }): string => result.content.map((block) => block.text ?? "").join("\n");
+      const call = (
+        params: Record<string, unknown>,
+      ): Promise<string> =>
+        tool
+          .execute(
+            "force-cancel-prep",
+            params,
+            new AbortController().signal,
+            () => {},
+            ctx,
+          )
+          .then(textOf);
+
+      const dispatched = call({
+        async: true,
+        workspace: "isolated",
+        tasks: [{ prompt: "cancel during prep", cwd: repo, tools: ["write"] }],
+      });
+      // Call 1 (write-scope probe) ran through; call 2 is parked inside
+      // prepareIsolated.
+      await untilLogLines(hold.logPath, 2);
+
+      // The dispatch has not returned yet, so the id comes from the roster.
+      const roster = await call({ ticketAction: "poll" });
+      const ticket = ticketIdOf(roster);
+      const cancelled = await call({
+        ticketAction: "cancel",
+        ticket,
+        force: true,
+      });
+      expect(cancelled).toMatch(/cancelled/i);
+
+      // The abort kills the parked Git shim: the dispatch settles without
+      // the release file, still returning its ticket id.
+      const result = await Promise.race([
+        dispatched,
+        Bun.sleep(15_000).then(() => {
+          throw new Error("parked async dispatch never aborted its prep");
+        }),
+      ]);
+      expect(result).toContain(`Ticket "${ticket}"`);
+      const poll = await call({ ticketAction: "poll", ticket });
+      expect(poll).toMatch(/cancelled/);
+      expect(poll).toContain("1/1 tasks finished");
+    } finally {
+      teardownGitHold(hold);
+      rmSync(repo, { recursive: true, force: true });
+    }
+  },
+  30_000,
+);
+
+/**
+ * Fail a dispatch at a specific Git call, deterministically: like
+ * installGitHold, but call `failAtCall` (and later ones) exits non-zero
+ * instead of parking — a preparation that throws rather than aborts.
+ */
+function installGitFailure(failAtCall: number): {
+  logPath: string;
+  shimDir: string;
+  restore: () => void;
+} {
+  const realGit = execSync("command -v git", { encoding: "utf8" }).trim();
+  const shimDir = mkdtempSync(join(tmpdir(), "delegate-git-fail-"));
+  const logPath = join(shimDir, "invoked");
+  const counterPath = join(shimDir, "count");
+  const shimPath = join(shimDir, "git");
+  writeFileSync(
+    shimPath,
+    [
+      "#!/bin/sh",
+      `n=$(cat ${JSON.stringify(counterPath)} 2>/dev/null)`,
+      "n=${n:-0}",
+      `echo $((n + 1)) > ${JSON.stringify(counterPath)}`,
+      `printf '%s\\n' "$PWD $*" >> ${JSON.stringify(logPath)}`,
+      `if [ $((n + 1)) -ge ${failAtCall} ]; then`,
+      `  echo "git-shim: induced failure" >&2`,
+      "  exit 1",
+      "fi",
+      `exec ${JSON.stringify(realGit)} "$@"`,
+      "",
+    ].join("\n"),
+  );
+  chmodSync(shimPath, 0o755);
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${shimDir}${previousPath ? `:${previousPath}` : ""}`;
+  return {
+    logPath,
+    shimDir,
+    restore: () => {
+      process.env.PATH = previousPath;
+    },
+  };
+}
+
+async function expectShutdownSettles(current: TestSession): Promise<void> {
+  // A dispatch that ended before the coordinator handoff must have
+  // resolved its shutdown barrier: the session boundary may not hang on a
+  // batch that never started (INVARIANTS "Ticket state").
+  let settled = false;
+  const shutdown = (current.session as AgentSession).extensionRunner
+    .emit({ type: "session_shutdown", reason: "quit" })
+    .then(() => {
+      settled = true;
+    });
+  await Promise.race([
+    shutdown,
+    Bun.sleep(15_000).then(() => {
+      throw new Error("shutdown never settled after the failed preparation");
+    }),
+  ]);
+  expect(settled).toBe(true);
+}
+
+test(
+  "an async dispatch whose workspace preparation fails exposes no ticket and leaves no barrier",
+  async () => {
+    // Prep-FAILURE variant of the shutdown-prep races: a copy/worktree
+    // error that throws (rather than aborts) must fail the whole call —
+    // no phantom ticket left behind — and the dispatch's shutdown barrier
+    // must resolve with it.
+    const repo = mkdtempSync(join(tmpdir(), "delegate-shutdown-prep-"));
+    gitInitForShutdownRace(repo);
+    const failure = installGitFailure(2);
+    try {
+      session = await openDelegateBoundary();
+      await installSubagentModel(session);
+
+      // Call 1 (write-scope probe) succeeds; call 2, the repository probe
+      // inside prepareIsolated, fails.
+      const result = await callDelegate(session, {
+        async: true,
+        workspace: "isolated",
+        tasks: [
+          { prompt: "fail at preparation", cwd: repo, tools: ["write"] },
+        ],
+      });
+      expect(result.isError).toBe(true);
+      expect(result.text).toMatch(/requires a Git repository/i);
+      // The ticket never started, so it is not exposed: the failure text
+      // names no ticket id, and the roster is empty.
+      expect(result.text).not.toContain('Ticket "');
+      const roster = await callDelegate(session, { ticketAction: "poll" });
+      expect(roster.text).toContain("No tickets");
+
+      await expectShutdownSettles(session);
+    } finally {
+      failure.restore();
+      rmSync(failure.shimDir, { recursive: true, force: true });
+      rmSync(repo, { recursive: true, force: true });
+    }
+  },
+  30_000,
+);
+
+test(
+  "a sync dispatch whose workspace preparation fails leaves no barrier",
+  async () => {
+    // Same failure on the sync path: the call fails with the preparation
+    // cause and the session boundary is not held by a batch that never
+    // started.
+    const repo = mkdtempSync(join(tmpdir(), "delegate-shutdown-prep-"));
+    gitInitForShutdownRace(repo);
+    const failure = installGitFailure(2);
+    try {
+      session = await openDelegateBoundary();
+      await installSubagentModel(session);
+
+      const result = await callDelegate(session, {
+        workspace: "isolated",
+        tasks: [
+          { prompt: "fail at preparation", cwd: repo, tools: ["write"] },
+        ],
+      });
+      expect(result.isError).toBe(true);
+      expect(result.text).toMatch(/requires a Git repository/i);
+
+      await expectShutdownSettles(session);
+    } finally {
+      failure.restore();
+      rmSync(failure.shimDir, { recursive: true, force: true });
       rmSync(repo, { recursive: true, force: true });
     }
   },

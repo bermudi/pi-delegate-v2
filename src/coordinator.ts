@@ -108,22 +108,27 @@ export class DispatchCoordinator {
       ) => Promise<readonly TaskOutcome[]>;
       onWorkerQuiesced?: (taskIndex: number) => Promise<void>;
       /**
-       * Optional shutdown barrier: resolves once EVERY task's quiescence is
-       * confirmed, every worker that settled late through `onWorkerSettled`
-       * has finished its deferred cleanup and retained-reservation release,
-       * AND the batch itself has finished — `finalize` (isolated
-       * reconciliation, scratch finalization) plus the admission-reservation
-       * release. Worker quiescence alone is not full quiescence:
-       * reconciliation still mutates the source tree after the last worker
-       * stops. The barrier resolves independently of this call's own fate
-       * and never while a quarantined worker is unconfirmed — no timeout.
+       * This batch's shutdown barrier, accepted as part of taking the
+       * batch. `run` binds its resolver in the synchronous prefix of the
+       * call — before the first await — so the moment the dispatcher
+       * invokes `run` the transfer is total: the dispatcher's failure
+       * routine can no longer run, and this call resolves the barrier on
+       * every path it owns. The barrier resolves once EVERY task's
+       * quiescence is confirmed, every worker that settled late through
+       * `onWorkerSettled` has finished its deferred cleanup and
+       * retained-reservation release, AND the batch itself has finished —
+       * `finalize` (isolated reconciliation, scratch finalization) plus
+       * the admission-reservation release. Worker quiescence alone is not
+       * full quiescence: reconciliation still mutates the source tree
+       * after the last worker stops, and shutdown completing in that
+       * window would let a replacement session (whose admission
+       * controller knows nothing of this batch) start writers into it.
+       * The barrier resolves independently of this call's own fate and
+       * never while a quarantined worker is unconfirmed — no timeout.
        */
-      quiescence?: Deferred;
+      quiescence: Deferred;
     },
   ): Promise<DispatchOutcome> {
-    this.semaphore.setLimit(options.config.maxConcurrent);
-    const grant = options.grant;
-    const loaders = new Map<string, Promise<DefaultResourceLoader>>();
     const outcomes: (TaskOutcome | undefined)[] = new Array(tasks.length);
     // A serialized successor must wait for its predecessor's confirmed
     // quiescence — not merely a recorded outcome. A provisional
@@ -140,19 +145,23 @@ export class DispatchCoordinator {
     // Resolves once the run body itself has finished: `finalize` (isolated
     // reconciliation applying to or retaining against the source tree,
     // scratch disposal) and the admission-reservation release in the
-    // finally below. The shutdown barrier requires this alongside per-task
-    // quiescence — a batch whose workers all stopped may still be mutating
-    // the source during reconciliation, and shutdown completing in that
-    // window would let a replacement session (whose admission controller
-    // knows nothing of this batch) start writers into it.
+    // finally below.
     const bodySettled = new Deferred();
-    if (options.quiescence) {
-      const barrier = options.quiescence;
-      void Promise.all([
-        ...tasks.map((task) => fullyQuiesced.get(task.index)!.promise),
-        bodySettled.promise,
-      ]).then(() => barrier.resolve());
-    }
+    // Accept the batch's shutdown barrier before anything that could
+    // throw: this wiring is the synchronous prefix of the call, so from
+    // the moment `run` is invoked the coordinator owns the barrier's
+    // resolution on every path. The `finally` below always resolves
+    // `bodySettled` (even on a finalize failure), and a worker that never
+    // settles keeps its `fullyQuiesced` pending — so a batch this call has
+    // taken can never leak its barrier, and a worker that may still be
+    // mutating holds it.
+    void Promise.all([
+      ...tasks.map((task) => fullyQuiesced.get(task.index)!.promise),
+      bodySettled.promise,
+    ]).then(() => options.quiescence.resolve());
+    this.semaphore.setLimit(options.config.maxConcurrent);
+    const grant = options.grant;
+    const loaders = new Map<string, Promise<DefaultResourceLoader>>();
 
     try {
       await Promise.all(

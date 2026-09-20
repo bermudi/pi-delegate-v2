@@ -216,7 +216,15 @@ gaps.
   (not a deadline, not a plain cancel) with its reservation retained until
   the gated worker winds down; parked time behind a paused ticket is not
   inactivity (the countdown freezes between turns), while a silent
-  in-flight turn still stalls under a paused ticket.
+  in-flight turn still stalls under a paused ticket. The workspace
+  preparation races (issue #1 unification): a shutdown force-cancel
+  aborting a dispatch parked in preparation lets the boundary settle while
+  the sync batch quiesces under its barrier and the async caller keeps its
+  cancelled ticket; a forced cancel racing preparation likewise still
+  returns the ticket id with its cancelled outcomes recorded; and the
+  prep-failure variants — where the copy/worktree throws rather than
+  aborts — fail the whole call with the cause, expose no ticket, and leave
+  no shutdown barrier behind (async and sync).
 - **Gap:** a worker whose abort is delivered
   but then completes "ok" anyway (the faux provider always honors a
   tripped signal once its gate releases, so the boundary cannot produce a
