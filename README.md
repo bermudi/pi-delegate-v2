@@ -13,8 +13,17 @@ bun test
 bun run typecheck
 ```
 
-The current implementation is only the initial public-boundary scaffold.
-Dispatch is intentionally not implemented yet.
+## Async results
+
+`async: true` returns a ticket and automatically delivers the settled batch
+result, including isolated integration outcomes. While the parent is still on
+the dispatching leaf, delivery may wake it; after tree navigation the result
+is appended to the current branch without waking and enters context on the
+next turn, with a notice announcing it. Tickets remain pollable even if
+delivery fails. Shutdown force-cancels outstanding tickets without follow-up
+delivery and waits for their workers to actually stop before letting the
+session end. Tickets are host-lifetime only — they are not persisted across
+reload or session replacement.
 
 ## Parent conversation isolation (breaking change)
 

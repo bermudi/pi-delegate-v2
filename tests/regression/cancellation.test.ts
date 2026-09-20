@@ -8,7 +8,16 @@
  * `maxConcurrent: 1` bound let tests place tasks at exact lifecycle points.
  */
 import { afterEach, expect, test } from "bun:test";
-import { existsSync } from "node:fs";
+import { execSync } from "node:child_process";
+import {
+  chmodSync,
+  readFileSync,
+  existsSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type {
   TestSession,
@@ -575,4 +584,205 @@ test(
 
     release();
   },
+);
+
+function gitInitForShutdownRace(dir: string): void {
+  // An initial commit is required: isolated baselines are built on HEAD.
+  execSync(
+    "git init -q && git config user.email t@t && git config user.name t && git commit -qm init --allow-empty",
+    { cwd: dir },
+  );
+}
+
+/**
+ * Park a dispatch at a specific Git call, deterministically: a `git` shim
+ * first in PATH counts invocations, lets calls below `parkAtCall` through,
+ * and blocks call `parkAtCall` (and later ones) until a release file
+ * appears — then everything execs the real git by absolute path. The log
+ * file records each invocation, witnessing how far the dispatch got:
+ * call 1 is the write-scope probe in task resolution, call 2 the
+ * repository probe inside prepareIsolated.
+ */
+function installGitHold(parkAtCall: number): {
+  logPath: string;
+  releasePath: string;
+  shimDir: string;
+  restore: () => void;
+} {
+  const realGit = execSync("command -v git", { encoding: "utf8" }).trim();
+  const shimDir = mkdtempSync(join(tmpdir(), "delegate-git-hold-"));
+  const logPath = join(shimDir, "invoked");
+  const counterPath = join(shimDir, "count");
+  const releasePath = join(shimDir, "release");
+  const shimPath = join(shimDir, "git");
+  writeFileSync(
+    shimPath,
+    [
+      "#!/bin/sh",
+      `n=$(cat ${JSON.stringify(counterPath)} 2>/dev/null)`,
+      "n=${n:-0}",
+      `echo $((n + 1)) > ${JSON.stringify(counterPath)}`,
+      `printf '%s\\n' "$PWD $*" >> ${JSON.stringify(logPath)}`,
+      `if [ $((n + 1)) -ge ${parkAtCall} ] && [ ! -e ${JSON.stringify(releasePath)} ]; then`,
+      `  while [ ! -e ${JSON.stringify(releasePath)} ]; do sleep 0.02; done`,
+      "fi",
+      `exec ${JSON.stringify(realGit)} "$@"`,
+      "",
+    ].join("\n"),
+  );
+  chmodSync(shimPath, 0o755);
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${shimDir}${previousPath ? `:${previousPath}` : ""}`;
+  return {
+    logPath,
+    releasePath,
+    shimDir,
+    restore: () => {
+      process.env.PATH = previousPath;
+    },
+  };
+}
+
+/** Release the hold and drop the shim even on failure paths. */
+function teardownGitHold(hold: ReturnType<typeof installGitHold>): void {
+  try {
+    writeFileSync(hold.releasePath, "");
+  } catch {
+    // Already released or the directory is gone; nothing more to do.
+  }
+  hold.restore();
+  rmSync(hold.shimDir, { recursive: true, force: true });
+}
+
+/** Wait until the shim log has at least `lines` recorded invocations. */
+async function untilLogLines(path: string, lines: number): Promise<void> {
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline) {
+    const count = existsSync(path)
+      ? readFileSync(path, "utf8").trim().split("\n").filter(Boolean).length
+      : 0;
+    if (count >= lines) return;
+    await new Promise((r) => setImmediate(r));
+  }
+  throw new Error(
+    `shim log never reached ${lines} invocation(s): ${
+      existsSync(path) ? readFileSync(path, "utf8") : "(empty)"
+    }`,
+  );
+}
+
+test(
+  "shutdown while a sync dispatch is parked in workspace preparation holds the boundary until it quiesces",
+  async () => {
+    // Same regression on the sync path: there is no ticket to cancel, so
+    // after the hold releases the workers run to completion under the
+    // barrier and only then may the session boundary settle.
+    const repo = mkdtempSync(join(tmpdir(), "delegate-shutdown-prep-"));
+    gitInitForShutdownRace(repo);
+    const hold = installGitHold(2);
+    try {
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      subagents.respond([fauxAssistantMessage("SYNC-PREP-DONE")]);
+
+      const pending = callDelegateDetached(session, {
+        workspace: "isolated",
+        tasks: [{ prompt: "hold at preparation", cwd: repo, tools: ["write"] }],
+      });
+      // Call 1 (write-scope probe) ran through; call 2 is parked inside
+      // prepareIsolated.
+      await untilLogLines(hold.logPath, 2);
+
+      let settled = false;
+      const shutdown = (session.session as AgentSession).extensionRunner
+        .emit({ type: "session_shutdown", reason: "quit" })
+        .then(() => {
+          settled = true;
+        });
+
+      await Promise.race([shutdown, Bun.sleep(200)]);
+      expect(settled).toBe(false);
+
+      writeFileSync(hold.releasePath, "");
+      const result = await pending;
+      expect(result.isError).toBe(false);
+      expect(result.text).toContain("SYNC-PREP-DONE");
+
+      await Promise.race([
+        shutdown,
+        Bun.sleep(15_000).then(() => {
+          throw new Error(
+            "shutdown never settled after the parked dispatch quiesced",
+          );
+        }),
+      ]);
+      expect(settled).toBe(true);
+    } finally {
+      teardownGitHold(hold);
+      rmSync(repo, { recursive: true, force: true });
+    }
+  },
+  30_000,
+);
+
+test(
+  "shutdown while an async dispatch is parked in workspace preparation holds the boundary until it quiesces",
+  async () => {
+    // Same regression, parked one step later: inside prepareIsolated (call
+    // 2 — the repository probe), after the ticket exists and admission has
+    // granted. Shutdown force-cancels the ticket; once released,
+    // preparation finishes and the coordinator records cancelled outcomes
+    // for tasks whose workers never start. The barrier resolves only at
+    // that confirmed quiescence.
+    const repo = mkdtempSync(join(tmpdir(), "delegate-shutdown-prep-"));
+    gitInitForShutdownRace(repo);
+    const hold = installGitHold(2);
+    try {
+      session = await openDelegateBoundary();
+      await installSubagentModel(session);
+
+      const pending = callDelegateDetached(session, {
+        async: true,
+        workspace: "isolated",
+        tasks: [{ prompt: "hold at preparation", cwd: repo, tools: ["write"] }],
+      });
+      // Call 1 (write-scope probe) ran through; call 2 is parked inside
+      // prepareIsolated.
+      await untilLogLines(hold.logPath, 2);
+
+      let settled = false;
+      const shutdown = (session.session as AgentSession).extensionRunner
+        .emit({ type: "session_shutdown", reason: "quit" })
+        .then(() => {
+          settled = true;
+        });
+
+      await Promise.race([shutdown, Bun.sleep(200)]);
+      expect(settled).toBe(false);
+
+      writeFileSync(hold.releasePath, "");
+      const dispatched = await pending;
+      expect(dispatched.text).toContain("Ticket");
+      const ticket = ticketIdOf(dispatched.text);
+      const poll = await callDelegate(session, {
+        ticketAction: "poll",
+        ticket,
+      });
+      expect(poll.text).toContain("cancelled");
+
+      await Promise.race([
+        shutdown,
+        Bun.sleep(15_000).then(() => {
+          throw new Error(
+            "shutdown never settled after the parked dispatch quiesced",
+          );
+        }),
+      ]);
+      expect(settled).toBe(true);
+    } finally {
+      teardownGitHold(hold);
+      rmSync(repo, { recursive: true, force: true });
+    }
+  },
+  30_000,
 );

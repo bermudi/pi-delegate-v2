@@ -161,10 +161,27 @@ gaps.
 - **Covered now:** empty roster; unknown-ticket handling for all actions;
   wait-to-settlement; timeout detach; cancel preview vs force;
   cancelled-ticket retains completed results; pause/resume.
-- **Gap:** leaf-aware delivery after session-tree navigation (needs
-  harness-level session-tree control); delivered-result suppression when a
-  waiter already consumed it; progress/onUpdate frames; roster wording
-  details.
+- **Covered now (`tests/contract/delivery.test.ts`, `SPEC.md` "Background
+  delivery"):** same-leaf follow-up wake of an idle parent (`deliverAs:
+  "followUp"` + `triggerTurn: true`), including after a prior navigation;
+  durable no-wake append plus "appended" notice after `/tree` navigation
+  (`triggerTurn: false` — the custom message lands in the session at the
+  current leaf); delivery held until isolated reconciliation applies and
+  final annotations land; delivery failure (throw or async rejection) is
+  logged/surfaced and leaves the ticket settled and pollable; failed and
+  cancelled batches deliver their safe partial results; pause holds
+  delivery until the whole batch finishes; `session_shutdown`
+  force-cancels tickets, resolves waiters, performs no delivery, and holds
+  until worker quiescence is actually confirmed and through the batch's
+  finalization — when shutdown completes, the pollable view already
+  carries the integration annotations, so a replacement session never
+  starts into a tree the old batch is still reconciling; the visible
+  waiting status names the awaited ticket id; new dispatches reject
+  once shutdown begins while ticket RPCs still answer.
+- **Gap:** delivered-result suppression when a waiter already consumed it;
+  progress/onUpdate frames; roster wording details; replacement-session
+  non-inheritance (no real session replacement is expressible through the
+  harness — the emitted `session_shutdown` path is covered instead).
 
 ### Cancellation
 
@@ -693,14 +710,15 @@ Done: mode exclusivity and validation failures; batch-before-start
 validation and input-ordered results; ticket lifecycle, wait, cancellation,
 and pause; persistent session reuse, frozen configuration, close, and
 shutdown; shared-write admission and same-call serialization; isolated
-all-or-nothing application; cancellation safety and quarantine.
+all-or-nothing application; cancellation safety and quarantine; background
+delivery on the stock Pi extension API (issue #3; `SPEC.md` "Background
+delivery", `tests/contract/delivery.test.ts`) — no Pi patch was added to
+`patches/`.
 
 Remaining:
 
-1. Leaf-aware delivery after session-tree navigation (needs harness-level
-   session-tree control).
-2. Usage and telemetry privacy.
-3. The per-subsystem **Gap** entries above.
+1. Usage and telemetry privacy.
+2. The per-subsystem **Gap** entries above.
 
 Each slice should add only the public test driver capabilities it needs. Tests
 must not introduce public exports solely to reach private v2 state.

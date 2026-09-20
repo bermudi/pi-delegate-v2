@@ -20,7 +20,8 @@ import { hostEnvironment, resolveTasks } from "./src/host.ts";
 import { prepareIsolated, type IsolatedPlan } from "./src/isolated.ts";
 import { prepareScratch, type ScratchPlan } from "./src/scratch.ts";
 import { handleSessionRpc, SessionPool } from "./src/sessions.ts";
-import { handleTicketRpc, TicketStore } from "./src/tickets.ts";
+import { handleTicketRpc, TicketStore, ticketView } from "./src/tickets.ts";
+import { Deferred } from "./src/types.ts";
 import { validateCall } from "./src/validation.ts";
 
 function stringEnum<const Values extends readonly string[]>(
@@ -333,9 +334,76 @@ export default function delegateExtension(api: ExtensionAPI): void {
   // Owned by this closure: one fallback warning per extension instance, not
   // per call (see resolveAgentDir for why the fallback exists at all).
   let warnedAgentDirFallback = false;
+  // Shutdown latch: once the host begins teardown, new dispatches reject and
+  // pending results are never delivered.
+  let shuttingDown = false;
+  // Bumped on every observed tree transition — including a vetoed or
+  // cancelled navigation attempt, which conservatively downgrades delivery.
+  let navigationEpoch = 0;
+  // One "fully quiesced" barrier per live dispatch; shutdown holds until
+  // every one resolves (INVARIANTS "Ticket state"). The value is the
+  // human-facing name for the shutdown waiting status (COMPATIBILITY
+  // "Blocking shutdown" names the tickets): the ticket id for a background
+  // batch, the call number for a synchronous dispatch, and a "(preparing)"
+  // label in the window before either exists.
+  const liveQuiescence = new Map<Promise<void>, string>();
 
-  api.on("session_shutdown", () => {
+  const trackQuiescence = (
+    label: string,
+  ): { barrier: Deferred; relabel: (label: string) => void } => {
+    const barrier = new Deferred();
+    liveQuiescence.set(barrier.promise, label);
+    void barrier.promise.then(() => {
+      liveQuiescence.delete(barrier.promise);
+    });
+    return {
+      barrier,
+      relabel: (next: string) => {
+        // A resolved barrier is already untracked; relabeling must not
+        // resurrect its entry.
+        if (liveQuiescence.has(barrier.promise)) {
+          liveQuiescence.set(barrier.promise, next);
+        }
+      },
+    };
+  };
+
+  api.on("session_before_tree", () => {
+    navigationEpoch += 1;
+  });
+  api.on("session_tree", () => {
+    navigationEpoch += 1;
+  });
+
+  api.on("session_shutdown", async (_event, ctx) => {
+    shuttingDown = true;
+    // Forced cancellation settles every ticket immediately and resolves its
+    // waiters; delivery is suppressed by the latch above. Checked-out pooled
+    // sessions must get their abort requests before the quiescence wait —
+    // their runs own disposal through settle, and the barrier below is what
+    // confirms they actually stopped (a worker that ignores the abort holds
+    // shutdown for as long as it runs, per COMPATIBILITY.md).
+    for (const ticket of tickets.list()) tickets.cancel(ticket, true);
     sessions.shutdown();
+    const pending = [...liveQuiescence];
+    if (pending.length > 0) {
+      // The visible status names what is being waited on, so a worker that
+      // ignores its abort is identifiable (its ticket id, or the sync call
+      // label) without guessing from a bare count.
+      const names = pending.map(([, label]) => label).join(", ");
+      try {
+        ctx.ui.notify(
+          `Delegate: waiting for ${pending.length} dispatch(es) to stop before shutdown (${names})…`,
+          "info",
+        );
+      } catch {
+        // The UI may already be gone; the log line below still reports it.
+      }
+      console.error(
+        `[delegate] shutdown waiting for ${pending.length} dispatch(es) to reach quiescence (${names})`,
+      );
+      await Promise.all(pending.map(([promise]) => promise));
+    }
   });
 
   api.registerTool(
@@ -376,188 +444,320 @@ export default function delegateExtension(api: ExtensionAPI): void {
           };
         }
 
-        const agentDirResolution = resolveAgentDir(ctx);
-        if (agentDirResolution.source === "cwd" && !warnedAgentDirFallback) {
-          warnedAgentDirFallback = true;
-          console.warn(
-            `[delegate] Falling back to '${agentDirResolution.dir}' as the agent directory: delegate.json will be read from there, and delegate-sessions/, delegate-scratch/, delegate-isolated/ may be created under it. Set DELEGATE_AGENT_DIR to choose an agent directory explicitly. This warning appears once.`,
+        if (shuttingDown) {
+          throw new Error(
+            "Delegate is shutting down with this session; new dispatches are not accepted. " +
+              "Existing tickets remain pollable for the rest of the session's lifetime.",
           );
         }
-        const env = hostEnvironment(ctx, () => api.getActiveTools());
-        const config = loadDelegateConfig(ctx);
-        const tasks = resolveTasks(call.tasks, env, config);
-        sessions.validateReuse(tasks);
 
-        if (call.async) {
-          const ticket = tickets.create(tasks);
-          let grant: AdmissionGrant | undefined;
+        // The dispatch barrier is tracked before anything between the
+        // latch check and the coordinator handoff can throw or yield:
+        // task resolution probes Git for each writer/isolated task's
+        // write scope, admission grants reservations, and workspace
+        // preparation awaits subprocesses. A shutdown that starts while
+        // this dispatch sits anywhere in that range must already count it
+        // in the liveQuiescence snapshot, or the session boundary could
+        // complete before the dispatch starts workers or releases its
+        // reservations. The same barrier is handed to the coordinator;
+        // every path below that ends without that handoff resolves it in
+        // the catch.
+        const { barrier: quiescence, relabel } = trackQuiescence(
+          call.async ? "async dispatch (preparing)" : "dispatch (preparing)",
+        );
+        try {
+          const agentDirResolution = resolveAgentDir(ctx);
+          if (agentDirResolution.source === "cwd" && !warnedAgentDirFallback) {
+            warnedAgentDirFallback = true;
+            console.warn(
+              `[delegate] Falling back to '${agentDirResolution.dir}' as the agent directory: delegate.json will be read from there, and delegate-sessions/, delegate-scratch/, delegate-isolated/ may be created under it. Set DELEGATE_AGENT_DIR to choose an agent directory explicitly. This warning appears once.`,
+            );
+          }
+          const env = hostEnvironment(ctx, () => api.getActiveTools());
+          const config = loadDelegateConfig(ctx);
+          const tasks = resolveTasks(call.tasks, env, config);
+          sessions.validateReuse(tasks);
+
+          if (call.async) {
+            const ticket = tickets.create(tasks);
+            // The barrier now has its durable name for the shutdown status.
+            relabel(`ticket "${ticket.id}"`);
+            // The session-tree position at dispatch: delivery may wake the
+            // parent only while it is still on this branch with no tree
+            // transition or shutdown observed since.
+            const origin = {
+              leafId: ctx.sessionManager.getLeafId(),
+              epoch: navigationEpoch,
+            };
+            let grant: AdmissionGrant | undefined;
+            let scratchPlan: ScratchPlan | undefined;
+            try {
+              grant = admission.admit(tasks, ticket.id);
+              ticket.notices = serializedNotices(tasks, grant.serialized);
+              // Scratch before isolated: file copies are cheaper than Git
+              // setup, and a later preparation failure can dispose() them.
+              scratchPlan = await prepareScratch(
+                tasks,
+                join(env.agentDir, "delegate-scratch"),
+              );
+              const plan = await prepareIsolated(
+                scratchPlan?.tasks ?? tasks,
+                join(env.agentDir, "delegate-isolated"),
+              );
+              void coordinator
+                .run(plan?.tasks ?? scratchPlan?.tasks ?? tasks, {
+                  env,
+                  config,
+                  grant,
+                  sessions,
+                  ticket,
+                  quiescence,
+                  finalize:
+                    plan || scratchPlan
+                      ? async (outcomes) => {
+                          if (plan) {
+                            await plan.reconcile(outcomes, {
+                              shouldApplySource: () =>
+                                !ticket.cancellation.signal.aborted,
+                              retainedReason:
+                                "The ticket was cancelled before source application.",
+                              signal: ticket.cancellation.signal,
+                            });
+                          }
+                          if (scratchPlan) await scratchPlan.finalize(outcomes);
+                          return outcomes;
+                        }
+                      : undefined,
+                  onWorkerQuiesced:
+                    plan || scratchPlan
+                      ? async (taskIndex) => {
+                          await Promise.all([
+                            plan?.cleanupWorker(taskIndex),
+                            scratchPlan?.cleanupWorker(taskIndex),
+                          ]);
+                        }
+                      : undefined,
+                })
+                .then(() => undefined)
+                .catch((error: unknown) => {
+                  // The run promise rejected without (or after) handing the
+                  // barrier to the task quiescence chain: resolve it so a
+                  // later shutdown cannot wait forever on a dead dispatch.
+                  quiescence.resolve();
+                  tickets.settle(ticket, "failed");
+                  console.error(
+                    `[delegate] background ticket ${ticket.id} crashed: ${error instanceof Error ? error.message : String(error)}`,
+                  );
+                });
+              // Auto-delivery, armed once the batch is running. It waits for
+              // caller settlement AND the finished gate, so the delivered view
+              // always carries the safe-to-expose outcome: finalized isolated
+              // integrations, retained errors, and (on cancellation) partial
+              // results rather than a bare status.
+              const deliver = async (): Promise<void> => {
+                if (shuttingDown) return;
+                const cancelled = ticket.status === "cancelled";
+                const message = {
+                  customType: "delegate-result",
+                  content:
+                    ticketView(ticket) +
+                    (cancelled
+                      ? "\nCancellation is cooperative; worker cleanup may still be pending."
+                      : ""),
+                  display: true,
+                  details: { ticket: ticket.id, originLeafId: origin.leafId },
+                };
+                // api.sendMessage is fire-and-forget on the stock
+                // ExtensionAPI (returns void): async send rejections surface
+                // through the host's extension-error channel, never here.
+                // Only synchronous throws — e.g. a torn-down runtime failing
+                // assertActive — reach the catch below. Either way,
+                // settlement stands and the result stays pollable.
+                try {
+                  // "Same leaf" means same branch: the parent's own turn
+                  // appends entries after dispatch, so the current leaf is a
+                  // descendant of the origin leaf — the origin must still lie
+                  // on the current branch (a null origin is the root, which
+                  // every branch descends from). The epoch separately rules
+                  // out any observed transition, cancelled or not.
+                  const sameLeaf =
+                    navigationEpoch === origin.epoch &&
+                    (origin.leafId === null ||
+                      ctx.sessionManager
+                        .getBranch()
+                        .some((entry) => entry.id === origin.leafId));
+                  if (sameLeaf) {
+                    // Same leaf, no transition observed: a follow-up wakes an
+                    // idle parent and queues behind a busy one's tool calls.
+                    api.sendMessage(message, {
+                      deliverAs: "followUp",
+                      triggerTurn: true,
+                    });
+                  } else {
+                    // Leaf moved or a transition is in flight: append durably
+                    // at the current leaf without triggering a turn — it
+                    // enters model context on the next user turn.
+                    api.sendMessage(message, { triggerTurn: false });
+                    try {
+                      ctx.ui.notify(
+                        `Delegate ticket "${ticket.id}" settled on a different branch; its result was appended to the current branch for the next turn.`,
+                        "info",
+                      );
+                    } catch {
+                      // The UI may already be gone; the append itself landed.
+                    }
+                  }
+                } catch (error) {
+                  // Delivery failure never undoes settlement: the ticket stays
+                  // terminal and pollable.
+                  console.error(
+                    `[delegate] delivering ticket ${ticket.id} failed (result remains pollable): ${error instanceof Error ? error.message : String(error)}`,
+                  );
+                  try {
+                    ctx.ui.notify(
+                      `Delegate ticket "${ticket.id}" settled but its result could not be delivered; poll it for the result.`,
+                      "error",
+                    );
+                  } catch {
+                    // A stale ctx cannot show the notice; the log line stands.
+                  }
+                }
+              };
+              void Promise.all([
+                ticket.settledGate.promise,
+                ticket.finishedGate.promise,
+              ])
+                .then(deliver)
+                .catch((error: unknown) => {
+                  console.error(
+                    `[delegate] delivering ticket ${ticket.id} crashed (result remains pollable): ${error instanceof Error ? error.message : String(error)}`,
+                  );
+                });
+            } catch (error) {
+              // Preparation failed before coordinator.run took over the
+              // barrier; the outer catch resolves it after this cleanup.
+              await scratchPlan?.dispose();
+              grant?.release();
+              tickets.remove(ticket.id);
+              throw error;
+            }
+            return {
+              content: [
+                {
+                  type: "text" as const,
+                  text:
+                    `Ticket "${ticket.id}" created: ${tasks.length} task(s) running in the background.\n` +
+                    `Check progress with delegate({ ticketAction: "poll", ticket: "${ticket.id}" }).` +
+                    (ticket.notices.length > 0
+                      ? `\n${ticket.notices.join("\n")}`
+                      : ""),
+                },
+              ],
+              details: {
+                mode: "dispatch" as const,
+                async: true,
+                ticket: ticket.id,
+                tasks: tasks.map((task) => task.id),
+              },
+            };
+          }
+
+          callSeq += 1;
+          relabel(`call-${callSeq}`);
+          const grant = admission.admit(tasks, `call-${callSeq}`);
+          // Surface same-call serialization immediately — a serialized batch of
+          // independent writers is the expensive way to learn about "isolated".
+          const notices = serializedNotices(tasks, grant.serialized);
+          if (notices.length > 0) {
+            onUpdate?.({
+              content: [{ type: "text" as const, text: notices.join("\n") }],
+              details: {},
+            });
+          }
+          let plan: IsolatedPlan | undefined;
           let scratchPlan: ScratchPlan | undefined;
           try {
-            grant = admission.admit(tasks, ticket.id);
-            ticket.notices = serializedNotices(tasks, grant.serialized);
-            // Scratch before isolated: file copies are cheaper than Git
-            // setup, and a later preparation failure can dispose() them.
             scratchPlan = await prepareScratch(
               tasks,
               join(env.agentDir, "delegate-scratch"),
+              signal,
             );
-            const plan = await prepareIsolated(
+            plan = await prepareIsolated(
               scratchPlan?.tasks ?? tasks,
               join(env.agentDir, "delegate-isolated"),
+              signal,
             );
-            void coordinator
-              .run(plan?.tasks ?? scratchPlan?.tasks ?? tasks, {
-                env,
-                config,
-                grant,
-                sessions,
-                ticket,
-                finalize:
-                  plan || scratchPlan
-                    ? async (outcomes) => {
-                        if (plan) {
-                          await plan.reconcile(outcomes, {
-                            shouldApplySource: () =>
-                              !ticket.cancellation.signal.aborted,
-                            retainedReason:
-                              "The ticket was cancelled before source application.",
-                            signal: ticket.cancellation.signal,
-                          });
-                        }
-                        if (scratchPlan) await scratchPlan.finalize(outcomes);
-                        return outcomes;
-                      }
-                    : undefined,
-                onWorkerQuiesced:
-                  plan || scratchPlan
-                    ? async (taskIndex) => {
-                        await Promise.all([
-                          plan?.cleanupWorker(taskIndex),
-                          scratchPlan?.cleanupWorker(taskIndex),
-                        ]);
-                      }
-                    : undefined,
-              })
-              .then(() => undefined)
-              .catch((error: unknown) => {
-                tickets.settle(ticket, "failed");
-                console.error(
-                  `[delegate] background ticket ${ticket.id} crashed: ${error instanceof Error ? error.message : String(error)}`,
-                );
-              });
           } catch (error) {
             await scratchPlan?.dispose();
-            grant?.release();
-            tickets.remove(ticket.id);
+            grant.release();
             throw error;
           }
+          const result = await coordinator.run(
+            plan?.tasks ?? scratchPlan?.tasks ?? tasks,
+            {
+              env,
+              config,
+              grant,
+              sessions,
+              signal,
+              quiescence,
+              finalize:
+                plan || scratchPlan
+                  ? async (outcomes) => {
+                      if (plan) {
+                        await plan.reconcile(outcomes, {
+                          shouldApplySource: () => !signal?.aborted,
+                          retainedReason:
+                            "The call was aborted before source application.",
+                          signal,
+                        });
+                      }
+                      if (scratchPlan) await scratchPlan.finalize(outcomes);
+                      return outcomes;
+                    }
+                  : undefined,
+              onWorkerQuiesced:
+                plan || scratchPlan
+                  ? async (taskIndex) => {
+                      await Promise.all([
+                        plan?.cleanupWorker(taskIndex),
+                        scratchPlan?.cleanupWorker(taskIndex),
+                      ]);
+                    }
+                  : undefined,
+            },
+          );
+          const allFailed = result.outcomes.every(
+            (outcome) => outcome.status !== "ok",
+          );
           return {
             content: [
               {
                 type: "text" as const,
                 text:
-                  `Ticket "${ticket.id}" created: ${tasks.length} task(s) running in the background.\n` +
-                  `Check progress with delegate({ ticketAction: "poll", ticket: "${ticket.id}" }).` +
-                  (ticket.notices.length > 0
-                    ? `\n${ticket.notices.join("\n")}`
-                    : ""),
+                  (notices.length > 0 ? `${notices.join("\n")}\n\n` : "") +
+                  formatDispatchResult(result.outcomes),
               },
             ],
             details: {
               mode: "dispatch" as const,
-              async: true,
-              ticket: ticket.id,
-              tasks: tasks.map((task) => task.id),
+              async: false,
+              tasks: result.outcomes.map((outcome) => ({
+                id: outcome.id,
+                status: outcome.status,
+              })),
             },
+            usage: result.usage,
+            isError: allFailed,
           };
-        }
-
-        callSeq += 1;
-        const grant = admission.admit(tasks, `call-${callSeq}`);
-        // Surface same-call serialization immediately — a serialized batch of
-        // independent writers is the expensive way to learn about "isolated".
-        const notices = serializedNotices(tasks, grant.serialized);
-        if (notices.length > 0) {
-          onUpdate?.({
-            content: [{ type: "text" as const, text: notices.join("\n") }],
-            details: {},
-          });
-        }
-        let plan: IsolatedPlan | undefined;
-        let scratchPlan: ScratchPlan | undefined;
-        try {
-          scratchPlan = await prepareScratch(
-            tasks,
-            join(env.agentDir, "delegate-scratch"),
-            signal,
-          );
-          plan = await prepareIsolated(
-            scratchPlan?.tasks ?? tasks,
-            join(env.agentDir, "delegate-isolated"),
-            signal,
-          );
         } catch (error) {
-          await scratchPlan?.dispose();
-          grant.release();
+          // coordinator.run wires the barrier to task quiescence the moment
+          // it starts; if execution never got there (or the run promise
+          // itself rejected pre-wiring), resolve it here — a leaked
+          // barrier would hold every future shutdown forever.
+          quiescence.resolve();
           throw error;
         }
-        const result = await coordinator.run(
-          plan?.tasks ?? scratchPlan?.tasks ?? tasks,
-          {
-            env,
-            config,
-            grant,
-            sessions,
-            signal,
-            finalize:
-              plan || scratchPlan
-                ? async (outcomes) => {
-                    if (plan) {
-                      await plan.reconcile(outcomes, {
-                        shouldApplySource: () => !signal?.aborted,
-                        retainedReason:
-                          "The call was aborted before source application.",
-                        signal,
-                      });
-                    }
-                    if (scratchPlan) await scratchPlan.finalize(outcomes);
-                    return outcomes;
-                  }
-                : undefined,
-            onWorkerQuiesced:
-              plan || scratchPlan
-                ? async (taskIndex) => {
-                    await Promise.all([
-                      plan?.cleanupWorker(taskIndex),
-                      scratchPlan?.cleanupWorker(taskIndex),
-                    ]);
-                  }
-                : undefined,
-          },
-        );
-        const allFailed = result.outcomes.every(
-          (outcome) => outcome.status !== "ok",
-        );
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text:
-                (notices.length > 0 ? `${notices.join("\n")}\n\n` : "") +
-                formatDispatchResult(result.outcomes),
-            },
-          ],
-          details: {
-            mode: "dispatch" as const,
-            async: false,
-            tasks: result.outcomes.map((outcome) => ({
-              id: outcome.id,
-              status: outcome.status,
-            })),
-          },
-          usage: result.usage,
-          isError: allFailed,
-        };
       },
     }),
   );

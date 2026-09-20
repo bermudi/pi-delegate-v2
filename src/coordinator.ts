@@ -107,6 +107,18 @@ export class DispatchCoordinator {
         outcomes: TaskOutcome[],
       ) => Promise<readonly TaskOutcome[]>;
       onWorkerQuiesced?: (taskIndex: number) => Promise<void>;
+      /**
+       * Optional shutdown barrier: resolves once EVERY task's quiescence is
+       * confirmed, every worker that settled late through `onWorkerSettled`
+       * has finished its deferred cleanup and retained-reservation release,
+       * AND the batch itself has finished — `finalize` (isolated
+       * reconciliation, scratch finalization) plus the admission-reservation
+       * release. Worker quiescence alone is not full quiescence:
+       * reconciliation still mutates the source tree after the last worker
+       * stops. The barrier resolves independently of this call's own fate
+       * and never while a quarantined worker is unconfirmed — no timeout.
+       */
+      quiescence?: Deferred;
     },
   ): Promise<DispatchOutcome> {
     this.semaphore.setLimit(options.config.maxConcurrent);
@@ -117,14 +129,43 @@ export class DispatchCoordinator {
     // quiescence — not merely a recorded outcome. A provisional
     // (quarantined) predecessor may still be mutating the shared root.
     const quiescence = new Map<number, Deferred>();
+    // Confirmed quiescence alone is not the full barrier: a late-settled
+    // worker still owes deferred cleanup and its retained-reservation
+    // release. `fullyQuiesced` resolves only after that tail completes.
+    const fullyQuiesced = new Map<number, Deferred>();
     for (const task of tasks) {
       quiescence.set(task.index, new Deferred());
+      fullyQuiesced.set(task.index, new Deferred());
+    }
+    // Resolves once the run body itself has finished: `finalize` (isolated
+    // reconciliation applying to or retaining against the source tree,
+    // scratch disposal) and the admission-reservation release in the
+    // finally below. The shutdown barrier requires this alongside per-task
+    // quiescence — a batch whose workers all stopped may still be mutating
+    // the source during reconciliation, and shutdown completing in that
+    // window would let a replacement session (whose admission controller
+    // knows nothing of this batch) start writers into it.
+    const bodySettled = new Deferred();
+    if (options.quiescence) {
+      const barrier = options.quiescence;
+      void Promise.all([
+        ...tasks.map((task) => fullyQuiesced.get(task.index)!.promise),
+        bodySettled.promise,
+      ]).then(() => barrier.resolve());
     }
 
     try {
       await Promise.all(
         tasks.map((task) =>
-          this.runOne(task, options, grant, loaders, outcomes, quiescence),
+          this.runOne(
+            task,
+            options,
+            grant,
+            loaders,
+            outcomes,
+            quiescence,
+            fullyQuiesced,
+          ),
         ),
       );
       // Defensive: runOne is exception-safe and every exit records an
@@ -171,6 +212,9 @@ export class DispatchCoordinator {
       }
       grant.release(retained);
       options.ticket?.finishedGate.resolve();
+      // Only now is the batch fully quiesced for a shutdown barrier:
+      // finalization and every admission reservation release have run.
+      bodySettled.resolve();
     }
 
     return {
@@ -196,6 +240,7 @@ export class DispatchCoordinator {
     loaders: Map<string, Promise<DefaultResourceLoader>>,
     outcomes: (TaskOutcome | undefined)[],
     quiescence: Map<number, Deferred>,
+    fullyQuiesced: Map<number, Deferred>,
   ): Promise<void> {
     const ticket = options.ticket;
     const signal = combineSignals(
@@ -203,6 +248,7 @@ export class DispatchCoordinator {
       ticket?.cancellation.signal,
     );
     const confirmed = quiescence.get(task.index)!;
+    const fully = fullyQuiesced.get(task.index)!;
     // True once a worker session may exist; below that point a failure is
     // provably pre-worker and needs no quarantine.
     let workerCreated = false;
@@ -213,8 +259,12 @@ export class DispatchCoordinator {
       if (workerTruthRecorded) return;
       outcomes[task.index] = outcome;
       // A non-quarantined outcome confirms the worker is done (or never
-      // started): serialized successors may proceed.
-      if (!outcome.quarantined) confirmed.resolve();
+      // started): serialized successors may proceed, and nothing remains
+      // owed to a shutdown barrier — no deferred cleanup is pending.
+      if (!outcome.quarantined) {
+        confirmed.resolve();
+        fully.resolve();
+      }
       if (ticket) {
         // The store owns lifecycle; recording can settle the ticket but
         // never un-settles it.
@@ -249,7 +299,8 @@ export class DispatchCoordinator {
       if (late.quarantined) return;
       confirmed.resolve();
       // Confirmed quiescence: deferred workspace cleanup first, then the
-      // retained reservation may be released.
+      // retained reservation may be released. Only after that tail is the
+      // task fully quiesced for a shutdown barrier.
       void (async () => {
         try {
           await options.onWorkerQuiesced?.(task.index);
@@ -259,6 +310,7 @@ export class DispatchCoordinator {
           );
         }
         grant.releaseRetained(task.index);
+        fully.resolve();
       })();
     };
 
