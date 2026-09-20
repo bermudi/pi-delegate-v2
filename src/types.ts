@@ -116,6 +116,13 @@ export interface Ticket {
   readonly waiters: Set<() => void>;
   /** Live executions by task index, for cooperative abort. */
   readonly executions: Map<number, ExecutionHandle>;
+  /**
+   * Session-tree origin at dispatch: the leaf id (null for the root) and the
+   * navigation epoch. Delivery diagnostics reconstruct same-leaf vs moved
+   * from these; set by the dispatcher right after creation.
+   */
+  originLeafId?: string | null;
+  originEpoch?: number;
 }
 
 export interface ExecutionHandle {

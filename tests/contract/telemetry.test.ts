@@ -295,6 +295,85 @@ describe("delegate telemetry contract", () => {
   );
 
   test(
+    "a corrupt telemetry database fails open and never fails the dispatch",
+    async () => {
+      // Fail-open pin: garbage bytes at the destination must log and disable
+      // telemetry for that destination, not fail delegation. A refactor that
+      // flips fail-open to fail-closed would surface here as isError true.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      const dbPath = join(trackedTempDir(), "corrupt.db");
+      writeFileSync(dbPath, "not a sqlite database — just garbage bytes");
+      const errors = spyOn(console, "error").mockImplementation(() => {});
+      try {
+        configureDelegate(session, {
+          telemetry: { enabled: true, dbPath },
+        });
+        subagents.respond([fauxAssistantMessage("CORRUPT-OK")]);
+
+        const result = await callDelegate(session, {
+          tasks: [{ prompt: "x" }],
+        });
+
+        expect(result.isError).toBe(false);
+        expect(result.text).toContain("CORRUPT-OK");
+        expect(
+          errors.mock.calls.some((arguments_) =>
+            String(arguments_[0]).includes("[delegate] telemetry"),
+          ),
+        ).toBe(true);
+      } finally {
+        errors.mockRestore();
+      }
+    },
+  );
+
+  test(
+    "a future-schema telemetry database fails open and never fails the dispatch",
+    async () => {
+      // Fail-open pin: user_version beyond SCHEMA_VERSION must log and
+      // disable telemetry, never migrate down or fail the call. The version
+      // stays untouched so a newer writer's data is not clobbered.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      const dbPath = join(trackedTempDir(), "future.db");
+      const seed = new DatabaseSync(dbPath);
+      try {
+        seed.exec("PRAGMA user_version = 999");
+      } finally {
+        seed.close();
+      }
+      const errors = spyOn(console, "error").mockImplementation(() => {});
+      try {
+        configureDelegate(session, {
+          telemetry: { enabled: true, dbPath },
+        });
+        subagents.respond([fauxAssistantMessage("FUTURE-OK")]);
+
+        const result = await callDelegate(session, {
+          tasks: [{ prompt: "x" }],
+        });
+
+        expect(result.isError).toBe(false);
+        expect(result.text).toContain("FUTURE-OK");
+        expect(
+          errors.mock.calls.some((arguments_) =>
+            String(arguments_[0]).includes("[delegate] telemetry"),
+          ),
+        ).toBe(true);
+        const check = new DatabaseSync(dbPath);
+        try {
+          expect(userVersionOf(check)).toBe(999);
+        } finally {
+          check.close();
+        }
+      } finally {
+        errors.mockRestore();
+      }
+    },
+  );
+
+  test(
     "a v1 database migrates in place preserving legacy rows and sensitive values",
     async () => {
       session = await openDelegateBoundary();

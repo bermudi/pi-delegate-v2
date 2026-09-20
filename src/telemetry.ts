@@ -386,9 +386,16 @@ export class TelemetryStore {
           );
         });
       });
-      tightenPermissions(destination);
     } catch (error) {
       this.fail(destination, "write", error);
+      return;
+    }
+    // Owner-only hardening is best-effort: a chmod hiccup must not disable
+    // telemetry permanently when the rows already landed.
+    try {
+      tightenPermissions(destination);
+    } catch (error) {
+      report("chmod", destination, error);
     }
   }
 

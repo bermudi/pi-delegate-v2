@@ -45,7 +45,14 @@ export async function prepareWorkspaces(
       excludedPaths,
     );
   } catch (error) {
-    await scratchPlan?.dispose();
+    try {
+      await scratchPlan?.dispose();
+    } catch (cleanupError) {
+      console.error(
+        `[delegate] scratch disposal after isolated preparation failure failed (root cause preserved): ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`,
+        cleanupError,
+      );
+    }
     throw error;
   }
 
@@ -65,7 +72,23 @@ export async function prepareWorkspaces(
       }
     },
     dispose: async () => {
-      await Promise.all([isolatedPlan?.dispose(), scratchPlan?.dispose()]);
+      // A disposal failure must never erase the other plan's failure:
+      // collect both, log them, and throw the first so the root cause
+      // survives with its sibling visible.
+      const settled = await Promise.allSettled([
+        isolatedPlan?.dispose(),
+        scratchPlan?.dispose(),
+      ]);
+      const failures = settled.flatMap((outcome) =>
+        outcome.status === "rejected" ? [outcome.reason] : [],
+      );
+      for (const failure of failures) {
+        console.error(
+          `[delegate] workspace dispose failed: ${failure instanceof Error ? failure.message : String(failure)}`,
+          failure,
+        );
+      }
+      if (failures.length > 0) throw failures[0];
     },
   };
 }

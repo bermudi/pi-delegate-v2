@@ -171,9 +171,14 @@ export class DispatchCoordinator {
       // Defensive: runOne is exception-safe and every exit records an
       // outcome, but a silent gap would skip finalization and leak
       // reservations. A missing outcome means the task's state is unknown —
-      // quarantine it rather than assume the root is clean.
+      // quarantine it rather than assume the root is clean. This names the
+      // blocker: shutdown will wait on this dispatch's quiescence barrier
+      // while the reservation stays held, so the task must be visible.
       for (const task of tasks) {
         if (outcomes[task.index] === undefined) {
+          console.error(
+            `[delegate] internal dispatch error for task ${task.id} (index ${task.index}): no outcome was recorded; quarantining its write scope and holding shutdown quiescence for this dispatch`,
+          );
           const outcome: TaskOutcome = {
             index: task.index,
             id: task.id,
@@ -295,7 +300,14 @@ export class DispatchCoordinator {
       };
       outcomes[task.index] = merged;
       if (ticket) this.tickets.recordOutcome(ticket, merged);
-      if (late.quarantined) return;
+      // Settled() resolving proves the worker stopped — no background
+      // continuations remain — even when an earlier abort threw and marked
+      // the outcome quarantined. A thrown abort must not poison quiescence
+      // confirmation for the worker's lifetime: confirm now, run the
+      // deferred cleanup, and release the retained reservation so shutdown
+      // and admission are not held forever by a stopped worker. A worker
+      // that never settles never reaches here, so its barrier correctly
+      // stays pending while it may still be mutating.
       confirmed.resolve();
       // Confirmed quiescence: deferred workspace cleanup first, then the
       // retained reservation may be released. Only after that tail is the

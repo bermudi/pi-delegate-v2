@@ -44,7 +44,15 @@ export class OperationStore<Result> {
     this.sweepExpired(Date.now());
     const existing = this.records.get(operationId);
     if (existing !== undefined) {
-      if (existing.fingerprint === fingerprint) return existing.promise;
+      if (existing.fingerprint === fingerprint) {
+        console.error(
+          `[delegate] operationId '${operationId}' reuses the original in-flight or settled result; no new execution starts`,
+        );
+        return existing.promise;
+      }
+      console.error(
+        `[delegate] operationId '${operationId}' conflicts: the same key is already bound to a different dispatch request`,
+      );
       throw new Error(
         `operationId '${operationId}' is already bound to a different dispatch request; reuse the original request or choose a new operationId.`,
       );

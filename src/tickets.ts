@@ -213,15 +213,16 @@ export class TicketStore {
 
   /**
    * Wait for settlement. A timeout or caller abort detaches only this
-   * waiter — the ticket and its work are untouched.
+   * waiter — the ticket and its work are untouched. Timeout and abort are
+   * distinct: only a timeout is a timeout.
    */
   async wait(
     ticket: Ticket,
     timeoutMs: number | undefined,
     signal: AbortSignal | undefined,
-  ): Promise<{ timedOut: boolean }> {
-    if (isTerminal(ticket.status)) return { timedOut: false };
-    if (signal?.aborted === true) return { timedOut: true };
+  ): Promise<{ timedOut: boolean; aborted: boolean }> {
+    if (isTerminal(ticket.status)) return { timedOut: false, aborted: false };
+    if (signal?.aborted === true) return { timedOut: false, aborted: true };
     let notify!: () => void;
     const onSettled = new Promise<void>((resolve) => {
       notify = () => {
@@ -248,8 +249,9 @@ export class TicketStore {
         }),
       );
     }
+    let outcome: unknown;
     try {
-      await Promise.race(races);
+      outcome = await Promise.race(races);
     } finally {
       if (timeout !== undefined) clearTimeout(timeout);
       if (onAbort !== undefined) {
@@ -257,7 +259,11 @@ export class TicketStore {
       }
       ticket.waiters.delete(notify);
     }
-    return { timedOut: !isTerminal(ticket.status) };
+    if (isTerminal(ticket.status)) return { timedOut: false, aborted: false };
+    if (outcome === "aborted" || signal?.aborted) {
+      return { timedOut: false, aborted: true };
+    }
+    return { timedOut: true, aborted: false };
   }
 }
 
@@ -291,10 +297,16 @@ export async function handleTicketRpc(
     case "poll":
       return { text: ticketView(ticket), isError: false };
     case "wait": {
-      const { timedOut } = await store.wait(ticket, call.timeoutMs, signal);
+      const { timedOut, aborted } = await store.wait(
+        ticket,
+        call.timeoutMs,
+        signal,
+      );
       const text = timedOut
         ? `${ticketView(ticket)}\n\nWait timed out; the ticket is still ${statusWord(ticket)}.`
-        : ticketView(ticket);
+        : aborted
+          ? `${ticketView(ticket)}\n\nWait detached; the caller aborted the wait. The ticket is still ${statusWord(ticket)}.`
+          : ticketView(ticket);
       return { text, isError: false };
     }
     case "cancel":

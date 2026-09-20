@@ -266,8 +266,8 @@ describe("delegate dispatch contract", () => {
   test(
     "a task model field is rejected with guidance before any task starts",
     async () => {
-      // SPEC: callers never select subagent models — models are shit at
-      // picking models. A task `model` field (any value, even one the
+      // SPEC: callers never select subagent models — callers are reliably
+      // bad at picking models. A task `model` field (any value, even one the
       // registry knows) fails the whole call before tasks start and points
       // at the user-side config instead.
       session = await openDelegateBoundary();

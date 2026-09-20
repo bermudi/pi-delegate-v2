@@ -447,7 +447,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
       plan = await prepareWorkspaces(
         tasks,
         env.agentDir,
-        signal,
+        dispatchSignal,
         telemetrySpan.ownedPaths,
       );
       const prepared = plan;
@@ -456,7 +456,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
         config,
         grant,
         sessions,
-        signal,
+        signal: dispatchSignal,
         ticket,
         quiescence,
         finalize: (outcomes) =>
@@ -482,9 +482,16 @@ export default function delegateExtension(api: ExtensionAPI): void {
       };
     } catch (error) {
       // Preparation failed before coordinator.run took over the
-      // barrier; the outer catch resolves it after this cleanup.
+      // barrier; the outer catch resolves it after this cleanup. A disposal
+      // failure must never erase the root cause: log it and throw the
+      // original.
       try {
         await plan?.dispose();
+      } catch (cleanupError) {
+        console.error(
+          `[delegate] workspace disposal after preparation failure failed (root cause preserved): ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`,
+          cleanupError,
+        );
       } finally {
         grant.release();
       }
@@ -615,10 +622,105 @@ export default function delegateExtension(api: ExtensionAPI): void {
               relabel(`ticket "${ticket.id}"`);
               // The session-tree position at dispatch: delivery may wake the
               // parent only while it is still on this branch with no tree
-              // transition or shutdown observed since.
+              // transition or shutdown observed since. Recorded on the ticket
+              // so delivery diagnostics can be reconstructed from the ticket
+              // alone.
               const origin = {
                 leafId: ctx.sessionManager.getLeafId(),
                 epoch: navigationEpoch,
+              };
+              ticket.originLeafId = origin.leafId;
+              ticket.originEpoch = origin.epoch;
+              // Auto-delivery, armed once the batch is running. It waits for
+              // caller settlement AND the finished gate, so the delivered view
+              // always carries the safe-to-expose outcome: finalized isolated
+              // integrations, retained errors, and (on cancellation) partial
+              // results rather than a bare status.
+              const deliver = async (): Promise<void> => {
+                if (shuttingDown) {
+                  console.error(
+                    `[delegate] delivery for ticket ${ticket.id} suppressed during shutdown (result remains pollable)`,
+                  );
+                  return;
+                }
+                const cancelled = ticket.status === "cancelled";
+                const message = {
+                  customType: "delegate-result",
+                  content:
+                    ticketView(ticket) +
+                    (cancelled
+                      ? "\nCancellation is cooperative; worker cleanup may still be pending."
+                      : ""),
+                  display: true,
+                  details: { ticket: ticket.id, originLeafId: origin.leafId },
+                };
+                // api.sendMessage is fire-and-forget on the stock
+                // ExtensionAPI (returns void): async send rejections surface
+                // through the host's extension-error channel, never here.
+                // Only synchronous throws — e.g. a torn-down runtime failing
+                // assertActive — reach the catch below. Either way,
+                // settlement stands and the result stays pollable.
+                try {
+                  // "Same leaf" means same branch: the parent's own turn
+                  // appends entries after dispatch, so the current leaf is a
+                  // descendant of the origin leaf — the origin must still lie
+                  // on the current branch (a null origin is the root, which
+                  // every branch descends from). The epoch separately rules
+                  // out any observed transition, cancelled or not.
+                  const sameLeaf =
+                    navigationEpoch === origin.epoch &&
+                    (origin.leafId === null ||
+                      ctx.sessionManager
+                        .getBranch()
+                        .some((entry) => entry.id === origin.leafId));
+                  if (sameLeaf) {
+                    // Same leaf, no transition observed: a follow-up wakes an
+                    // idle parent and queues behind a busy one's tool calls.
+                    api.sendMessage(message, {
+                      deliverAs: "followUp",
+                      triggerTurn: true,
+                    });
+                  } else {
+                    // Leaf moved or a transition is in flight: append durably
+                    // at the current leaf without triggering a turn — it
+                    // enters model context on the next user turn.
+                    api.sendMessage(message, { triggerTurn: false });
+                    try {
+                      ctx.ui.notify(
+                        `Delegate ticket "${ticket.id}" settled on a different branch; its result was appended to the current branch for the next turn.`,
+                        "info",
+                      );
+                    } catch {
+                      // The UI may already be gone; the append itself landed.
+                    }
+                  }
+                } catch (error) {
+                  // Delivery failure never undoes settlement: the ticket stays
+                  // terminal and pollable.
+                  console.error(
+                    `[delegate] delivering ticket ${ticket.id} failed (result remains pollable): ${error instanceof Error ? error.message : String(error)}`,
+                  );
+                  try {
+                    ctx.ui.notify(
+                      `Delegate ticket "${ticket.id}" settled but its result could not be delivered; poll it for the result.`,
+                      "error",
+                    );
+                  } catch {
+                    // A stale ctx cannot show the notice; the log line stands.
+                  }
+                }
+              };
+              const armDelivery = (): void => {
+                void Promise.all([
+                  ticket.settledGate.promise,
+                  ticket.finishedGate.promise,
+                ])
+                  .then(deliver)
+                  .catch((error: unknown) => {
+                    console.error(
+                      `[delegate] delivering ticket ${ticket.id} crashed (result remains pollable): ${error instanceof Error ? error.message : String(error)}`,
+                    );
+                  });
               };
               let completion: Promise<DispatchOutcome>;
               try {
@@ -641,93 +743,39 @@ export default function delegateExtension(api: ExtensionAPI): void {
                     `[delegate] background ticket ${ticket.id} crashed: ${error instanceof Error ? error.message : String(error)}`,
                   );
                 });
-                // Auto-delivery, armed once the batch is running. It waits for
-                // caller settlement AND the finished gate, so the delivered view
-                // always carries the safe-to-expose outcome: finalized isolated
-                // integrations, retained errors, and (on cancellation) partial
-                // results rather than a bare status.
-                const deliver = async (): Promise<void> => {
-                  if (shuttingDown) return;
-                  const cancelled = ticket.status === "cancelled";
-                  const message = {
-                    customType: "delegate-result",
-                    content:
-                      ticketView(ticket) +
-                      (cancelled
-                        ? "\nCancellation is cooperative; worker cleanup may still be pending."
-                        : ""),
-                    display: true,
-                    details: { ticket: ticket.id, originLeafId: origin.leafId },
-                  };
-                  // api.sendMessage is fire-and-forget on the stock
-                  // ExtensionAPI (returns void): async send rejections surface
-                  // through the host's extension-error channel, never here.
-                  // Only synchronous throws — e.g. a torn-down runtime failing
-                  // assertActive — reach the catch below. Either way,
-                  // settlement stands and the result stays pollable.
-                  try {
-                    // "Same leaf" means same branch: the parent's own turn
-                    // appends entries after dispatch, so the current leaf is a
-                    // descendant of the origin leaf — the origin must still lie
-                    // on the current branch (a null origin is the root, which
-                    // every branch descends from). The epoch separately rules
-                    // out any observed transition, cancelled or not.
-                    const sameLeaf =
-                      navigationEpoch === origin.epoch &&
-                      (origin.leafId === null ||
-                        ctx.sessionManager
-                          .getBranch()
-                          .some((entry) => entry.id === origin.leafId));
-                    if (sameLeaf) {
-                      // Same leaf, no transition observed: a follow-up wakes an
-                      // idle parent and queues behind a busy one's tool calls.
-                      api.sendMessage(message, {
-                        deliverAs: "followUp",
-                        triggerTurn: true,
-                      });
-                    } else {
-                      // Leaf moved or a transition is in flight: append durably
-                      // at the current leaf without triggering a turn — it
-                      // enters model context on the next user turn.
-                      api.sendMessage(message, { triggerTurn: false });
-                      try {
-                        ctx.ui.notify(
-                          `Delegate ticket "${ticket.id}" settled on a different branch; its result was appended to the current branch for the next turn.`,
-                          "info",
-                        );
-                      } catch {
-                        // The UI may already be gone; the append itself landed.
-                      }
-                    }
-                  } catch (error) {
-                    // Delivery failure never undoes settlement: the ticket stays
-                    // terminal and pollable.
-                    console.error(
-                      `[delegate] delivering ticket ${ticket.id} failed (result remains pollable): ${error instanceof Error ? error.message : String(error)}`,
-                    );
-                    try {
-                      ctx.ui.notify(
-                        `Delegate ticket "${ticket.id}" settled but its result could not be delivered; poll it for the result.`,
-                        "error",
-                      );
-                    } catch {
-                      // A stale ctx cannot show the notice; the log line stands.
-                    }
-                  }
-                };
-                void Promise.all([
-                  ticket.settledGate.promise,
-                  ticket.finishedGate.promise,
-                ])
-                  .then(deliver)
-                  .catch((error: unknown) => {
-                    console.error(
-                      `[delegate] delivering ticket ${ticket.id} crashed (result remains pollable): ${error instanceof Error ? error.message : String(error)}`,
-                    );
-                  });
+                armDelivery();
               } catch (error) {
-                if (ticket.status === "running") tickets.remove(ticket.id);
-                throw error;
+                if (ticket.status === "running") {
+                  tickets.remove(ticket.id);
+                  throw error;
+                }
+                // Preparation was cancelled alongside the ticket (shutdown or
+                // a force-cancel racing the workspace copy/worktree): the
+                // ticket is already terminal cancelled and the caller still
+                // needs its id. Record cancelled outcomes so the terminal view
+                // is complete, finish the bookkeeping the coordinator would
+                // have owned, and fall through to the Ticket-created return —
+                // never throw the prep symptom and lose the ticket.
+                console.error(
+                  `[delegate] async dispatch preparation for ticket ${ticket.id} aborted after cancellation; settling as cancelled: ${error instanceof Error ? error.message : String(error)}`,
+                );
+                for (const task of tasks) {
+                  if (ticket.outcomes[task.index] === undefined) {
+                    tickets.recordOutcome(ticket, {
+                      index: task.index,
+                      id: task.id,
+                      status: "cancelled",
+                      retries: 0,
+                    });
+                  }
+                }
+                tickets.releaseSettlement(ticket);
+                ticket.finishedGate.resolve();
+                // No workers started: quiescence is already confirmed. The
+                // outer catch would resolve this on a throw, but this path
+                // returns normally, so resolve it here.
+                quiescence.resolve();
+                armDelivery();
               }
               return {
                 content: [

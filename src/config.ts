@@ -188,7 +188,13 @@ function parseTelemetry(value: unknown, path: string): TelemetryConfig {
       `${path}: telemetry.enabled must be a boolean; got ${JSON.stringify(raw.enabled)}.`,
     );
   }
+  const enabled = raw.enabled === true;
   const dbPath = raw.dbPath;
+  // dbPath is inert while telemetry is disabled: ignore it rather than
+  // failing a call that records nothing.
+  if (!enabled) {
+    return { enabled: false, dbPath: undefined };
+  }
   if (
     dbPath !== undefined &&
     (typeof dbPath !== "string" ||
@@ -200,7 +206,7 @@ function parseTelemetry(value: unknown, path: string): TelemetryConfig {
     );
   }
   return {
-    enabled: raw.enabled === true,
+    enabled: true,
     dbPath: typeof dbPath === "string" ? dbPath.trim() : undefined,
   };
 }
