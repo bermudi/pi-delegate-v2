@@ -340,17 +340,32 @@ export default function delegateExtension(api: ExtensionAPI): void {
   // Bumped on every observed tree transition — including a vetoed or
   // cancelled navigation attempt, which conservatively downgrades delivery.
   let navigationEpoch = 0;
-  // One "all workers confirmed quiesced" barrier per live dispatch; shutdown
-  // holds until every one resolves (INVARIANTS "Ticket state").
-  const liveQuiescence = new Set<Promise<void>>();
+  // One "fully quiesced" barrier per live dispatch; shutdown holds until
+  // every one resolves (INVARIANTS "Ticket state"). The value is the
+  // human-facing name for the shutdown waiting status (COMPATIBILITY
+  // "Blocking shutdown" names the tickets): the ticket id for a background
+  // batch, the call number for a synchronous dispatch, and a "(preparing)"
+  // label in the window before either exists.
+  const liveQuiescence = new Map<Promise<void>, string>();
 
-  const trackQuiescence = (): Deferred => {
+  const trackQuiescence = (
+    label: string,
+  ): { barrier: Deferred; relabel: (label: string) => void } => {
     const barrier = new Deferred();
-    liveQuiescence.add(barrier.promise);
+    liveQuiescence.set(barrier.promise, label);
     void barrier.promise.then(() => {
       liveQuiescence.delete(barrier.promise);
     });
-    return barrier;
+    return {
+      barrier,
+      relabel: (next: string) => {
+        // A resolved barrier is already untracked; relabeling must not
+        // resurrect its entry.
+        if (liveQuiescence.has(barrier.promise)) {
+          liveQuiescence.set(barrier.promise, next);
+        }
+      },
+    };
   };
 
   api.on("session_before_tree", () => {
@@ -372,18 +387,22 @@ export default function delegateExtension(api: ExtensionAPI): void {
     sessions.shutdown();
     const pending = [...liveQuiescence];
     if (pending.length > 0) {
+      // The visible status names what is being waited on, so a worker that
+      // ignores its abort is identifiable (its ticket id, or the sync call
+      // label) without guessing from a bare count.
+      const names = pending.map(([, label]) => label).join(", ");
       try {
         ctx.ui.notify(
-          `Delegate: waiting for ${pending.length} dispatch(es) to stop before shutdown…`,
+          `Delegate: waiting for ${pending.length} dispatch(es) to stop before shutdown (${names})…`,
           "info",
         );
       } catch {
         // The UI may already be gone; the log line below still reports it.
       }
       console.error(
-        `[delegate] shutdown waiting for ${pending.length} dispatch(es) to reach quiescence`,
+        `[delegate] shutdown waiting for ${pending.length} dispatch(es) to reach quiescence (${names})`,
       );
-      await Promise.all(pending);
+      await Promise.all(pending.map(([promise]) => promise));
     }
   });
 
@@ -443,7 +462,9 @@ export default function delegateExtension(api: ExtensionAPI): void {
         // reservations. The same barrier is handed to the coordinator;
         // every path below that ends without that handoff resolves it in
         // the catch.
-        const quiescence = trackQuiescence();
+        const { barrier: quiescence, relabel } = trackQuiescence(
+          call.async ? "async dispatch (preparing)" : "dispatch (preparing)",
+        );
         try {
           const agentDirResolution = resolveAgentDir(ctx);
           if (agentDirResolution.source === "cwd" && !warnedAgentDirFallback) {
@@ -459,6 +480,8 @@ export default function delegateExtension(api: ExtensionAPI): void {
 
           if (call.async) {
             const ticket = tickets.create(tasks);
+            // The barrier now has its durable name for the shutdown status.
+            relabel(`ticket "${ticket.id}"`);
             // The session-tree position at dispatch: delivery may wake the
             // parent only while it is still on this branch with no tree
             // transition or shutdown observed since.
@@ -640,6 +663,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
           }
 
           callSeq += 1;
+          relabel(`call-${callSeq}`);
           const grant = admission.admit(tasks, `call-${callSeq}`);
           // Surface same-call serialization immediately — a serialized batch of
           // independent writers is the expensive way to learn about "isolated".

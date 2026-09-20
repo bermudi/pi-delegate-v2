@@ -172,7 +172,11 @@ gaps.
   cancelled batches deliver their safe partial results; pause holds
   delivery until the whole batch finishes; `session_shutdown`
   force-cancels tickets, resolves waiters, performs no delivery, and holds
-  until worker quiescence is actually confirmed; new dispatches reject
+  until worker quiescence is actually confirmed and through the batch's
+  finalization — when shutdown completes, the pollable view already
+  carries the integration annotations, so a replacement session never
+  starts into a tree the old batch is still reconciling; the visible
+  waiting status names the awaited ticket id; new dispatches reject
   once shutdown begins while ticket RPCs still answer.
 - **Gap:** delivered-result suppression when a waiter already consumed it;
   progress/onUpdate frames; roster wording details; replacement-session

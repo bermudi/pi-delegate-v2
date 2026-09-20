@@ -109,9 +109,13 @@ export class DispatchCoordinator {
       onWorkerQuiesced?: (taskIndex: number) => Promise<void>;
       /**
        * Optional shutdown barrier: resolves once EVERY task's quiescence is
-       * confirmed and, for workers that settled late through
-       * `onWorkerSettled`, their deferred cleanup and retained-reservation
-       * release have run. It resolves independently of this call's own fate
+       * confirmed, every worker that settled late through `onWorkerSettled`
+       * has finished its deferred cleanup and retained-reservation release,
+       * AND the batch itself has finished — `finalize` (isolated
+       * reconciliation, scratch finalization) plus the admission-reservation
+       * release. Worker quiescence alone is not full quiescence:
+       * reconciliation still mutates the source tree after the last worker
+       * stops. The barrier resolves independently of this call's own fate
        * and never while a quarantined worker is unconfirmed — no timeout.
        */
       quiescence?: Deferred;
@@ -133,11 +137,21 @@ export class DispatchCoordinator {
       quiescence.set(task.index, new Deferred());
       fullyQuiesced.set(task.index, new Deferred());
     }
+    // Resolves once the run body itself has finished: `finalize` (isolated
+    // reconciliation applying to or retaining against the source tree,
+    // scratch disposal) and the admission-reservation release in the
+    // finally below. The shutdown barrier requires this alongside per-task
+    // quiescence — a batch whose workers all stopped may still be mutating
+    // the source during reconciliation, and shutdown completing in that
+    // window would let a replacement session (whose admission controller
+    // knows nothing of this batch) start writers into it.
+    const bodySettled = new Deferred();
     if (options.quiescence) {
       const barrier = options.quiescence;
-      void Promise.all(
-        tasks.map((task) => fullyQuiesced.get(task.index)!.promise),
-      ).then(() => barrier.resolve());
+      void Promise.all([
+        ...tasks.map((task) => fullyQuiesced.get(task.index)!.promise),
+        bodySettled.promise,
+      ]).then(() => barrier.resolve());
     }
 
     try {
@@ -198,6 +212,9 @@ export class DispatchCoordinator {
       }
       grant.release(retained);
       options.ticket?.finishedGate.resolve();
+      // Only now is the batch fully quiesced for a shutdown barrier:
+      // finalization and every admission reservation release have run.
+      bodySettled.resolve();
     }
 
     return {

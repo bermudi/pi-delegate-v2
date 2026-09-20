@@ -182,10 +182,87 @@ describe("async result delivery", () => {
     expect(poll.text).toContain("cancelled");
     await Bun.sleep(50);
     expect(shutdownSettled).toBe(false);
+    // COMPATIBILITY "Blocking shutdown": the visible waiting status names
+    // what is being waited on — here the ticket id, so an uncooperative
+    // worker is identifiable from the status alone.
+    expect(
+      session.events.ui.some(
+        (entry) =>
+          JSON.stringify(entry).includes("waiting for") &&
+          JSON.stringify(entry).includes(ticket),
+      ),
+    ).toBe(true);
     blocked.release();
     await shutdown;
     expect(shutdownSettled).toBe(true);
     expect(sends).not.toHaveBeenCalled();
+  });
+
+  test("shutdown holds through the batch's finalization, not just worker completion", async () => {
+    // Regression: the shutdown barrier used to resolve at per-task quiescence,
+    // so shutdown could complete while isolated reconciliation was still
+    // applying to or retaining against the source tree and admission
+    // reservations were still held — a replacement session (fresh admission
+    // controller) could then admit writers into that window. Now, whenever
+    // shutdown completes, finalization has finished: the pollable view
+    // already carries the integration annotations.
+    session = await openDelegateBoundary();
+    execSync(
+      "git init -q && git config user.email t@t && git config user.name t && git commit -qm init --allow-empty",
+      { cwd: session.cwd },
+    );
+    const host = session.session as AgentSession;
+    const model = await installSubagentModel(session);
+    const blocked = gate();
+    model.respond([
+      fauxAssistantMessage([
+        fauxToolCall("write", { path: "proposal.txt", content: "PROPOSAL" }),
+      ]),
+      blocked.step,
+    ]);
+    const dispatched = await callDelegate(session, {
+      tasks: [
+        { prompt: "write proposal", tools: ["write"], workspace: "isolated" },
+      ],
+      async: true,
+    });
+    const ticket = ticketIdOf(dispatched.text);
+    await until(() => model.state.callCount === 2);
+    blocked.release();
+    // Poll until the worker's outcome is caller-visible WITHOUT its
+    // integration annotation: that moment sits inside the finalize window
+    // (outcome recorded, reconciliation not yet). If reconciliation wins the
+    // race against the first poll, the invariant below holds trivially.
+    const deadline = Date.now() + 2000;
+    let lastPoll = "";
+    while (Date.now() < deadline) {
+      const poll = await callDelegate(session, {
+        ticketAction: "poll",
+        ticket,
+      });
+      lastPoll = poll.text;
+      if (
+        poll.text.includes("INTEGRATION") ||
+        poll.text.includes("DELIVERED-OUTPUT")
+      ) {
+        break;
+      }
+    }
+    if (!lastPoll.includes("DELIVERED-OUTPUT")) {
+      throw new Error(
+        `Worker outcome never became pollable before shutdown; last poll:\n${lastPoll}`,
+      );
+    }
+    // Shutdown force-cancels first, so reconciliation retains (or, if it
+    // already applied, keeps) the proposal — either way it must have RUN
+    // before the session boundary completes.
+    const shutdown = host.extensionRunner.emit({
+      type: "session_shutdown",
+      reason: "quit",
+    });
+    await shutdown;
+    const poll = await callDelegate(session, { ticketAction: "poll", ticket });
+    expect(poll.text).toMatch(/INTEGRATION: (retained|applied_unverified)/);
   });
 
   test("no dispatch after shutdown begins; ticket RPC still works", async () => {
