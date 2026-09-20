@@ -166,8 +166,9 @@ export class TicketStore {
 
   /** Record a task outcome. Never changes a terminal ticket's status. */
   recordOutcome(ticket: Ticket, outcome: TaskOutcome): void {
-    // Sole-writer cast: the exposed view freezes the array; the store owns
-    // the one legal write path.
+    // Sole-writer cast: the exposed type is readonly, but it is the same
+    // mutable array instance callers see — the store owns the one legal
+    // write path (no freeze, no copy-on-write).
     const outcomes = this.entry(ticket).record
       .outcomes as (TaskOutcome | undefined)[];
     outcomes[outcome.index] = outcome;
