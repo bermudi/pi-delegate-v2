@@ -550,12 +550,15 @@ export default function delegateExtension(api: ExtensionAPI): void {
           ticket,
           quiescence: barrier,
           finalize: (outcomes) =>
+            // The dispatch facts the batch actually holds: plans consume
+            // what applies to them (only isolated reconciliation reads
+            // this context).
             prepared.finalize(outcomes, {
+              signal: dispatchSignal,
               shouldApplySource: () => !dispatchSignal?.aborted,
               retainedReason: ticket
                 ? "The ticket was cancelled before source application."
                 : "The call was aborted before source application.",
-              signal: dispatchSignal,
             }),
           onWorkerQuiesced: (taskIndex) => prepared.cleanupWorker(taskIndex),
         })
