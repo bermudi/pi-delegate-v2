@@ -87,6 +87,26 @@ release notes and migration guidance; it must not arrive as rewrite drift.
   is now unconditional relative to the parent. Project instructions, model
   inheritance, child-owned pooled sessions and explicit `resumeFrom` remain.
 
+- **Mixed-outcome async batches settle as `partial` (#6, user decision).**
+  A naturally settled batch where at least one task succeeded and at least
+  one did not now reports terminal `partial` instead of v1's implicit
+  `completed` — a partially failed batch must never look like a clean
+  success. `completed` means every task succeeded, `failed` means no task
+  succeeded and at least one failed, and `cancelled` means every task was
+  cancelled or the ticket was force-cancelled, which stays authoritative over
+  late outcomes.
+  Migration: treat `partial` as terminal like `completed`, and inspect the
+  per-task outcomes for the failures instead of trusting the headline.
+
+- **Unknown singular ticket RPCs are errors (#6, user decision).** Poll
+  with a ticket id, wait, cancel, pause, and resume on a missing id now
+  return a tool error naming the ticket instead of a successful "not
+  found" response — a lookup miss must never read as success. Roster
+  polling without a ticket id is unchanged and still succeeds with an
+  empty or populated list.
+  Migration: handle singular misses as tool errors; do not rely on
+  scanning response text for "not found".
+
 Departures from the preserve list above. Each must carry its own motivation
 and migration guidance; none may arrive as silent rewrite drift.
 

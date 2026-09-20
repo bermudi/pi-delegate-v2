@@ -73,7 +73,12 @@ export interface TaskOutcome {
   readonly quarantined?: boolean;
 }
 
-export type TicketStatus = "running" | "completed" | "failed" | "cancelled";
+export type TicketStatus =
+  | "running"
+  | "completed"
+  | "partial"
+  | "failed"
+  | "cancelled";
 
 /** Guarded ticket record. `status` only moves running → terminal, once. */
 export interface Ticket {

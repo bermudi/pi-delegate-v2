@@ -152,15 +152,20 @@ gaps.
 
 - **Contract:** `async: true` returns a ticket immediately; auto-delivery;
   poll roster and single-ticket views; wait blocks to settlement or timeout;
-  tickets stay pollable after settlement; not-found semantics.
+  tickets stay pollable after settlement; natural settlement is `completed`
+  (every task ok), `partial` (at least one ok and at least one not),
+  `cancelled` (all cancelled), or `failed` (none ok, at least one failed)
+  while forced cancellation stays `cancelled`; a singular ticket RPC on an
+  unknown id is a tool error while an empty roster poll succeeds.
 - **Regression:** cancelled tickets retain partial results with index
   alignment; a late worker cannot flip a cancelled ticket to done; wait
   timeout/abort detaches only that waiter; delivery failure never unsettles.
 - **Internal:** ticket id generation, TTL sweeping, roster/format string
   composition, busy-index internals, waiter plumbing.
-- **Covered now:** empty roster; unknown-ticket handling for all actions;
-  wait-to-settlement; timeout detach; cancel preview vs force;
-  cancelled-ticket retains completed results; pause/resume.
+- **Covered now:** empty roster; error-valued unknown-ticket handling for
+  all singular actions; wait-to-settlement; timeout detach; cancel preview
+  vs force; explicit `partial` mixed-batch and `failed` all-failure
+  settlement; cancelled-ticket retains completed results; pause/resume.
 - **Covered now (`tests/contract/delivery.test.ts`, `SPEC.md` "Background
   delivery"):** same-leaf follow-up wake of an idle parent (`deliverAs:
   "followUp"` + `triggerTurn: true`), including after a prior navigation;

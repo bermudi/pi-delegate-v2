@@ -41,7 +41,7 @@ describe("delegate ticket contract", () => {
   });
 
   test(
-    "poll, wait, cancel, pause, and resume report unknown tickets as not found",
+    "poll, wait, cancel, pause, and resume return errors for unknown tickets",
     async () => {
       // v1 evidence: delegate.test.ts "poll with unknown ticket returns not
       // found", "wait on unknown ticket returns not found"; tickets.ts
@@ -55,7 +55,7 @@ describe("delegate ticket contract", () => {
         { ticketAction: "resume", ticket: "nope-1" },
       ]) {
         const result = await callDelegate(session, arguments_);
-        expect(result.isError).toBe(false);
+        expect(result.isError).toBe(true);
         expect(result.text).toMatch(/nope-1/);
         expect(result.text).toMatch(/not found/i);
       }
@@ -259,4 +259,65 @@ describe("delegate ticket contract", () => {
       expect(settled.text).toMatch(/done|complet/i);
     },
   );
+
+  test(
+    "a mixed success and failure async batch settles partial with both outcomes visible",
+    async () => {
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      const forPrompt: FauxResponseFactory = async (context) => {
+        if (JSON.stringify(context.messages).includes("succeed-task")) {
+          return fauxAssistantMessage("WINNER-OUTPUT");
+        }
+        return fauxAssistantMessage("", {
+          stopReason: "error",
+          errorMessage: "provider blew up",
+        });
+      };
+      subagents.respond([forPrompt, forPrompt]);
+
+      const dispatched = await callDelegate(session, {
+        tasks: [{ prompt: "succeed-task" }, { prompt: "fail-task" }],
+        async: true,
+      });
+      const ticket = ticketIdOf(dispatched.text);
+
+      const waited = await callDelegate(session, {
+        ticketAction: "wait",
+        ticket,
+        timeoutMs: 5000,
+      });
+      expect(waited.isError).toBe(false);
+      expect(waited.text).toContain(`Ticket "${ticket}": partial`);
+      expect(waited.text).not.toContain(`Ticket "${ticket}": completed`);
+      expect(waited.text).toContain("WINNER-OUTPUT");
+      expect(waited.text).toContain("provider blew up");
+    },
+  );
+
+  test("an all-failure async batch settles failed", async () => {
+    session = await openDelegateBoundary();
+    const subagents = await installSubagentModel(session);
+    subagents.respond([
+      fauxAssistantMessage("", {
+        stopReason: "error",
+        errorMessage: "provider blew up",
+      }),
+    ]);
+
+    const dispatched = await callDelegate(session, {
+      tasks: [{ prompt: "fail-task" }],
+      async: true,
+    });
+    const ticket = ticketIdOf(dispatched.text);
+
+    const waited = await callDelegate(session, {
+      ticketAction: "wait",
+      ticket,
+      timeoutMs: 5000,
+    });
+    expect(waited.isError).toBe(false);
+    expect(waited.text).toContain(`Ticket "${ticket}": failed`);
+    expect(waited.text).toContain("provider blew up");
+  });
 });

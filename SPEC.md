@@ -130,6 +130,16 @@ delegate({ ticketAction: "cancel", ticket, force? })
 
 Tickets remain pollable after settlement.
 
+A naturally settled batch is `completed` only when every task succeeded. It is
+`partial` when at least one task succeeded and at least one did not,
+`cancelled` when every task was cancelled, and `failed` when no task succeeded
+and at least one failed. Forced ticket cancellation remains authoritative and
+settles the ticket as `cancelled` regardless of late worker outcomes.
+
+A singular ticket RPC (poll with a ticket id, wait, cancel, pause, or resume)
+for an unknown id returns a tool error naming the missing ticket. Roster
+polling without a ticket id remains a successful empty/list response.
+
 ### Background delivery
 
 Delivery runs on Pi's public extension API only: no Pi source patch, patched

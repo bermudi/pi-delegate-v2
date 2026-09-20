@@ -34,7 +34,7 @@ function taskSection(outcome: TaskOutcome): string {
 /** Poll/wait view of one ticket. Poll is observational — never mutates. */
 export function ticketView(ticket: Ticket): string {
   const lines = [
-    `Ticket "${ticket.id}": ${statusWord(ticket)} — ${completedCount(ticket)}/${ticket.totalTasks} tasks completed.`,
+    `Ticket "${ticket.id}": ${statusWord(ticket)} — ${completedCount(ticket)}/${ticket.totalTasks} tasks finished.`,
     ...ticket.notices,
   ];
   for (const outcome of ticket.outcomes) {
@@ -49,7 +49,7 @@ function rosterView(tickets: readonly Ticket[]): string {
   }
   const lines = tickets.map(
     (ticket) =>
-      `- "${ticket.id}" ${statusWord(ticket)} — ${completedCount(ticket)}/${ticket.totalTasks} tasks completed`,
+      `- "${ticket.id}" ${statusWord(ticket)} — ${completedCount(ticket)}/${ticket.totalTasks} tasks finished`,
   );
   return `Tickets:\n${lines.join("\n")}`;
 }
@@ -132,7 +132,7 @@ export class TicketStore {
         : ticket.outcomes.every((o) => o!.status === "cancelled")
           ? "cancelled"
           : ticket.outcomes.some((o) => o!.status === "ok")
-            ? "completed"
+            ? "partial"
             : "failed",
     );
   }
@@ -275,7 +275,7 @@ export async function handleTicketRpc(
   if (!ticket) {
     return {
       text: `Ticket '${call.ticket ?? ""}' not found.`,
-      isError: false,
+      isError: true,
     };
   }
   switch (call.action) {
