@@ -143,6 +143,7 @@ describe("delegate telemetry contract", () => {
           { id: "corr-alpha", prompt: "first", tools: ["read"] },
           { prompt: "second" },
         ],
+        operationId: "op-private-1",
       });
 
       expect(result.isError).toBe(false);
@@ -155,6 +156,8 @@ describe("delegate telemetry contract", () => {
         );
         expect(calls).toHaveLength(1);
         expect(tasks).toHaveLength(2);
+        expect(JSON.stringify(calls)).not.toContain("op-private-1");
+        expect(JSON.stringify(tasks)).not.toContain("op-private-1");
 
         const call = calls[0];
         const firstTask = tasks[0];

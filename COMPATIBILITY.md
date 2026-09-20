@@ -71,6 +71,12 @@ release notes and migration guidance; it must not arrive as rewrite drift.
   changes.
 - Aggregate usage on synchronous tool results where supported. Async delivered
   messages still cannot add usage to the parent total.
+- Optional duplicate-safe dispatch identity (`operationId`, issue #16): an
+  additive contract — a keyed call with the same normalized request reuses
+  the original in-flight or settled result, and a keyed call with a changed
+  request conflicts. This is not content deduplication — unkeyed dispatches
+  always execute — and not an exactly-once crash/restart guarantee —
+  identity is host-lifetime only with bounded retention.
 - Opt-in, fail-open local telemetry that never stores prompt/output content,
   with stable call/task outcome meaning and explicit migration or versioning
   for existing databases. Telemetry stays disabled unless the user sets

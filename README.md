@@ -32,6 +32,24 @@ Tasks no longer accept `context`, including `context: "fresh"` or
 never inherit parent conversation history; project instructions, model
 inheritance, child-owned pooled sessions and explicit `resumeFrom` still apply.
 
+## Duplicate-safe retries
+
+Pass `operationId` — 1–64 letters, digits, `.`, `_`, or `-` — to make a
+dispatch retry-safe for the life of the session:
+
+```json
+{ "tasks": [{ "prompt": "rebuild the index" }], "operationId": "reindex-1" }
+```
+
+Repeating the call with the same id and the same request returns the
+original in-flight or settled result — the sync result or the async ticket —
+without running the work twice. The same id with a different request is an
+error, not a second run. Results live at most one hour after settling, with
+at most 256 settled operations retained; an expired or evicted id may run
+fresh again. Without `operationId` identical dispatches always run
+independently — there is no content deduplication and no crash/restart
+exactly-once guarantee.
+
 ## Telemetry
 
 Telemetry is off by default and writes only to a local SQLite database —

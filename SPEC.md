@@ -21,7 +21,7 @@ task starts.
 ### Dispatch
 
 ```ts
-delegate({ tasks: [task, ...], async?: boolean, workspace?: "shared" | "scratch" | "isolated" })
+delegate({ tasks: [task, ...], async?: boolean, workspace?: "shared" | "scratch" | "isolated", operationId?: string })
 ```
 
 Dispatch is synchronous by default. `async: true` applies to the whole batch,
@@ -95,6 +95,41 @@ same-call shared writers serialize in task order, and the result names the
 serialized tasks and scope with the `isolated` remedy — independent same-repo
 edits are meant to run in parallel worktrees. Overlap with active work, or
 between shared and isolated work, rejects the whole call before execution.
+
+### Explicit operation identity
+
+`operationId` is an optional top-level dispatch key of 1–64 ASCII letters,
+digits, `.`, `_`, or `-`. It is dispatch-only; ticket, session, and help calls
+reject it.
+
+Its scope is one extension/session lifetime: it is never persisted across
+reload, replacement, or restart. Two requests are equivalent when their
+normalized validated `{async, tasks}` structures are identical after
+supported boundary repairs and batch workspace-default application, before
+config/profile/model/cwd resolution; `operationId` itself is excluded.
+
+The same id plus the same normalized request reuses the exact original
+in-flight promise or settled result — the sync result or the async ticket —
+and only one execution ever runs. The same id plus a changed request
+conflicts before config resolution, admission, or work starts.
+
+The first caller owns the dispatch invocation's signal, host context,
+progress callback, and delivery origin. A duplicate dispatch call cannot
+contribute its own signal, recontextualize, or replay progress. For async
+results, the reused ticket remains cancelable through the ordinary ticket
+RPC by any caller holding its id. Cancellation or failure is itself a
+result and is reused; an operation is never restarted inside its
+retention.
+
+Settled records expire one hour after settlement and at most 256 settled
+records are retained, evicting the oldest-settled first; in-flight records
+are never evicted. An async operation's record counts as in-flight — and
+its retention clock has not started — until its ticket's batch finishes,
+so it survives capacity and expiry pressure while the ticket runs. After
+expiry or eviction, reuse may start a new operation.
+
+Unkeyed identical dispatches always execute independently: there is no
+content deduplication and no exactly-once crash guarantee.
 
 ### Workspaces
 

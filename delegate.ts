@@ -6,6 +6,7 @@ import {
 } from "typebox";
 import {
   defineTool,
+  type AgentToolResult,
   type ExtensionAPI,
 } from "@earendil-works/pi-coding-agent";
 import { AdmissionController } from "./src/admission.ts";
@@ -27,6 +28,10 @@ import {
   resolveTasks,
   type HostEnvironment,
 } from "./src/host.ts";
+import {
+  dispatchFingerprint,
+  OperationStore,
+} from "./src/operations.ts";
 import { handleSessionRpc, SessionPool } from "./src/sessions.ts";
 import { TelemetryStore } from "./src/telemetry.ts";
 import { handleTicketRpc, TicketStore, ticketView } from "./src/tickets.ts";
@@ -143,6 +148,13 @@ const argumentsSchema = Type.Object(
         description: "Tasks to run; omit or pass [] for help.",
       }),
     ),
+    operationId: Type.Optional(
+      Type.String({
+        pattern: "^[A-Za-z0-9._-]{1,64}$",
+        description:
+          "Bounded duplicate-safe dispatch key; same key/request reuses the original operation.",
+      }),
+    ),
     workspace: Type.Optional(
       stringEnum(["shared", "scratch", "isolated"], {
         description:
@@ -155,6 +167,7 @@ const argumentsSchema = Type.Object(
 
 type DelegateArguments = Static<typeof argumentsSchema>;
 type DelegateDetails = Record<string, unknown>;
+type DelegateResult = AgentToolResult<DelegateDetails>;
 
 const taskFieldNames = [
   "id",
@@ -223,6 +236,14 @@ function normalizeTask(value: unknown): unknown {
  * a throw surfaces to the caller as a normal whole-call tool error.
  */
 function rejectAmbiguousShapes(args: Record<string, unknown>): void {
+  if (
+    args.operationId !== undefined &&
+    typeof args.operationId !== "string"
+  ) {
+    throw new Error(
+      `'operationId' must be a string of 1-64 letters, digits, dots, underscores, or hyphens, not ${JSON.stringify(args.operationId)}.`,
+    );
+  }
   for (const field of ["async", "force", "timeoutMs"] as const) {
     const value = args[field];
     if (typeof value === "string") {
@@ -302,6 +323,9 @@ Delegate runs subagent tasks synchronously or as an asynchronous ticket.
   \`tools\` (\`*\`/\`ro\` groups or names), \`thinking\`, \`deadlineMs\`,
   \`sessionId\`, \`resumeFrom\`, \`workspace\` (shared/scratch/isolated).
   A top-level \`workspace\` is the batch default.
+- \`operationId\` (1-64 letters/digits/./_/-) makes a dispatch duplicate-safe:
+  same id + same request returns the original in-flight or settled result;
+  same id + a changed request is an error. Dispatch-only.
 - Models: you never pick models. Tasks run on the parent's model; a named
   agent may instead run on the model the user configured for it under
   "models" in the user-global delegate.json. A task \`model\` field is
@@ -355,6 +379,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
   const sessions = new SessionPool();
   const coordinator = new DispatchCoordinator(tickets);
   const telemetry = new TelemetryStore();
+  const operations = new OperationStore<DelegateResult>();
   let callSeq = 0;
   // Owned by this closure: one fallback warning per extension instance, not
   // per call (see resolveAgentDir for why the fallback exists at all).
@@ -539,237 +564,249 @@ export default function delegateExtension(api: ExtensionAPI): void {
           };
         }
 
-        if (shuttingDown) {
-          throw new Error(
-            "Delegate is shutting down with this session; new dispatches are not accepted. " +
-              "Existing tickets remain pollable for the rest of the session's lifetime.",
-          );
-        }
-
-        // The dispatch barrier is tracked before anything between the
-        // latch check and the coordinator handoff can throw or yield:
-        // task resolution probes Git for each writer/isolated task's
-        // write scope, admission grants reservations, and workspace
-        // preparation awaits subprocesses. A shutdown that starts while
-        // this dispatch sits anywhere in that range must already count it
-        // in the liveQuiescence snapshot, or the session boundary could
-        // complete before the dispatch starts workers or releases its
-        // reservations. The same barrier is handed to the coordinator;
-        // every path below that ends without that handoff resolves it in
-        // the catch.
-        const { barrier: quiescence, relabel } = trackQuiescence(
-          call.async ? "async dispatch (preparing)" : "dispatch (preparing)",
-        );
-        try {
-          const agentDirResolution = resolveAgentDir(ctx);
-          if (agentDirResolution.source === "cwd" && !warnedAgentDirFallback) {
-            warnedAgentDirFallback = true;
-            console.warn(
-              `[delegate] Falling back to '${agentDirResolution.dir}' as the agent directory: delegate.json will be read from there, and delegate-sessions/, delegate-scratch/, delegate-isolated/ may be created under it. Set DELEGATE_AGENT_DIR to choose an agent directory explicitly. This warning appears once.`,
+        let operationTicket: Ticket | undefined;
+        const executeDispatch = async () => {
+          if (shuttingDown) {
+            throw new Error(
+              "Delegate is shutting down with this session; new dispatches are not accepted. " +
+                "Existing tickets remain pollable for the rest of the session's lifetime.",
             );
           }
-          const env = hostEnvironment(ctx, () => api.getActiveTools());
-          const config = loadDelegateConfig(ctx);
-          const tasks = resolveTasks(call.tasks, env, config);
-          sessions.validateReuse(tasks);
 
-          if (call.async) {
-            const ticket = tickets.create(tasks, {
-              holdSettlement: workspaceNeedsSettlementHold(tasks),
-            });
-            // The barrier now has its durable name for the shutdown status.
-            relabel(`ticket "${ticket.id}"`);
-            // The session-tree position at dispatch: delivery may wake the
-            // parent only while it is still on this branch with no tree
-            // transition or shutdown observed since.
-            const origin = {
-              leafId: ctx.sessionManager.getLeafId(),
-              epoch: navigationEpoch,
-            };
-            let completion: Promise<DispatchOutcome>;
-            try {
-              ({ completion } = await startDispatch({
-                tasks,
-                env,
-                config,
-                owner: ticket.id,
-                ticket,
-                quiescence,
-              }));
-              void completion.then(() => undefined).catch((error: unknown) => {
-                // The run promise rejected without (or after) handing the
-                // barrier to the task quiescence chain: resolve it so a
-                // later shutdown cannot wait forever on a dead dispatch.
-                quiescence.resolve();
-                tickets.settle(ticket, "failed");
-                console.error(
-                  `[delegate] background ticket ${ticket.id} crashed: ${error instanceof Error ? error.message : String(error)}`,
-                );
+          // The dispatch barrier is tracked before anything between the
+          // latch check and the coordinator handoff can throw or yield:
+          // task resolution probes Git for each writer/isolated task's
+          // write scope, admission grants reservations, and workspace
+          // preparation awaits subprocesses. A shutdown that starts while
+          // this dispatch sits anywhere in that range must already count it
+          // in the liveQuiescence snapshot, or the session boundary could
+          // complete before the dispatch starts workers or releases its
+          // reservations. The same barrier is handed to the coordinator;
+          // every path below that ends without that handoff resolves it in
+          // the catch.
+          const { barrier: quiescence, relabel } = trackQuiescence(
+            call.async ? "async dispatch (preparing)" : "dispatch (preparing)",
+          );
+          try {
+            const agentDirResolution = resolveAgentDir(ctx);
+            if (agentDirResolution.source === "cwd" && !warnedAgentDirFallback) {
+              warnedAgentDirFallback = true;
+              console.warn(
+                `[delegate] Falling back to '${agentDirResolution.dir}' as the agent directory: delegate.json will be read from there, and delegate-sessions/, delegate-scratch/, delegate-isolated/ may be created under it. Set DELEGATE_AGENT_DIR to choose an agent directory explicitly. This warning appears once.`,
+              );
+            }
+            const env = hostEnvironment(ctx, () => api.getActiveTools());
+            const config = loadDelegateConfig(ctx);
+            const tasks = resolveTasks(call.tasks, env, config);
+            sessions.validateReuse(tasks);
+
+            if (call.async) {
+              const ticket = tickets.create(tasks, {
+                holdSettlement: workspaceNeedsSettlementHold(tasks),
               });
-              // Auto-delivery, armed once the batch is running. It waits for
-              // caller settlement AND the finished gate, so the delivered view
-              // always carries the safe-to-expose outcome: finalized isolated
-              // integrations, retained errors, and (on cancellation) partial
-              // results rather than a bare status.
-              const deliver = async (): Promise<void> => {
-                if (shuttingDown) return;
-                const cancelled = ticket.status === "cancelled";
-                const message = {
-                  customType: "delegate-result",
-                  content:
-                    ticketView(ticket) +
-                    (cancelled
-                      ? "\nCancellation is cooperative; worker cleanup may still be pending."
-                      : ""),
-                  display: true,
-                  details: { ticket: ticket.id, originLeafId: origin.leafId },
-                };
-                // api.sendMessage is fire-and-forget on the stock
-                // ExtensionAPI (returns void): async send rejections surface
-                // through the host's extension-error channel, never here.
-                // Only synchronous throws — e.g. a torn-down runtime failing
-                // assertActive — reach the catch below. Either way,
-                // settlement stands and the result stays pollable.
-                try {
-                  // "Same leaf" means same branch: the parent's own turn
-                  // appends entries after dispatch, so the current leaf is a
-                  // descendant of the origin leaf — the origin must still lie
-                  // on the current branch (a null origin is the root, which
-                  // every branch descends from). The epoch separately rules
-                  // out any observed transition, cancelled or not.
-                  const sameLeaf =
-                    navigationEpoch === origin.epoch &&
-                    (origin.leafId === null ||
-                      ctx.sessionManager
-                        .getBranch()
-                        .some((entry) => entry.id === origin.leafId));
-                  if (sameLeaf) {
-                    // Same leaf, no transition observed: a follow-up wakes an
-                    // idle parent and queues behind a busy one's tool calls.
-                    api.sendMessage(message, {
-                      deliverAs: "followUp",
-                      triggerTurn: true,
-                    });
-                  } else {
-                    // Leaf moved or a transition is in flight: append durably
-                    // at the current leaf without triggering a turn — it
-                    // enters model context on the next user turn.
-                    api.sendMessage(message, { triggerTurn: false });
-                    try {
-                      ctx.ui.notify(
-                        `Delegate ticket "${ticket.id}" settled on a different branch; its result was appended to the current branch for the next turn.`,
-                        "info",
-                      );
-                    } catch {
-                      // The UI may already be gone; the append itself landed.
-                    }
-                  }
-                } catch (error) {
-                  // Delivery failure never undoes settlement: the ticket stays
-                  // terminal and pollable.
-                  console.error(
-                    `[delegate] delivering ticket ${ticket.id} failed (result remains pollable): ${error instanceof Error ? error.message : String(error)}`,
-                  );
-                  try {
-                    ctx.ui.notify(
-                      `Delegate ticket "${ticket.id}" settled but its result could not be delivered; poll it for the result.`,
-                      "error",
-                    );
-                  } catch {
-                    // A stale ctx cannot show the notice; the log line stands.
-                  }
-                }
+              operationTicket = ticket;
+              // The barrier now has its durable name for the shutdown status.
+              relabel(`ticket "${ticket.id}"`);
+              // The session-tree position at dispatch: delivery may wake the
+              // parent only while it is still on this branch with no tree
+              // transition or shutdown observed since.
+              const origin = {
+                leafId: ctx.sessionManager.getLeafId(),
+                epoch: navigationEpoch,
               };
-              void Promise.all([
-                ticket.settledGate.promise,
-                ticket.finishedGate.promise,
-              ])
-                .then(deliver)
-                .catch((error: unknown) => {
+              let completion: Promise<DispatchOutcome>;
+              try {
+                ({ completion } = await startDispatch({
+                  tasks,
+                  env,
+                  config,
+                  owner: ticket.id,
+                  ticket,
+                  quiescence,
+                }));
+                void completion.then(() => undefined).catch((error: unknown) => {
+                  // The run promise rejected without (or after) handing the
+                  // barrier to the task quiescence chain: resolve it so a
+                  // later shutdown cannot wait forever on a dead dispatch.
+                  quiescence.resolve();
+                  tickets.settle(ticket, "failed");
                   console.error(
-                    `[delegate] delivering ticket ${ticket.id} crashed (result remains pollable): ${error instanceof Error ? error.message : String(error)}`,
+                    `[delegate] background ticket ${ticket.id} crashed: ${error instanceof Error ? error.message : String(error)}`,
                   );
                 });
-            } catch (error) {
-              tickets.remove(ticket.id);
-              throw error;
+                // Auto-delivery, armed once the batch is running. It waits for
+                // caller settlement AND the finished gate, so the delivered view
+                // always carries the safe-to-expose outcome: finalized isolated
+                // integrations, retained errors, and (on cancellation) partial
+                // results rather than a bare status.
+                const deliver = async (): Promise<void> => {
+                  if (shuttingDown) return;
+                  const cancelled = ticket.status === "cancelled";
+                  const message = {
+                    customType: "delegate-result",
+                    content:
+                      ticketView(ticket) +
+                      (cancelled
+                        ? "\nCancellation is cooperative; worker cleanup may still be pending."
+                        : ""),
+                    display: true,
+                    details: { ticket: ticket.id, originLeafId: origin.leafId },
+                  };
+                  // api.sendMessage is fire-and-forget on the stock
+                  // ExtensionAPI (returns void): async send rejections surface
+                  // through the host's extension-error channel, never here.
+                  // Only synchronous throws — e.g. a torn-down runtime failing
+                  // assertActive — reach the catch below. Either way,
+                  // settlement stands and the result stays pollable.
+                  try {
+                    // "Same leaf" means same branch: the parent's own turn
+                    // appends entries after dispatch, so the current leaf is a
+                    // descendant of the origin leaf — the origin must still lie
+                    // on the current branch (a null origin is the root, which
+                    // every branch descends from). The epoch separately rules
+                    // out any observed transition, cancelled or not.
+                    const sameLeaf =
+                      navigationEpoch === origin.epoch &&
+                      (origin.leafId === null ||
+                        ctx.sessionManager
+                          .getBranch()
+                          .some((entry) => entry.id === origin.leafId));
+                    if (sameLeaf) {
+                      // Same leaf, no transition observed: a follow-up wakes an
+                      // idle parent and queues behind a busy one's tool calls.
+                      api.sendMessage(message, {
+                        deliverAs: "followUp",
+                        triggerTurn: true,
+                      });
+                    } else {
+                      // Leaf moved or a transition is in flight: append durably
+                      // at the current leaf without triggering a turn — it
+                      // enters model context on the next user turn.
+                      api.sendMessage(message, { triggerTurn: false });
+                      try {
+                        ctx.ui.notify(
+                          `Delegate ticket "${ticket.id}" settled on a different branch; its result was appended to the current branch for the next turn.`,
+                          "info",
+                        );
+                      } catch {
+                        // The UI may already be gone; the append itself landed.
+                      }
+                    }
+                  } catch (error) {
+                    // Delivery failure never undoes settlement: the ticket stays
+                    // terminal and pollable.
+                    console.error(
+                      `[delegate] delivering ticket ${ticket.id} failed (result remains pollable): ${error instanceof Error ? error.message : String(error)}`,
+                    );
+                    try {
+                      ctx.ui.notify(
+                        `Delegate ticket "${ticket.id}" settled but its result could not be delivered; poll it for the result.`,
+                        "error",
+                      );
+                    } catch {
+                      // A stale ctx cannot show the notice; the log line stands.
+                    }
+                  }
+                };
+                void Promise.all([
+                  ticket.settledGate.promise,
+                  ticket.finishedGate.promise,
+                ])
+                  .then(deliver)
+                  .catch((error: unknown) => {
+                    console.error(
+                      `[delegate] delivering ticket ${ticket.id} crashed (result remains pollable): ${error instanceof Error ? error.message : String(error)}`,
+                    );
+                  });
+              } catch (error) {
+                tickets.remove(ticket.id);
+                throw error;
+              }
+              return {
+                content: [
+                  {
+                    type: "text" as const,
+                    text:
+                      `Ticket "${ticket.id}" created: ${tasks.length} task(s) running in the background.\n` +
+                      `Check progress with delegate({ ticketAction: "poll", ticket: "${ticket.id}" }).` +
+                      (ticket.notices.length > 0
+                        ? `\n${ticket.notices.join("\n")}`
+                        : ""),
+                  },
+                ],
+                details: {
+                  mode: "dispatch" as const,
+                  async: true,
+                  ticket: ticket.id,
+                  tasks: tasks.map((task) => task.id),
+                },
+              };
             }
+
+            callSeq += 1;
+            const owner = `call-${callSeq}`;
+            relabel(owner);
+            const { completion, notices } = await startDispatch({
+              tasks,
+              env,
+              config,
+              owner,
+              signal,
+              quiescence,
+              // Surface same-call serialization immediately — a serialized batch of
+              // independent writers is the expensive way to learn about "isolated".
+              onNotices: (current) => {
+                if (current.length > 0) {
+                  onUpdate?.({
+                    content: [
+                      { type: "text" as const, text: current.join("\n") },
+                    ],
+                    details: {},
+                  });
+                }
+              },
+            });
+            const result = await completion;
+            const allFailed = result.outcomes.every(
+              (outcome) => outcome.status !== "ok",
+            );
             return {
               content: [
                 {
                   type: "text" as const,
                   text:
-                    `Ticket "${ticket.id}" created: ${tasks.length} task(s) running in the background.\n` +
-                    `Check progress with delegate({ ticketAction: "poll", ticket: "${ticket.id}" }).` +
-                    (ticket.notices.length > 0
-                      ? `\n${ticket.notices.join("\n")}`
-                      : ""),
+                    (notices.length > 0 ? `${notices.join("\n")}\n\n` : "") +
+                    formatDispatchResult(result.outcomes),
                 },
               ],
               details: {
                 mode: "dispatch" as const,
-                async: true,
-                ticket: ticket.id,
-                tasks: tasks.map((task) => task.id),
+                async: false,
+                tasks: result.outcomes.map((outcome) => ({
+                  id: outcome.id,
+                  status: outcome.status,
+                })),
               },
+              usage: result.usage,
+              isError: allFailed,
             };
+          } catch (error) {
+            // coordinator.run wires the barrier to task quiescence the moment
+            // it starts; if execution never got there (or the run promise
+            // itself rejected pre-wiring), resolve it here — a leaked
+            // barrier would hold every future shutdown forever.
+            quiescence.resolve();
+            throw error;
           }
+        };
 
-          callSeq += 1;
-          const owner = `call-${callSeq}`;
-          relabel(owner);
-          const { completion, notices } = await startDispatch({
-            tasks,
-            env,
-            config,
-            owner,
-            signal,
-            quiescence,
-            // Surface same-call serialization immediately — a serialized batch of
-            // independent writers is the expensive way to learn about "isolated".
-            onNotices: (current) => {
-              if (current.length > 0) {
-                onUpdate?.({
-                  content: [
-                    { type: "text" as const, text: current.join("\n") },
-                  ],
-                  details: {},
-                });
-              }
-            },
-          });
-          const result = await completion;
-          const allFailed = result.outcomes.every(
-            (outcome) => outcome.status !== "ok",
-          );
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text:
-                  (notices.length > 0 ? `${notices.join("\n")}\n\n` : "") +
-                  formatDispatchResult(result.outcomes),
-              },
-            ],
-            details: {
-              mode: "dispatch" as const,
-              async: false,
-              tasks: result.outcomes.map((outcome) => ({
-                id: outcome.id,
-                status: outcome.status,
-              })),
-            },
-            usage: result.usage,
-            isError: allFailed,
-          };
-        } catch (error) {
-          // coordinator.run wires the barrier to task quiescence the moment
-          // it starts; if execution never got there (or the run promise
-          // itself rejected pre-wiring), resolve it here — a leaked
-          // barrier would hold every future shutdown forever.
-          quiescence.resolve();
-          throw error;
-        }
+        if (call.operationId === undefined) return executeDispatch();
+        return operations.run(
+          call.operationId,
+          dispatchFingerprint({ async: call.async, tasks: call.tasks }),
+          executeDispatch,
+          () => operationTicket?.finishedGate.promise ?? Promise.resolve(),
+        );
       },
     }),
   );

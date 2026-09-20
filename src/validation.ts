@@ -35,6 +35,7 @@ export type ValidatedCall =
       readonly mode: "dispatch";
       readonly tasks: readonly TaskInput[];
       readonly async: boolean;
+      readonly operationId: string | undefined;
     };
 
 export interface RawArguments {
@@ -48,6 +49,7 @@ export interface RawArguments {
   /** Batch-level workspace default; a task's own `workspace` wins. */
   readonly workspace?: "shared" | "scratch" | "isolated";
   readonly tasks?: TaskInput[];
+  readonly operationId?: string;
 }
 
 function fail(message: string): never {
@@ -83,6 +85,11 @@ export function validateCall(args: RawArguments): ValidatedCall {
         `ticketAction cannot be combined with workspace; workspace is a dispatch field.`,
       );
     }
+    if (args.operationId !== undefined) {
+      fail(
+        `ticketAction cannot be combined with operationId; operationId is a dispatch field.`,
+      );
+    }
     const action = args.ticketAction;
     if (action !== "cancel" && args.force === true) {
       fail(`force is valid only with ticketAction "cancel".`);
@@ -116,6 +123,11 @@ export function validateCall(args: RawArguments): ValidatedCall {
     if (args.workspace !== undefined) {
       fail(
         `sessionAction cannot be combined with workspace; workspace is a dispatch field.`,
+      );
+    }
+    if (args.operationId !== undefined) {
+      fail(
+        `sessionAction cannot be combined with operationId; operationId is a dispatch field.`,
       );
     }
     if (args.sessionAction === "close" && args.sessionId === undefined) {
@@ -154,6 +166,9 @@ export function validateCall(args: RawArguments): ValidatedCall {
     if (args.workspace !== undefined) {
       fail(`workspace requires at least one task; it is a dispatch field.`);
     }
+    if (args.operationId !== undefined) {
+      fail(`operationId requires a non-empty dispatch task list.`);
+    }
     return { mode: "help" };
   }
 
@@ -167,7 +182,12 @@ export function validateCall(args: RawArguments): ValidatedCall {
             : task,
         );
   validateTasks(effectiveTasks);
-  return { mode: "dispatch", tasks: effectiveTasks, async: args.async === true };
+  return {
+    mode: "dispatch",
+    tasks: effectiveTasks,
+    async: args.async === true,
+    operationId: args.operationId,
+  };
 }
 
 /** Batch-level checks over normalized tasks; all run before any task starts. */

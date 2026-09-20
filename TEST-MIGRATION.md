@@ -402,6 +402,32 @@ gaps.
   process environment.
 - **Gap:** none.
 
+### Explicit dispatch identity (#16)
+
+- **Contract:** `operationId` scopes a dispatch to one execution per live
+  key+request: the same normalized `{async, tasks}` reuses the in-flight
+  promise or settled result (sync result or async ticket), a changed
+  request conflicts before any work, retention is bounded (one-hour
+  expiry, 256 settled records, in-flight never evicted), the first caller
+  owns cancellation/context/progress/delivery, and unkeyed dispatches are
+  never deduplicated. Host-lifetime only; no crash or exactly-once claim.
+- **Regression:** concurrent retries share one gated execution; a
+  duplicate caller's aborted signal cannot cancel the shared operation;
+  post-settlement retries reuse; same-id changed requests conflict while
+  running and after settlement; forced-cancel results are reused, never
+  restarted; an in-flight async operation survives settled-cap pressure
+  and retries to the same ticket; expiry and capacity eviction permit
+  fresh operations; intentional unkeyed repeats always execute;
+  equivalent supported normalizations (flat task vs one-task array,
+  batch workspace default vs task workspace) count as identical.
+- **Internal:** the map, the fingerprint hash (SHA-256 today), and prune
+  mechanics are free to change; only the identity semantics and bounds
+  are contract.
+- **Covered now:** `tests/contract/operations.test.ts`, including
+  failed-result reuse after the configuration that caused the failure is
+  fixed, alongside forced-cancel result reuse.
+- **Gap:** none.
+
 ## First tranche
 
 | V1 evidence | Class | V2 treatment |
@@ -732,7 +758,9 @@ delivery on the stock Pi extension API (issue #3; `SPEC.md` "Background
 delivery", `tests/contract/delivery.test.ts`) — no Pi patch was added to
 `patches/`; opt-in content-free local telemetry with privacy exclusions and
 v1 migration preservation (issue #8; `SPEC.md` "Telemetry",
-`tests/contract/telemetry.test.ts`).
+`tests/contract/telemetry.test.ts`); bounded duplicate-safe dispatch
+identity via `operationId` (issue #16; `SPEC.md` "Explicit operation
+identity", `tests/contract/operations.test.ts`).
 
 Remaining:
 
