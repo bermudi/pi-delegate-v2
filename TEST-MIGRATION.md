@@ -361,9 +361,21 @@ gaps.
   meaningful.
 - **Internal:** SQLite layout, sweep cadence, record-once mechanics — all
   free to change; only privacy and outcome-meaning are contract.
-- **Covered now:** aggregate usage present on the sync tool result.
-- **Gap:** async-no-usage property; the privacy property is only assertable
-  once v2 chooses its telemetry surface; TUI/status rendering is
+- **Covered now:** aggregate usage present on the sync tool result;
+  telemetry is disabled by default and creates no file; explicit opt-in
+  writes call/task rows carrying only the allowed metadata with legacy
+  privacy columns NULL; `telemetry.dbPath` > `DELEGATE_TELEMETRY_DB` >
+  `<agentDir>/delegate-usage.db` precedence; open/write failure is
+  fail-open and leaves dispatch results intact; DB/WAL/SHM files are
+  owner-only; a v1 database migrates in place preserving existing rows;
+  simultaneous first-open writers each persist exactly one call and one
+  task row per batch; malformed telemetry config rejects before provider work;
+  force-cancelled calls record authoritative cancellation; a failed destination
+  retries after the identity changes; isolated integration status records only
+  after reconciliation; an unfinished span is dropped when the destination
+  changes before its batch finishes; task rows whose workers have unconfirmed
+  quiescence are marked provisional.
+- **Gap:** async-no-usage property; TUI/status rendering is
   intentionally out of scope for boundary tests.
 
 ### Agent directory resolution
@@ -718,11 +730,13 @@ shutdown; shared-write admission and same-call serialization; isolated
 all-or-nothing application; cancellation safety and quarantine; background
 delivery on the stock Pi extension API (issue #3; `SPEC.md` "Background
 delivery", `tests/contract/delivery.test.ts`) — no Pi patch was added to
-`patches/`.
+`patches/`; opt-in content-free local telemetry with privacy exclusions and
+v1 migration preservation (issue #8; `SPEC.md` "Telemetry",
+`tests/contract/telemetry.test.ts`).
 
 Remaining:
 
-1. Usage and telemetry privacy.
+1. Usage properties.
 2. The per-subsystem **Gap** entries above.
 
 Each slice should add only the public test driver capabilities it needs. Tests

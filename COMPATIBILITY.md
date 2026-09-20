@@ -71,9 +71,20 @@ release notes and migration guidance; it must not arrive as rewrite drift.
   changes.
 - Aggregate usage on synchronous tool results where supported. Async delivered
   messages still cannot add usage to the parent total.
-- Fail-open telemetry that never stores prompt/output content, with stable
-  call/task outcome meaning and explicit migration or versioning for existing
-  databases.
+- Opt-in, fail-open local telemetry that never stores prompt/output content,
+  with stable call/task outcome meaning and explicit migration or versioning
+  for existing databases. Telemetry stays disabled unless the user sets
+  `telemetry.enabled: true` in `delegate.json`; v2 records only dispatch and
+  outcome metadata for batches that reach a completed outcome — the batch
+  start timestamp and wall duration, sync/async mode, task count, terminal call
+  status, caller-visible task status, agent/model/thinking/tools/workspace
+  selections, integration status, retry count, and numeric token/cost usage —
+  plus caller-visible task outcomes with unconfirmed-quiescence rows marked
+  provisional — and never prompt, system-prompt, output or error text, cwd or
+  session paths, caller task IDs, operation IDs, or parent transcript content.
+  Existing databases migrate in place and existing rows are preserved; legacy
+  sensitive fields are not continued on new v2 rows, and v2 leaves the legacy
+  per-task duration column NULL.
 
 ## v2 deliberate breaking changes
 

@@ -178,6 +178,42 @@ ticket settling inside that window may wake the outgoing session once; Pi
 aborts that turn during teardown. This is an accepted, documented limitation
 (see `COMPATIBILITY.md`), never a workspace-safety gap.
 
+### Telemetry
+
+Telemetry is disabled by default. Only an explicit
+`"telemetry": { "enabled": true }` in the user-global `delegate.json` enables
+it.
+
+Telemetry writes to a local SQLite database only; nothing is transmitted
+remotely. The destination resolves as `telemetry.dbPath`, then
+`DELEGATE_TELEMETRY_DB`, then `<agentDir>/delegate-usage.db`.
+
+Each dispatch pins the resolved destination when the batch is accepted. If a
+later dispatch disables telemetry or selects another destination before the
+first finishes, the unfinished span is dropped rather than reopening or
+writing the obsolete destination.
+
+Rows are written only for dispatches that reach a completed batch outcome;
+rejected calls and failed admission or preparation record nothing. For each
+such dispatch it records the batch start timestamp and wall duration,
+sync/async mode, task count, terminal call status, caller-visible task status,
+agent/model/thinking/tools/workspace selections, integration status, retry
+count, and numeric token/cost usage. Task records capture metadata and outcomes
+at batch finish; v2 leaves the legacy per-task duration field NULL. A task row
+whose worker could not be confirmed stopped is marked provisional and may later
+be superseded in the live ticket.
+
+It never stores prompt, system-prompt, output, or error text; cwd or session
+paths; caller task IDs; operation IDs; or parent transcript content. Legacy v1
+rows may retain older values; v2 does not rewrite or delete them.
+
+Telemetry is fail-open: an open, schema, write, or close failure logs and
+disables telemetry for that destination; delegation results never change.
+
+An existing v1 database migrates in place with old rows preserved. Disabled
+telemetry leaves existing files unopened and untouched. On intentional enable
+the database, WAL, and SHM files are owner-only.
+
 ### Session RPC
 
 ```ts

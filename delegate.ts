@@ -28,6 +28,7 @@ import {
   type HostEnvironment,
 } from "./src/host.ts";
 import { handleSessionRpc, SessionPool } from "./src/sessions.ts";
+import { TelemetryStore } from "./src/telemetry.ts";
 import { handleTicketRpc, TicketStore, ticketView } from "./src/tickets.ts";
 import {
   Deferred,
@@ -340,6 +341,12 @@ Delegate runs subagent tasks synchronously or as an asynchronous ticket.
   incompatible reuse is rejected.
 - \`sessionAction: "list"\` lists live sessions; \`sessionAction: "close"\`
   with \`sessionId\` closes one.
+
+## Telemetry
+- Disabled by default; enable only via "telemetry" in delegate.json.
+- Local content-free metadata only: batch and task outcome records in a
+  SQLite database at telemetry.dbPath, DELEGATE_TELEMETRY_DB, or
+  <agentDir>/delegate-usage.db. Failures never block work.
 `;
 
 export default function delegateExtension(api: ExtensionAPI): void {
@@ -347,6 +354,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
   const admission = new AdmissionController();
   const sessions = new SessionPool();
   const coordinator = new DispatchCoordinator(tickets);
+  const telemetry = new TelemetryStore();
   let callSeq = 0;
   // Owned by this closure: one fallback warning per extension instance, not
   // per call (see resolveAgentDir for why the fallback exists at all).
@@ -406,6 +414,11 @@ export default function delegateExtension(api: ExtensionAPI): void {
     let plan: WorkspacePlan | undefined;
     try {
       options.onNotices?.(notices);
+      const telemetrySpan = telemetry.beginDispatch(
+        config.telemetry,
+        env.agentDir,
+        { async: ticket !== undefined, startedAt: Date.now(), tasks },
+      );
       plan = await prepareWorkspaces(tasks, env.agentDir, signal);
       const prepared = plan;
       const run = coordinator.run(prepared.tasks, {
@@ -428,9 +441,14 @@ export default function delegateExtension(api: ExtensionAPI): void {
       });
       return {
         notices,
-        completion: run.finally(() => {
-          if (ticket) tickets.releaseSettlement(ticket);
-        }),
+        completion: run
+          .then((outcome) => {
+            telemetrySpan.finish(outcome, ticket?.status);
+            return outcome;
+          })
+          .finally(() => {
+            if (ticket) tickets.releaseSettlement(ticket);
+          }),
       };
     } catch (error) {
       // Preparation failed before coordinator.run took over the
@@ -480,6 +498,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
       );
       await Promise.all(pending.map(([promise]) => promise));
     }
+    telemetry.close();
   });
 
   api.registerTool(

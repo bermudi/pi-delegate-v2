@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, isAbsolute, join } from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { knownAgentNames } from "./profiles.ts";
 
@@ -10,6 +10,11 @@ export interface ConcurrencyConfig {
   readonly providers: Readonly<Record<string, number>>;
   /** "provider/model-id" → bound; wins over providers and default. */
   readonly models: Readonly<Record<string, number>>;
+}
+
+export interface TelemetryConfig {
+  readonly enabled: boolean;
+  readonly dbPath: string | undefined;
 }
 
 export interface DelegateConfig {
@@ -28,6 +33,7 @@ export interface DelegateConfig {
    * is cooperatively aborted as stalled. 0 disables it.
    */
   readonly stallTimeoutMs: number;
+  readonly telemetry: TelemetryConfig;
 }
 
 export const DEFAULT_CONFIG: DelegateConfig = {
@@ -35,6 +41,7 @@ export const DEFAULT_CONFIG: DelegateConfig = {
   concurrency: { default: undefined, providers: {}, models: {} },
   models: {},
   stallTimeoutMs: 15 * 60 * 1000,
+  telemetry: { enabled: false, dbPath: undefined },
 };
 
 /**
@@ -159,6 +166,42 @@ export function loadDelegateConfig(ctx: ExtensionContext): DelegateConfig {
     models: parseModels(config.models, path),
     stallTimeoutMs:
       (stallTimeoutMs as number) ?? DEFAULT_CONFIG.stallTimeoutMs,
+    telemetry: parseTelemetry(config.telemetry, path),
+  };
+}
+
+function parseTelemetry(value: unknown, path: string): TelemetryConfig {
+  if (value === undefined) return DEFAULT_CONFIG.telemetry;
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`${path}: telemetry must be an object.`);
+  }
+  const raw = value as Record<string, unknown>;
+  for (const key of Object.keys(raw)) {
+    if (key !== "enabled" && key !== "dbPath") {
+      throw new Error(
+        `${path}: telemetry.${key} is not a known telemetry option; known keys: enabled, dbPath.`,
+      );
+    }
+  }
+  if (raw.enabled !== undefined && typeof raw.enabled !== "boolean") {
+    throw new Error(
+      `${path}: telemetry.enabled must be a boolean; got ${JSON.stringify(raw.enabled)}.`,
+    );
+  }
+  const dbPath = raw.dbPath;
+  if (
+    dbPath !== undefined &&
+    (typeof dbPath !== "string" ||
+      dbPath.trim() === "" ||
+      !isAbsolute(dbPath.trim()))
+  ) {
+    throw new Error(
+      `${path}: telemetry.dbPath must be a non-empty absolute path; got ${JSON.stringify(dbPath)}.`,
+    );
+  }
+  return {
+    enabled: raw.enabled === true,
+    dbPath: typeof dbPath === "string" ? dbPath.trim() : undefined,
   };
 }
 
