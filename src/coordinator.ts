@@ -159,6 +159,11 @@ export class DispatchCoordinator {
       ...tasks.map((task) => fullyQuiesced.get(task.index)!.promise),
       bodySettled.promise,
     ]).then(() => options.quiescence.resolve());
+    // Nothing between the barrier wiring above and the `try` below may
+    // throw. The dispatcher's cancelled-preparation rerun invokes `run`
+    // with no fallback catch: a throw in this gap on that path would leak
+    // the barrier and hang every future shutdown. `setLimit` cannot throw
+    // for a validated numeric config; keep it that way.
     this.semaphore.setLimit(options.config.maxConcurrent);
     const grant = options.grant;
     const loaders = new Map<string, Promise<DefaultResourceLoader>>();
