@@ -149,8 +149,11 @@ still waits for the safe outcome.
   the result is appended to the session as a custom message at the current
   leaf without triggering a turn, and a notice announces it. It enters model
   context on the next user turn. Nothing wakes the wrong branch.
-- **Delivery failure** is logged with the ticket id and surfaced as a notice;
-  the ticket stays settled and pollable.
+- **Delivery failure**: synchronous send failures are logged with the ticket
+  id and surfaced as a notice; async send rejections are surfaced through
+  the host's extension-error channel without a delegate notice (the stock
+  `ExtensionAPI.sendMessage` is fire-and-forget). Either way the ticket
+  stays settled and pollable.
 
 Session shutdown — quit, `/reload`, `/new`, `/resume`, `/fork` — rejects new
 dispatches, force-cancels every running ticket with no follow-up delivery,

@@ -654,15 +654,6 @@ function teardownGitHold(hold: ReturnType<typeof installGitHold>): void {
   rmSync(hold.shimDir, { recursive: true, force: true });
 }
 
-/** Wait until the file exists, fail loudly on timeout. */
-async function untilFileExists(path: string): Promise<void> {
-  const deadline = Date.now() + 5000;
-  while (!existsSync(path) && Date.now() < deadline) {
-    await new Promise((r) => setImmediate(r));
-  }
-  expect(existsSync(path)).toBe(true);
-}
-
 /** Wait until the shim log has at least `lines` recorded invocations. */
 async function untilLogLines(path: string, lines: number): Promise<void> {
   const deadline = Date.now() + 5000;

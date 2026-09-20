@@ -544,6 +544,12 @@ export default function delegateExtension(api: ExtensionAPI): void {
                   display: true,
                   details: { ticket: ticket.id, originLeafId: origin.leafId },
                 };
+                // api.sendMessage is fire-and-forget on the stock
+                // ExtensionAPI (returns void): async send rejections surface
+                // through the host's extension-error channel, never here.
+                // Only synchronous throws — e.g. a torn-down runtime failing
+                // assertActive — reach the catch below. Either way,
+                // settlement stands and the result stays pollable.
                 try {
                   // "Same leaf" means same branch: the parent's own turn
                   // appends entries after dispatch, so the current leaf is a
@@ -560,7 +566,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
                   if (sameLeaf) {
                     // Same leaf, no transition observed: a follow-up wakes an
                     // idle parent and queues behind a busy one's tool calls.
-                    await api.sendMessage(message, {
+                    api.sendMessage(message, {
                       deliverAs: "followUp",
                       triggerTurn: true,
                     });
@@ -568,7 +574,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
                     // Leaf moved or a transition is in flight: append durably
                     // at the current leaf without triggering a turn — it
                     // enters model context on the next user turn.
-                    await api.sendMessage(message, { triggerTurn: false });
+                    api.sendMessage(message, { triggerTurn: false });
                     try {
                       ctx.ui.notify(
                         `Delegate ticket "${ticket.id}" settled on a different branch; its result was appended to the current branch for the next turn.`,
