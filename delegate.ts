@@ -44,7 +44,13 @@ import {
   type ResolvedTask,
   type Ticket,
 } from "./src/types.ts";
-import { validateCall, type TaskInput } from "./src/validation.ts";
+import {
+  hasSessionIntent,
+  hasTicketIntent,
+  validateCall,
+  type RawArguments,
+  type TaskInput,
+} from "./src/validation.ts";
 import {
   prepareWorkspaces,
   workspaceNeedsSettlementHold,
@@ -173,20 +179,14 @@ type DelegateArguments = Static<typeof argumentsSchema>;
 type DelegateDetails = Record<string, unknown>;
 type DelegateResult = AgentToolResult<DelegateDetails>;
 
-const taskFieldNames = [
-  "id",
-  "prompt",
-  "agent",
-  "cwd",
-  "systemPrompt",
-  "model",
-  "tools",
-  "thinking",
-  "sessionId",
-  "resumeFrom",
-  "deadlineMs",
-  "workspace",
-] as const;
+type TaskSchemaArguments = Static<typeof taskSchema>;
+
+/**
+ * Flat-field fold list, derived from the task schema's own keys so a field
+ * added to taskSchema participates in boundary recovery without a second
+ * hand-maintained list.
+ */
+const taskFieldNames = Object.keys(taskSchema.properties) as readonly (keyof TaskSchemaArguments)[];
 
 function parseArray(value: string): unknown[] | undefined {
   try {
@@ -289,10 +289,12 @@ function prepareArguments(value: unknown): DelegateArguments {
   }
 
   const hasTasks = Array.isArray(args.tasks) && args.tasks.length > 0;
-  const ticketIntent =
-    args.ticketAction !== undefined || args.ticket !== undefined;
-  const sessionIntent =
-    args.sessionAction === "close" || args.sessionAction === "list";
+  // Folding intent comes from the validation field-ownership table — the
+  // same source that rejects orphan fields — so the two encodings cannot
+  // disagree. Raw pre-schema shape: the intent predicates value-gate the
+  // session selector themselves.
+  const ticketIntent = hasTicketIntent(args as Pick<RawArguments, "ticketAction" | "ticket">);
+  const sessionIntent = hasSessionIntent(args as Pick<RawArguments, "sessionAction">);
 
   if (!hasTasks && !ticketIntent && !sessionIntent) {
     const task: Record<string, unknown> = {};
