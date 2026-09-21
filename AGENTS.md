@@ -11,9 +11,26 @@ mechanisms. Before migrating or writing tests, read `TEST-MIGRATION.md`.
 
 ## Stack
 
-TypeScript (strict), Bun, TypeBox. Tests run in-process via
+TypeScript (strict), Bun, TypeBox. Our `typebox` pin must mirror Pi's
+exact pin (pi-coding-agent's dependency) — schema symbol identity across
+instances is why; re-align on every Pi bump. Tests run in-process via
 `@marcfargas/pi-test-harness`, which carries a local compatibility patch
-(`patches/`) required until upstream supports the pinned Pi version.
+(`patches/`) required until upstream supports the pinned Pi version. The
+patch covers three seams (verify each on every bump):
+
+- `getModel` from `pi-ai/compat` + `_modelRuntime.setRuntimeApiKey` +
+  `agent.streamFunction` — Pi 0.84 auth preflight and renames (pre-0.86).
+- Globally unique playbook tool-call ids (`playbook.js`) — Pi >= 0.87
+  executes extension tools outside the `agent.setTools()` wrappers, so the
+  harness records them only via session events, which dedupe on toolCallId;
+  per-run id restarts made later runs' results vanish.
+- The event mirror honors `result.isError` (`session.js`) — Pi sets
+  `tool_execution_end.isError` only for THROWN errors in every version, and
+  delegate reports errors as returned results, not throws.
+
+Pi >= 0.87 also reads the parent transcript itself after each run
+(`_checkCompaction`), so "getEntries was never called" is no longer a
+valid delegate-only test signal; assert history non-injection by content.
 
 ## Workflow
 

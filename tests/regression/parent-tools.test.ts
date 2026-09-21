@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
-import { fauxAssistantMessage } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, getCurrentTools } from "@earendil-works/pi-ai";
 import { createTestSession, type TestSession } from "@marcfargas/pi-test-harness";
 import { join, resolve } from "node:path";
 import { callDelegate, installSubagentModel, openDelegateBoundary, ticketIdOf } from "../support/pi-boundary.ts";
@@ -76,7 +76,7 @@ describe("regression: parent tool mirroring", () => {
     for (const { task, tools } of cases) {
       let observed: string[] | undefined;
       subagents.respond([(context) => {
-        observed = (context.tools ?? []).map((tool) => tool.name).sort();
+        observed = getCurrentTools(context.messages).map((tool) => tool.name).sort();
         return fauxAssistantMessage("EXPECTED-CHILD");
       }]);
       const result = await callDelegate(session, { tasks: [{ prompt: "inspect capabilities", ...task }] });
@@ -95,7 +95,7 @@ describe("regression: parent tool mirroring", () => {
     restores.push(mocked.restore);
     let observed: string[] | undefined;
     subagents.respond([(context) => {
-      observed = (context.tools ?? []).map((tool) => tool.name);
+      observed = getCurrentTools(context.messages).map((tool) => tool.name);
       return fauxAssistantMessage("READ-ONLY-CHILD");
     }]);
     const result = await callDelegate(session, { tasks: [{ prompt: "inspect", agent: "default" }] });
@@ -115,7 +115,7 @@ describe("regression: parent tool mirroring", () => {
       restores.push(mocked.restore);
       let observed: string[] | undefined;
       subagents.respond([(context) => {
-        observed = (context.tools ?? []).map((tool) => tool.name);
+        observed = getCurrentTools(context.messages).map((tool) => tool.name);
         return fauxAssistantMessage("NO-TOOLS-CHILD");
       }]);
       const result = await callDelegate(session, { tasks: [{ prompt: "inspect", agent: "default" }] });
@@ -140,7 +140,7 @@ describe("regression: parent tool mirroring", () => {
     let observed: string[] | undefined;
     subagents.respond([(context) => {
       parent = session!.session.getActiveToolNames();
-      observed = (context.tools ?? []).map((tool) => tool.name);
+      observed = getCurrentTools(context.messages).map((tool) => tool.name);
       return fauxAssistantMessage("HOST-LIMITED-CHILD");
     }]);
     const result = await callDelegate(session, { tasks: [{ prompt: "inspect", agent: "default" }] });

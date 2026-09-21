@@ -1,4 +1,3 @@
-import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import type { TestSession } from "@marcfargas/pi-test-harness";
 import {
@@ -343,24 +342,21 @@ describe("delegate dispatch contract", () => {
 
   test("normal dispatch never injects parent conversation history", async () => {
     // Issue #14: replaces the former parent-sharing contract by user decision.
+    // The contract is asserted by content: the subagent sees exactly the
+    // self-contained brief. (Pi >= 0.87 reads the parent transcript itself in
+    // its post-run compaction check, so "getEntries was never called" stopped
+    // being a delegate-only signal; delegate's sole parent read is getLeafId,
+    // an opaque id, not conversation content.)
     session = await openDelegateBoundary();
     const subagents = await installSubagentModel(session);
-    const entries = spyOn((session.session as AgentSession).sessionManager, "getEntries")
-      .mockImplementation(() => { throw new Error("parent transcript must not be read"); });
     let observed = "";
     subagents.respond([(context) => {
       observed = JSON.stringify(context.messages);
       return fauxAssistantMessage("FRESH-CHILD");
     }]);
-    let result;
-    try {
-      result = await callDelegate(session, {
-        tasks: [{ prompt: "SELF-CONTAINED-BRIEF", tools: [] }],
-      });
-      expect(entries).not.toHaveBeenCalled();
-    } finally {
-      entries.mockRestore();
-    }
+    const result = await callDelegate(session, {
+      tasks: [{ prompt: "SELF-CONTAINED-BRIEF", tools: [] }],
+    });
     expect(result.isError).toBe(false);
     expect(observed).toContain("SELF-CONTAINED-BRIEF");
     expect(observed).not.toContain("delegate contract call");
