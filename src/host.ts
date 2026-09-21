@@ -159,14 +159,17 @@ function resolveModel(
   env: HostEnvironment,
 ): Model<Api> | undefined {
   if (spec === undefined) return env.ctx.model as Model<Api> | undefined;
-  const runtime = env.modelRuntime;
+  // Lookups go through the public ModelRegistry facade; the private runtime
+  // grab (env.modelRuntime) exists solely to hand child sessions the parent's
+  // runtime so registered providers and auth carry over.
+  const registry = env.ctx.modelRegistry;
   const slash = spec.indexOf("/");
   if (slash > 0) {
-    const exact = runtime.getModel(spec.slice(0, slash), spec.slice(slash + 1));
+    const exact = registry.find(spec.slice(0, slash), spec.slice(slash + 1));
     if (exact) return exact;
   }
   const wanted = spec.toLowerCase();
-  for (const model of runtime.getModels()) {
+  for (const model of registry.getAvailable()) {
     if (
       `${model.provider}/${model.id}`.toLowerCase() === wanted ||
       model.id.toLowerCase() === wanted
