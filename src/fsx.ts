@@ -158,7 +158,12 @@ export function exec(
         });
       },
     );
-    if (options.input !== undefined) child.stdin?.end(options.input);
+    if (options.input !== undefined && child.stdin) {
+      // The child may exit before it drains stdin (EPIPE); the execFile
+      // callback already reports that failure.
+      child.stdin.on("error", () => {});
+      child.stdin.end(options.input);
+    }
   });
 }
 
