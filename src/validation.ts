@@ -201,6 +201,13 @@ const FIELD_RULES: Record<keyof RawArguments, FieldRule> = {
       dispatch: `sessionId is a task field or belongs to sessionAction "close"; move it into a task or drop it.`,
     },
     onlyWith: {
+      // Stricter than the pre-table code outside the schema-valid domain:
+      // this fires for any sessionAction value ≠ "close" (the old code
+      // gated on === "list"), so a bogus selector carrying sessionId now
+      // rejects here instead of slipping through. Unreachable at the tool
+      // boundary — typebox's enum check rejects invalid selectors first
+      // (pinned in tests/contract/validation.test.ts) — kept as defense in
+      // depth for direct validateCall callers.
       value: "close",
       forbiddenMessage: `sessionId is valid only with sessionAction "close" or a task.`,
       missingMessage: `sessionAction "close" requires a sessionId.`,
