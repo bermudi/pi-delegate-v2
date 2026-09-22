@@ -1,10 +1,11 @@
 # v1 → v2 difference map
 
 Snapshot generated 2026-09-21 by comparing `../pi-delegate` @ `e17a23c`
-against this repo @ `d180a89` (v1 HEAD has since advanced to `6b194ae`,
-prose-only). **Not a behavioral authority** — `SPEC.md`,
-`INVARIANTS.md`, and `COMPATIBILITY.md` remain the contracts. This map
-organizes what differs, what is missing, and what still needs a decision.
+against this repo @ `d180a89`; updated 2026-09-22 against `56e6a14`
+(v1 HEAD has since advanced to `6b194ae`, prose-only). **Not a behavioral
+authority** — `SPEC.md`, `INVARIANTS.md`, and `COMPATIBILITY.md` remain
+the contracts. This map organizes what differs, what is missing, and what
+still needs a decision.
 
 V1 evidence was read at its public boundary (README, config surface, host
 hooks, tool behavior). V1 internals are non-binding per `COMPATIBILITY.md`.
@@ -13,10 +14,10 @@ hooks, tool behavior). V1 internals are non-binding per `COMPATIBILITY.md`.
 
 ## At a glance
 
-| | v1 (`e17a23c`) | v2 (`d180a89`) |
+| | v1 (`e17a23c`) | v2 (`56e6a14`) |
 | --- | --- | --- |
-| Shape | ~40 modules, grown organically | 1 entry + 17 `src/` modules, spec-first |
-| Test suite | 330 KB+ across 20+ files | 153 live tests, 17 files, **0 fail, 0 pending** |
+| Shape | ~40 modules, grown organically | 1 entry + 21 `src/` modules, spec-first |
+| Test suite | 330 KB+ across 20+ files | 158 live tests, 18 files, **0 fail, 0 pending** |
 | Behavioral authority | README + code | `SPEC.md` / `INVARIANTS.md` / `COMPATIBILITY.md` |
 | Implemented subsystems | all (incl. TUI) | everything except output bounding (#25) and named Markdown profiles (#7); visibility layer shipped (#24) 2026-09-22 |
 
@@ -85,7 +86,7 @@ serial shared batches or parallel `isolated` edits.
 | Footer status line | **Shipped** (2026-09-22) | issue #24; contract-tested |
 | Settle warning | **Shipped** (2026-09-22) | issue #24; contract-tested |
 | Switch/fork confirmation guard | **Shipped** (2026-09-22) — consent UX; the safety half (results never wake the wrong leaf) is covered by v2's delivery design | issue #24 |
-| Quit trace / reload warning | **Shipped** (2026-09-22) | issue #24 |
+| Quit trace / reload warning | **Shipped** (2026-09-22) — names tickets, not agent labels (v1 listed agents too) | issue #24 |
 | Tree-navigation consent prompt | **Deferred** — safety half already covered by leaf-aware delivery; only the ask-first prompt remains | issue #24 |
 | Output spill | **Deferred, elevated** — v2 renders subagent output complete and unbounded (`src/format.ts:89`); a context bomb, not cosmetics | issue #25 |
 | `agentOverrides` / `agentOverridesByParentModel` | **Dropped** | COMPATIBILITY breaking change; per-agent thinking/tools → task fields today, frontmatter once #7 lands |
@@ -108,6 +109,12 @@ delivered-result suppression after waiter consumption, mid-turn pause
 semantics, eviction after stalled/deadline runs, read-only+writer
 parallelism, nested-repo gitdirs, cancel-before-apply retention,
 retry-count visibility, stall structured outcomes, async-no-usage.
+
+New with the visibility layer: footer lifecycle, pause/resume footer,
+multi-ticket merge, and the once-per-activation settle warning are
+contract-tested (`tests/contract/visibility.test.ts`); the browser's TUI
+surface and the switch/fork guards cannot be driven through the harness —
+an accepted gap, recorded in `TEST-MIGRATION.md`.
 
 ## 4. Same feature, different behavior
 
@@ -134,15 +141,18 @@ with baseline preservation, task-order all-or-nothing reconciliation,
 unknown-tool-is-writer, same-call serialization, cross-call reject);
 session pooling with frozen config; `resumeFrom`; pause/resume;
 poll/wait/cancel; stall watchdog; deadline wall-clock; usage diffing for
-pooled sessions; telemetry with v1 database migration.
+pooled sessions; telemetry with v1 database migration; and, since
+2026-09-22, the operator-visibility layer — footer status, settle warning,
+switch/fork consent guards, quit/reload traces, and the live subagent
+browser (#24).
 
 ## 6. Decisions (2026-09-21) and what remains
 
 1. **`allowUnsafeSharedWrites`: kept out** (user decision) — INVARIANTS now
    forbids a bypass outright; COMPATIBILITY records the removal with
    migration.
-2. **Switch/fork guard: deferred with the visibility layer** (issue #24) —
-   consent UX later; delivery safety already holds.
+2. **Switch/fork guard: shipped 2026-09-22** (issue #24) — decline blocks
+   the replacement; delivery safety already held either way.
 3. **`agentOverrides` maps and housekeeping keys: dropped** — recorded as a
    breaking change with migration guidance.
 4. **Visibility layer: shipped 2026-09-22 (issue #24); output bounding
