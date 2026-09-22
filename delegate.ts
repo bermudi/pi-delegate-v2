@@ -642,10 +642,10 @@ export default function delegateExtension(api: ExtensionAPI): void {
   // runtime and the tickets survive it. The epoch bumps unconditionally —
   // delivery holds results non-waking after any observed transition,
   // "cancelled or not" (see the sameLeaf check at delivery) — and only
-  // then does the consent guard ask (v1's 3-way prompt, issue #24):
-  // hold proceeds, cancel force-cancels every live ticket (the store's
-  // onChange observer re-syncs the footer), and stay blocks the
-  // transition. Headless hosts and throwing dialogs fail open.
+  // then does the consent guard ask (issue #24): cancel force-cancels
+  // every live ticket and proceeds (the store's onChange observer
+  // re-syncs the footer), or stay blocks the transition. Headless hosts
+  // and throwing dialogs fail open.
   api.on("session_before_tree", (_event, ctx) => {
     navigationEpoch += 1;
     return visibility.guardTreeNavigation(ctx, () => {

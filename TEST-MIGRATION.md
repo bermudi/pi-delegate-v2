@@ -421,19 +421,24 @@ guards), `extension.ts` shutdown traces, `browser.ts`/`browser-state.ts`
 
 - **Contract:** footer appears/merges/clears with ticket lifecycle and
   reflects pause/resume; settle warning once per ticket activation with
-  warning severity; sync dispatches never set the footer. Live tests in
-  `tests/contract/visibility.test.ts`.
+  warning severity; sync dispatches never set the footer. Added
+  2026-09-22 with the guard itself: the tree-navigation consent prompt —
+  exactly two choices (v1's third "hold" option dropped by owner
+  decision), dismissal stays, the cancel choice force-cancels live
+  tickets and proceeds — driven through the host's own `navigateTree`;
+  the cross-leaf append contract in `tests/contract/delivery.test.ts`
+  drives the guard's fail-open path (no consent-to-hold choice exists
+  anymore). Live tests in `tests/contract/visibility.test.ts`.
 - **Regression:** footer dedupe must retry after a failed setStatus push
   (a stale context must not wedge the footer); a throwing activity sink
   must never fail a dispatch.
 - **Internal:** browser rendering internals (SelectList wiring, refresh
   timer, generation counter), activity-store caps. Not ported: the TUI
-  overlay and the `session_before_switch`/`fork`/`before_tree` guards
-  cannot be driven through the harness — verified by typecheck and
-  fresh-context review; an accepted gap, not a coverage target.
+  overlay and the `session_before_switch`/`fork` guards cannot be driven
+  through the harness — verified by typecheck and fresh-context review;
+  an accepted gap, not a coverage target.
 - **Gap:** live sync-run rows (deliberate divergence, #24); RUNNING/DONE
-  tool markers. The tree-navigation consent prompt shipped 2026-09-22
-  and joins the switch/fork guards in the accepted harness gap above.
+  tool markers.
 
 - **Contract:** `operationId` scopes a dispatch to one execution per live
   key+request: the same normalized `{async, tasks}` reuses the in-flight

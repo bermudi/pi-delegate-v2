@@ -5,6 +5,7 @@ import {
   createTestSession,
   says,
   when,
+  type MockUIConfig,
   type TestSession,
   type ToolResultRecord,
 } from "@marcfargas/pi-test-harness";
@@ -25,11 +26,12 @@ export interface PublicTool {
 }
 
 export async function openDelegateBoundary(
-  options: { inMemoryAgentDir?: boolean } = {},
+  options: { inMemoryAgentDir?: boolean; mockUI?: MockUIConfig } = {},
 ): Promise<TestSession> {
   const session = await createTestSession({
     extensions: [extensionPath],
     propagateErrors: false,
+    mockUI: options.mockUI,
   });
   // Model the host session-store layout without changing process.env or
   // enabling parent transcript persistence. The directory getter belongs to

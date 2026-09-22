@@ -189,9 +189,10 @@ semantics change while they are absent; each is owned by an issue.
 
 - **Operator-visibility layer (#24)** — shipped 2026-09-22: the footer
   status line, the once-per-ticket settle warning, the switch/fork consent
-  guards, the tree-navigation consent prompt (3-way hold/cancel/stay:
-  cancel force-cancels live tickets and proceeds, stay blocks the
-  transition, dismissal stays — its safety half is leaf-aware delivery,
+  guards, the tree-navigation consent prompt (2-way: cancel force-cancels
+  live tickets and proceeds, stay blocks the transition, dismissal stays;
+  a deliberate divergence from v1's third "hold" option, dropped by
+  owner decision 2026-09-22 — its safety half is leaf-aware delivery,
   the non-waking append at the current leaf), the quit/reload abort
   traces, and the live subagent browser (`/subagents`, Ctrl+Shift+B).
   Deliberate divergences recorded here, not planned work: live rows for

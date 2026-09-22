@@ -8,7 +8,10 @@ import {
   fauxToolCall,
   type FauxResponseFactory,
 } from "@earendil-works/pi-ai";
-import type { TestSession } from "@marcfargas/pi-test-harness";
+import type {
+  MockUIConfig,
+  TestSession,
+} from "@marcfargas/pi-test-harness";
 import {
   callDelegate,
   installSubagentModel,
@@ -43,8 +46,8 @@ describe("async result delivery", () => {
     session?.dispose();
   });
 
-  async function setup(navigateFirst = false) {
-    session = await openDelegateBoundary();
+  async function setup(navigateFirst = false, mockUI?: MockUIConfig) {
+    session = await openDelegateBoundary({ mockUI });
     const host = session.session as AgentSession;
     if (navigateFirst) {
       await callDelegate(session, { tasks: [] });
@@ -128,7 +131,20 @@ describe("async result delivery", () => {
     // (issue #30). On stock Pi the durable difference is that the custom
     // message IS appended immediately (in-memory nextTurn queueing would
     // lose it on shutdown and is not used).
-    const { host, blocked, sends } = await setup();
+    //
+    // The 2-way consent guard (owner decision, 2026-09-22) means a
+    // user-consented navigation with live tickets cancels them — the mock
+    // UI's default select answer is the first option, i.e. exactly that.
+    // There is no consent-to-hold choice anymore, so this contract is
+    // driven through the guard's fail-open path: a broken dialog must
+    // never trap the user or the work, and headless hosts take the same
+    // route. The guard's own outcomes are contract-tested in
+    // tests/contract/visibility.test.ts.
+    const { host, blocked, sends } = await setup(false, {
+      select: () => {
+        throw new Error("simulated broken dialog");
+      },
+    });
     const root = host.sessionManager
       .getEntries()
       .find((entry) => entry.type === "message");

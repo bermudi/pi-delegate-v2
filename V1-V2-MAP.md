@@ -87,7 +87,7 @@ serial shared batches or parallel `isolated` edits.
 | Settle warning | **Shipped** (2026-09-22) | issue #24; contract-tested |
 | Switch/fork confirmation guard | **Shipped** (2026-09-22) — consent UX; the safety half (results never wake the wrong leaf) is covered by v2's delivery design | issue #24 |
 | Quit trace / reload warning | **Shipped** (2026-09-22) — names tickets, not agent labels (v1 listed agents too) | issue #24 |
-| Tree-navigation consent prompt | **Shipped** (2026-09-22) — 3-way hold/cancel/stay; cancel force-cancels live tickets, stay blocks the transition; safety half remains leaf-aware delivery | issue #24 |
+| Tree-navigation consent prompt | **Shipped** (2026-09-22) — 2-way cancel/stay, a deliberate divergence (v1's third "hold" option dropped by owner decision); cancel force-cancels live tickets, stay blocks the transition | issue #24 |
 | Output spill | **Deferred, elevated** — v2 renders subagent output complete and unbounded (`src/format.ts:89`); a context bomb, not cosmetics | issue #25 |
 | `agentOverrides` / `agentOverridesByParentModel` | **Dropped** | COMPATIBILITY breaking change; per-agent thinking/tools → task fields today, frontmatter once #7 lands |
 | `maxAsyncTickets` cap | **Dropped** | same entry; tickets uncapped, host-lifetime, bounded by `concurrency` on execution only |
