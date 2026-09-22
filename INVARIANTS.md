@@ -116,8 +116,8 @@ use any design that makes these properties true and testable.
 - Overlap with another active sync/async dispatch or quarantined task MUST
   reject, not queue. Shared/isolated overlap MUST reject.
 - Inherited Git redirection with bash-capable multiple writers MUST fail closed.
-- The operator-only unsafe bypass may skip admission only with a visible
-  warning. It MUST NOT be exposed as a model-facing task field.
+- V2 ships no unsafe-write bypass: no operator or caller setting may skip
+  admission. Reintroducing one is a contract change, not a restoration.
 - Admission MUST NOT claim path confinement, cross-process locking, or
   protection from external processes.
 

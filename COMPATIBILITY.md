@@ -25,7 +25,8 @@ release notes and migration guidance; it must not arrive as rewrite drift.
 - Defensive normalization of stringified tasks, flat task calls, string tools,
   and empty agent names.
 - Top-level-only session RPC. Task-level `async` and `sessionAction`, legacy
-  `action`, and model-facing unsafe-write bypasses remain rejected.
+  `action`, and unsafe-write bypasses remain rejected (all of them — see the
+  breaking-change entry below).
 - `default`, `scout`, `coder`, and `reviewer` semantics; task-over-profile
   precedence; Markdown discovery order and first-definition wins.
 - User-global `delegate.json` configuration. Project files do not become
@@ -57,8 +58,7 @@ release notes and migration guidance; it must not arrive as rewrite drift.
   `isolated` reconciles Git proposals. Scratch and isolated remain one-shot and
   are not advertised as security boundaries.
 - Fail-closed shared-write admission, canonical overlap rules, unknown tools as
-  writers, same-call serialization, cross-call rejection, and the
-  operator-only warned escape hatch.
+  writers, same-call serialization, and cross-call rejection.
 - Isolated preservation of dirty/untracked baseline state and the user's
   branch/index; task-order, all-or-nothing application; retained conflict and
   cancellation artifacts; `applied_unverified` wording.
@@ -153,6 +153,56 @@ guidance toward the config; a configured reference that does not resolve in
   `"models"` — e.g. `{"scout": "<provider/model-id>"}` with references
   taken from your actual configured models; callers stop sending `model`. The
   model-failure recovery hint now addresses the operator, not the caller.
+
+- **Operator unsafe-write bypass not carried (user decision, 2026-09-21).**
+  V1's `"allowUnsafeSharedWrites"` escape hatch is gone: no operator or
+  caller setting can skip admission, and `INVARIANTS.md` now forbids one
+  outright. Unguarded shared-tree running remains reachable only through
+  deliberate workspace choices — sequential shared batches or parallel
+  `isolated` edits. Reintroduction would be a new contract change, not a
+  restoration of this one.
+  Migration: delete `"allowUnsafeSharedWrites"` from `delegate.json`. V2
+  silently ignores unknown top-level config keys, so leaving it changes
+  nothing — but the warn-while-active unguarded mode it enabled is no
+  longer possible at all.
+
+- **V1 per-agent override maps and housekeeping config keys are not read
+  (2026-09-21 reconciliation).**
+  `agentOverrides`, `agentOverridesByParentModel`, `maxAsyncTickets`, and
+  `output.spillThresholdChars`/`output.spillTailChars` have no v2 meaning; stale entries
+  are silently ignored. Model choice for named agents lives only under
+  user-global `"models"`; per-agent `thinking`/`tools` preferences are
+  task fields today and agent Markdown frontmatter once named profiles
+  land (#7), keeping their v1 precedence below task fields. Async tickets
+  are uncapped in count and live for the host lifetime: `concurrency`
+  bounds execution, not ticket creation, and settled tickets stay pollable
+  until the host exits.
+  Migration: express per-agent thinking/tools as task fields now
+  (frontmatter later); drop the stale keys; rely on concurrency bounds and
+  polling rather than a ticket cap or TTL sweep.
+
+## v2 deferred capabilities (not dropped)
+
+These v1 capabilities are intentionally absent from v2 today — sequenced
+with the approved roadmap, not cancelled. No tool operation or field
+semantics change while they are absent; each is owned by an issue.
+
+- **Operator-visibility layer (#24)** — the footer status line, the
+  once-per-ticket settle warning, the switch/fork confirmation guards,
+  the quit/reload abort traces, and the live subagent browser
+  (`/subagents`, Ctrl+Shift+B). In v1 only the browser was hard-dependent
+  on Pi's TUI; the rest ran on plain `ctx.ui` status/notify/confirm calls.
+  Until this lands, async visibility is the ticket RPC
+  (poll/wait/cancel), delivery notices, and the shutdown wait status. The
+  v1 tree-navigation guard's *safety* function — results landing on a
+  branch the user navigated to — is already covered by v2's leaf-aware
+  delivery (non-waking append at the current leaf); the consent prompt is
+  what is deferred.
+- **Large-output bounding (#25)** — v1 spilled subagent final outputs past
+  8 000 chars to a temp file and rendered a 2 000-char tail with a
+  pointer, keeping the full text in result details. V2 currently renders
+  the complete output in the caller-visible result text unbounded; very
+  large subagent answers enter the parent context whole.
 
 ## Known host limitations (accepted 2026-09-19, issue #3)
 

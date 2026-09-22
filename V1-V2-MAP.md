@@ -1,0 +1,152 @@
+# v1 → v2 difference map
+
+Snapshot generated 2026-09-21 by comparing `../pi-delegate` @ `e17a23c`
+against this repo @ `d180a89` (v1 HEAD has since advanced to `6b194ae`,
+prose-only). **Not a behavioral authority** — `SPEC.md`,
+`INVARIANTS.md`, and `COMPATIBILITY.md` remain the contracts. This map
+organizes what differs, what is missing, and what still needs a decision.
+
+V1 evidence was read at its public boundary (README, config surface, host
+hooks, tool behavior). V1 internals are non-binding per `COMPATIBILITY.md`.
+
+---
+
+## At a glance
+
+| | v1 (`e17a23c`) | v2 (`d180a89`) |
+| --- | --- | --- |
+| Shape | ~40 modules, grown organically | 1 entry + 17 `src/` modules, spec-first |
+| Test suite | 330 KB+ across 20+ files | 153 live tests, 17 files, **0 fail, 0 pending** |
+| Behavioral authority | README + code | `SPEC.md` / `INVARIANTS.md` / `COMPATIBILITY.md` |
+| Implemented subsystems | all (incl. TUI) | everything except the visibility layer (#24), output bounding (#25), and named Markdown profiles (#7) |
+
+---
+
+## 1. Deliberate breaking changes — documented in `COMPATIBILITY.md`
+
+These are decided, recorded, and carry migration guidance. No action needed.
+
+| Change | v1 behavior | v2 behavior |
+| --- | --- | --- |
+| Parent conversation sharing (#14) | `context: "with-parent-transcript"` injected parent history | `context` field rejected entirely; briefs must be self-contained |
+| Mixed async batches (#6) | settled as `completed` with per-task statuses | settle as `partial` — headline never lies |
+| Unknown singular ticket RPC (#6) | successful "not found" response | tool error naming the missing ticket |
+| Task `model` field | any registry-resolvable model the caller typed | rejected; models are user-config only (`delegate.json` `"models"`, named agents only) |
+| Unavailable parent tools | silent fallback to writer tools for `default` profile | whole call fails closed before children start, with cause + guidance |
+| Telemetry default | **enabled by default** (v1 `DEFAULT_DELEGATE_CONFIG` has `telemetry.enabled: true`) | disabled by default; requires explicit opt-in |
+
+## 2. New in v2 — no v1 counterpart
+
+- **`operationId`** (#16): duplicate-safe dispatch identity, bounded
+  retention (1 h / 256 settled records), in-flight reuse, conflict on
+  changed request.
+- **Batch-level `workspace`**: `delegate({ workspace: "isolated", tasks })`
+  defaults every task — the one-field spelling of parallel same-repo edits.
+- **Serialization notices**: results name serialized writer groups and
+  point at `isolated` as the remedy (sync frames, final result, and ticket
+  views).
+- **`concurrency.models` / `concurrency.default`**: per-model and
+  provider-scoped bounds below the global `maxConcurrent`.
+- **Delivery via stock Pi extension API** (#3): no host patch required;
+  navigation-epoch tracking, leaf-aware follow-up vs no-turn append,
+  delivery-failure handling that keeps tickets pollable.
+- **Scratch hardening**: read-only tasks rejected (copy buys nothing);
+  linked-worktree/submodule preflight is a cheap stat, not a paid copy;
+  symlink escapes preserved instead of rejected; copies live under
+  `agentDir`, never beside the source.
+- **Quiescence vs settlement split**: caller settlement can be provisional
+  while reservations are held until worker quiescence is confirmed — the
+  fix for v1's indefinite-settlement defect.
+
+## 3. Missing in v2
+
+### 3a. Promised by contract, not yet implemented
+
+| Feature | Authority | v2 status |
+| --- | --- | --- |
+| Named Markdown agent profiles | SPEC + COMPATIBILITY preserve lists; issue #7 | **Unimplemented** — `knownAgentNames()` returns only the four built-ins (`src/profiles.ts`); a custom `agent` name fails validation today. |
+| `allowUnsafeSharedWrites` operator bypass | was `INVARIANTS.md` "operator-only unsafe bypass … visible warning" | **Decided out 2026-09-21** (user decision): INVARIANTS now forbids a bypass; COMPATIBILITY records the breaking change. |
+
+This bypass *is* the scoped "camp 4" door (share-the-tree, accept the risk,
+gate off): a deliberate, human-only, warn-while-active way to run unguarded —
+never model-selectable, never the default. v1 had it; until this decision,
+v2's contract kept it — and since nothing implemented it, v2 ran stricter
+than its own contract with no legitimate way to lean camp 4 at all.
+
+**Resolution (2026-09-21): kept out.** The camp-4 door stays closed;
+unguarded running is reachable only through deliberate workspace choices —
+serial shared batches or parallel `isolated` edits.
+
+### 3b. Decided 2026-09-21 — restore-or-drop calls recorded in `COMPATIBILITY.md`
+
+| v1 feature | Decision | Record |
+| --- | --- | --- |
+| Live subagent browser | **Deferred** (roadmap) | issue #24; the only v1 piece hard-dependent on Pi's TUI |
+| Footer status line | **Deferred** with the visibility layer | issue #24 |
+| Settle warning | **Deferred** with the visibility layer | issue #24 |
+| Switch/fork confirmation guard | **Deferred** — consent UX; the safety half (results never wake the wrong leaf) is already covered by v2's delivery design | issue #24; no longer a silent change |
+| Quit trace / reload warning | **Deferred** (v2's shutdown wait status names only still-stopping dispatches, not the already-aborted) | issue #24 |
+| Output spill | **Deferred, elevated** — v2 renders subagent output complete and unbounded (`src/format.ts:89`); a context bomb, not cosmetics | issue #25 |
+| `agentOverrides` / `agentOverridesByParentModel` | **Dropped** | COMPATIBILITY breaking change; per-agent thinking/tools → task fields today, frontmatter once #7 lands |
+| `maxAsyncTickets` cap | **Dropped** | same entry; tickets uncapped, host-lifetime, bounded by `concurrency` on execution only |
+| Ticket TTL cleanup | Already deliberate (SPEC: host-lifetime tickets) | no action |
+| Retry bound 3 → 2 | Already covered by "retry machinery" in COMPATIBILITY's may-change list | no action |
+
+Note: v2 silently ignores unknown top-level `delegate.json` keys
+(`src/config.ts` reads its five known fields and rejects unknowns only
+inside `telemetry` and `models`), so stale v1 keys are silent no-ops —
+remove them when upgrading.
+
+### 3c. Test-coverage gaps (implementation may exist; tests don't)
+
+`TEST-MIGRATION.md` still lists "Usage properties" as a remaining slice
+(sync-result aggregate usage is wired in `details.usage` but untested at
+the boundary), plus twelve per-subsystem **Gap** entries: overlap warnings
+on results, per-provider limit variants, abort-of-queued-while-parked,
+delivered-result suppression after waiter consumption, mid-turn pause
+semantics, eviction after stalled/deadline runs, read-only+writer
+parallelism, nested-repo gitdirs, cancel-before-apply retention,
+retry-count visibility, stall structured outcomes, async-no-usage.
+
+## 4. Same feature, different behavior
+
+| Feature | v1 | v2 |
+| --- | --- | --- |
+| Result rendering | full render layer (branches, transcript text, spill) | compact status/integration/notice summaries |
+| Session store | in-memory pool + custom layout | `<agentDir>/delegate-sessions/` file-backed, insert-on-success |
+| Provider extensions | allowlist | verified, provider-scoped allowlist; integration status recorded |
+| Scratch vs shared writer | (v1 scratch reserved on source) | scratch holds no source reservation — runs beside a shared writer |
+| Config surface | `maxConcurrent`, `concurrency{providers}`, `agentOverrides{,ByParentModel}`, `allowUnsafeSharedWrites`, `stallTimeoutMs`, `telemetry{enabled}`, `maxAsyncTickets`, `output.spill{Threshold,Tail}Chars` | `maxConcurrent`, `concurrency{default,providers,models}`, `stallTimeoutMs`, `models`, `telemetry{enabled,dbPath}` |
+| Stall watchdog | 15 min default | 15 min default (parity) |
+| Package | published `@bermudi/pi-delegate` 0.1.21, esbuild bundle step | no bundle, `files: [delegate.ts, README]` |
+
+## 5. Confirmed carried over (spot-checked)
+
+Four modes and help; input recovery repairs; the four built-in agents
+(`default`/`scout`/`coder`/`reviewer`) and task-over-profile precedence
+(named Markdown profiles are contracted but **unimplemented** — issue #7);
+parent-model
+inheritance; extension/MCP/user-global-AGENTS.md isolation (skills ride
+the child's own resource loader in both); scratch and isolated workspaces
+with baseline preservation, task-order all-or-nothing reconciliation,
+`applied_unverified` wording; shared-write admission (fail-closed overlap,
+unknown-tool-is-writer, same-call serialization, cross-call reject);
+session pooling with frozen config; `resumeFrom`; pause/resume;
+poll/wait/cancel; stall watchdog; deadline wall-clock; usage diffing for
+pooled sessions; telemetry with v1 database migration.
+
+## 6. Decisions (2026-09-21) and what remains
+
+1. **`allowUnsafeSharedWrites`: kept out** (user decision) — INVARIANTS now
+   forbids a bypass outright; COMPATIBILITY records the removal with
+   migration.
+2. **Switch/fork guard: deferred with the visibility layer** (issue #24) —
+   consent UX later; delivery safety already holds.
+3. **`agentOverrides` maps and housekeeping keys: dropped** — recorded as a
+   breaking change with migration guidance.
+4. **Visibility layer: owned by issue #24; output bounding by #25.**
+5. **Retry bound: no entry needed** — already covered by the may-change
+   list.
+
+Still open from 3a: **named Markdown agent profiles (issue #7)** remain
+contracted-and-unimplemented — the next real 3a-style gap.

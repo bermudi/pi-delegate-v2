@@ -284,8 +284,9 @@ gaps.
   ancestor / descendant roots overlap; `read`, `grep`, `find`, `ls`,
   `web_search` are read-only; unknown tools count as mutating; same-call
   overlapping writers serialize in task order; overlap with active or
-  quarantined work rejects; shared/isolated overlap rejects; operator-only
-  warned bypass.
+  quarantined work rejects; shared/isolated overlap rejects. (The v1
+  operator-only warned bypass is deliberately not carried — see
+  `COMPATIBILITY.md` 2026-09-21.)
 - **Regression:** symlink canonicalization; inherited `GIT_DIR`/
   `GIT_COMMON_DIR`/`core.worktree` redirection fails closed with bash-capable
   writers; nested repositories reject; path-prefix siblings are not nested;
@@ -299,7 +300,7 @@ gaps.
   redirect cannot shrink the reserved scope.
 - **Gap:** read-only + writer parallelism allowed; unknown-but-real tools
   treated as mutating; symlink canonicalization; external `core.worktree`
-  dual-root reservation; operator bypass warning surfaces; scratch
+  dual-root reservation; scratch
   suggestion in rejection prose.
 
 ### Scratch workspaces
