@@ -30,6 +30,10 @@ interface DialogCtx {
   readonly ui: {
     confirm(title: string, message: string): Promise<boolean>;
     notify(message: string, type?: "info" | "warning" | "error"): void;
+    select(
+      title: string,
+      options: readonly string[],
+    ): Promise<string | undefined>;
   };
 }
 
@@ -174,6 +178,50 @@ export class VisibilitySignals {
       // Fail open: delivery safety does not depend on the dialog.
       return undefined;
     }
+  }
+
+  /**
+   * Consent guard for session-tree navigation (v1's 3-way prompt).
+   * Navigation is not a session replacement — the runtime survives — but
+   * results then arrive on a different branch, so offer the three honest
+   * outcomes instead of a destructive confirm: hold (proceed, results are
+   * held at the new leaf and stay pollable), cancel (proceed after
+   * force-cancelling every live ticket via `cancelActive`), or stay (block
+   * the transition). Dismissing the dialog is "stay" — the conservative
+   * choice, since navigating is what creates the hazard. A throwing
+   * dialog fails open: leaf-aware delivery, not this prompt, is the
+   * correctness mechanism, so a broken dialog must never trap the user.
+   * Never blocks headless hosts.
+   */
+  async guardTreeNavigation(
+    ctx: DialogCtx | undefined,
+    cancelActive: () => void,
+  ): Promise<{ cancel?: boolean } | undefined> {
+    const active = this.active();
+    if (active.length === 0) return undefined;
+    if (ctx === undefined || !ctx.hasUI) return undefined;
+    const ids = active.map((ticket) => ticket.id).join(", ");
+    const subs = active.reduce((sum, ticket) => sum + inFlight(ticket), 0);
+    const hold = "Navigate — hold results (poll to read them)";
+    const cancel = "Navigate — cancel the background subagents";
+    const stay = "Stay on this branch";
+    let choice: string | undefined;
+    try {
+      choice = await ctx.ui.select(
+        `${subs} background subagent(s) (${ids}) still running — ` +
+          "navigating means their results arrive on a different branch",
+        [hold, cancel, stay],
+      );
+    } catch {
+      // Fail open: delivery safety does not depend on the dialog.
+      return undefined;
+    }
+    if (choice === hold) return undefined;
+    if (choice === cancel) {
+      cancelActive();
+      return undefined;
+    }
+    return { cancel: true };
   }
 
   /**

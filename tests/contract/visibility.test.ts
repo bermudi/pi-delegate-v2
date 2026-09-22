@@ -15,9 +15,10 @@ import {
  * Operator-visibility signals (issue #24): footer status and the settle
  * warning via the recorded mock-UI stream. v1 evidence: status.ts footer
  * formats, settle-warning wording and once-per-ticket dedupe, pause/settle
- * footer transitions. The replacement guards fire on host events
- * (session_before_switch/fork) the harness cannot emit — verified by
- * typecheck and review; the browser's TUI surface is likewise not
+ * footer transitions. The replacement and tree-navigation guards fire on
+ * host events (session_before_switch/fork/before_tree) the harness cannot
+ * emit — verified by typecheck and review; the browser's TUI surface is
+ * likewise not
  * boundary-testable (see TEST-MIGRATION.md "Operator-visibility signals").
  */
 

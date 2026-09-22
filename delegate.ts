@@ -638,8 +638,21 @@ export default function delegateExtension(api: ExtensionAPI): void {
     }
   };
 
-  api.on("session_before_tree", () => {
+  // Tree navigation is user-driven and not a session replacement: the
+  // runtime and the tickets survive it. The epoch bumps unconditionally —
+  // delivery holds results non-waking after any observed transition,
+  // "cancelled or not" (see the sameLeaf check at delivery) — and only
+  // then does the consent guard ask (v1's 3-way prompt, issue #24):
+  // hold proceeds, cancel force-cancels every live ticket (the store's
+  // onChange observer re-syncs the footer), and stay blocks the
+  // transition. Headless hosts and throwing dialogs fail open.
+  api.on("session_before_tree", (_event, ctx) => {
     navigationEpoch += 1;
+    return visibility.guardTreeNavigation(ctx, () => {
+      for (const ticket of tickets.list()) {
+        if (ticket.status === "running") tickets.cancel(ticket, true);
+      }
+    });
   });
   api.on("session_tree", () => {
     navigationEpoch += 1;

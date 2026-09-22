@@ -428,11 +428,12 @@ guards), `extension.ts` shutdown traces, `browser.ts`/`browser-state.ts`
   must never fail a dispatch.
 - **Internal:** browser rendering internals (SelectList wiring, refresh
   timer, generation counter), activity-store caps. Not ported: the TUI
-  overlay and `session_before_switch`/`fork` guards cannot be driven
-  through the harness — verified by typecheck and fresh-context review;
-  an accepted gap, not a coverage target.
-- **Gap:** tree-navigation consent prompt (deferred, #24); live sync-run
-  rows (deliberate divergence, #24); RUNNING/DONE tool markers.
+  overlay and the `session_before_switch`/`fork`/`before_tree` guards
+  cannot be driven through the harness — verified by typecheck and
+  fresh-context review; an accepted gap, not a coverage target.
+- **Gap:** live sync-run rows (deliberate divergence, #24); RUNNING/DONE
+  tool markers. The tree-navigation consent prompt shipped 2026-09-22
+  and joins the switch/fork guards in the accepted harness gap above.
 
 - **Contract:** `operationId` scopes a dispatch to one execution per live
   key+request: the same normalized `{async, tasks}` reuses the in-flight

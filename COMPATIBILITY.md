@@ -189,13 +189,15 @@ semantics change while they are absent; each is owned by an issue.
 
 - **Operator-visibility layer (#24)** — shipped 2026-09-22: the footer
   status line, the once-per-ticket settle warning, the switch/fork consent
-  guards, the quit/reload abort traces, and the live subagent browser
-  (`/subagents`, Ctrl+Shift+B). Still deferred with #24: the
-  tree-navigation consent prompt (its safety half is already covered by
-  leaf-aware delivery — non-waking append at the current leaf), live rows
-  for in-flight sync dispatches (finished sync calls are retained; a
-  deliberate divergence from v1's live sync view), per-call RUNNING/DONE
-  tool markers, and agent names in the shutdown summary (ids only today).
+  guards, the tree-navigation consent prompt (3-way hold/cancel/stay:
+  cancel force-cancels live tickets and proceeds, stay blocks the
+  transition, dismissal stays — its safety half is leaf-aware delivery,
+  the non-waking append at the current leaf), the quit/reload abort
+  traces, and the live subagent browser (`/subagents`, Ctrl+Shift+B).
+  Deliberate divergences recorded here, not planned work: live rows for
+  in-flight sync dispatches (finished sync calls are retained), per-call
+  RUNNING/DONE tool markers, and agent names in the shutdown summary
+  (ids only today).
 - **Large-output bounding (#25)** — v1 spilled subagent final outputs past
   8 000 chars to a temp file and rendered a 2 000-char tail with a
   pointer, keeping the full text in result details. V2 currently renders
