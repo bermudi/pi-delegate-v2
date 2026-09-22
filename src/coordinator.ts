@@ -8,6 +8,7 @@ import {
 } from "./config.ts";
 import { runTask, type RunControls } from "./execution.ts";
 import type { HostEnvironment } from "./host.ts";
+import type { ActivityStore } from "./activity.ts";
 import type { SessionPool } from "./sessions.ts";
 import { Deferred, Semaphore } from "./types.ts";
 import type { TicketStore } from "./tickets.ts";
@@ -70,7 +71,11 @@ export class DispatchCoordinator {
   private readonly semaphore = new Semaphore(DEFAULT_CONFIG.maxConcurrent);
   private readonly modelSemaphores = new Map<string, Semaphore>();
 
-  constructor(private readonly tickets: TicketStore) {}
+  constructor(
+    private readonly tickets: TicketStore,
+    /** Optional live-activity sink (issue #24 subagent browser). */
+    private readonly activity?: ActivityStore,
+  ) {}
 
   /** Per-model bound, keyed `provider/id`; created once, re-limited per call. */
   private modelSemaphore(task: ResolvedTask, config: DelegateConfig): Semaphore {
@@ -300,6 +305,20 @@ export class DispatchCoordinator {
       disposed = true;
       combined.dispose();
     };
+    const taskStartedAt = Date.now();
+    // Ticket tasks get live browser rows from the start (diagnostics only).
+    if (this.activity !== undefined && ticket !== undefined) {
+      try {
+        this.activity.trackTicketTask({
+          ticketId: ticket.id,
+          taskId: task.id,
+          label: task.agent,
+          prompt: task.prompt,
+        });
+      } catch {
+        // A failed track never blocks the task it wanted to display.
+      }
+    }
     const confirmed = quiescence.get(task.index)!;
     const fully = fullyQuiesced.get(task.index)!;
     // True once a worker session may exist; below that point a failure is
@@ -311,6 +330,34 @@ export class DispatchCoordinator {
     const record = (outcome: TaskOutcome) => {
       if (workerTruthRecorded) return;
       outcomes[task.index] = outcome;
+      // Live-activity feed: ticket rows update status; sync tasks become
+      // retained browser rows. Best-effort — the browser is diagnostics,
+      // never a dispatch dependency: a throwing sink must not skip the
+      // store's own outcome recording below it.
+      if (this.activity !== undefined) {
+        try {
+          if (ticket !== undefined) {
+            this.activity.setTicketTaskStatus(ticket.id, task.id, outcome.status);
+          } else {
+            this.activity.retainSyncRun({
+              taskId: task.id,
+              label: task.agent,
+              prompt: task.prompt,
+              status: outcome.status,
+              startedAt: taskStartedAt,
+              endedAt: Date.now(),
+              summary:
+                outcome.status === "ok"
+                  ? (outcome.output ?? "")
+                  : (outcome.error ?? outcome.output ?? "no output"),
+            });
+          }
+        } catch (error) {
+          console.error(
+            `[delegate] activity feed failed for task ${task.id}: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
       // A non-quarantined outcome confirms the worker is done (or never
       // started): serialized successors may proceed, and nothing remains
       // owed to a shutdown barrier — no deferred cleanup is pending.
@@ -434,9 +481,26 @@ export class DispatchCoordinator {
               signal,
               stallTimeoutMs: options.config.stallTimeoutMs,
               isAborted: () => signal.aborted,
+              observe:
+                this.activity !== undefined && ticket !== undefined
+                  ? (event) => {
+                      try {
+                        this.activity?.observe(ticket.id, task.id, event);
+                      } catch {
+                        // execution.ts already guards the sink; this is belt.
+                      }
+                    }
+                  : undefined,
               waitWhilePaused: (runSignal) =>
                 ticket ? this.waitWhilePaused(ticket, runSignal ?? signal) : Promise.resolve(),
             };
+            if (this.activity !== undefined && ticket !== undefined) {
+              try {
+                this.activity.setTicketTaskStatus(ticket.id, task.id, "running");
+              } catch {
+                // Diagnostics must never fail the dispatch it displays.
+              }
+            }
             const outcome = await runTask(
               task,
               controls,

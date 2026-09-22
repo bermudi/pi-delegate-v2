@@ -38,6 +38,8 @@ export interface RunControls {
   readonly signal: AbortSignal;
   /** Inactivity watchdog budget in ms; 0 disables it. */
   readonly stallTimeoutMs: number;
+  /** Optional per-event sink (visibility/activity); never errors into the run. */
+  readonly observe?: (event: AgentSessionEvent) => void;
 }
 
 export interface AttemptResult {
@@ -452,6 +454,15 @@ export class TaskExecution implements ExecutionHandle {
       // first event.
       const unsubscribe = child.subscribe((event: AgentSessionEvent) => {
         this.noteActivity();
+        // The activity sink is diagnostics (issue #24): a throwing observer
+        // must never break the run it observes.
+        try {
+          this.controls.observe?.(event);
+        } catch (error) {
+          console.error(
+            `[delegate] activity observer failed: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
         if (event.type === "agent_start") {
           if (this.abortReason !== undefined || this.controls.isAborted()) {
             child.agent.abort();

@@ -18,7 +18,7 @@ hooks, tool behavior). V1 internals are non-binding per `COMPATIBILITY.md`.
 | Shape | ~40 modules, grown organically | 1 entry + 17 `src/` modules, spec-first |
 | Test suite | 330 KB+ across 20+ files | 153 live tests, 17 files, **0 fail, 0 pending** |
 | Behavioral authority | README + code | `SPEC.md` / `INVARIANTS.md` / `COMPATIBILITY.md` |
-| Implemented subsystems | all (incl. TUI) | everything except the visibility layer (#24), output bounding (#25), and named Markdown profiles (#7) |
+| Implemented subsystems | all (incl. TUI) | everything except output bounding (#25) and named Markdown profiles (#7); visibility layer shipped (#24) 2026-09-22 |
 
 ---
 
@@ -77,15 +77,16 @@ than its own contract with no legitimate way to lean camp 4 at all.
 unguarded running is reachable only through deliberate workspace choices —
 serial shared batches or parallel `isolated` edits.
 
-### 3b. Decided 2026-09-21 — restore-or-drop calls recorded in `COMPATIBILITY.md`
+### 3b. Decided 2026-09-21; visibility cluster shipped 2026-09-22
 
 | v1 feature | Decision | Record |
 | --- | --- | --- |
-| Live subagent browser | **Deferred** (roadmap) | issue #24; the only v1 piece hard-dependent on Pi's TUI |
-| Footer status line | **Deferred** with the visibility layer | issue #24 |
-| Settle warning | **Deferred** with the visibility layer | issue #24 |
-| Switch/fork confirmation guard | **Deferred** — consent UX; the safety half (results never wake the wrong leaf) is already covered by v2's delivery design | issue #24; no longer a silent change |
-| Quit trace / reload warning | **Deferred** (v2's shutdown wait status names only still-stopping dispatches, not the already-aborted) | issue #24 |
+| Live subagent browser | **Shipped** (2026-09-22) — `/subagents`, Ctrl+Shift+B | issue #24; remaining v1 nits: live sync rows, RUNNING/DONE markers |
+| Footer status line | **Shipped** (2026-09-22) | issue #24; contract-tested |
+| Settle warning | **Shipped** (2026-09-22) | issue #24; contract-tested |
+| Switch/fork confirmation guard | **Shipped** (2026-09-22) — consent UX; the safety half (results never wake the wrong leaf) is covered by v2's delivery design | issue #24 |
+| Quit trace / reload warning | **Shipped** (2026-09-22) | issue #24 |
+| Tree-navigation consent prompt | **Deferred** — safety half already covered by leaf-aware delivery; only the ask-first prompt remains | issue #24 |
 | Output spill | **Deferred, elevated** — v2 renders subagent output complete and unbounded (`src/format.ts:89`); a context bomb, not cosmetics | issue #25 |
 | `agentOverrides` / `agentOverridesByParentModel` | **Dropped** | COMPATIBILITY breaking change; per-agent thinking/tools → task fields today, frontmatter once #7 lands |
 | `maxAsyncTickets` cap | **Dropped** | same entry; tickets uncapped, host-lifetime, bounded by `concurrency` on execution only |
@@ -144,7 +145,8 @@ pooled sessions; telemetry with v1 database migration.
    consent UX later; delivery safety already holds.
 3. **`agentOverrides` maps and housekeeping keys: dropped** — recorded as a
    breaking change with migration guidance.
-4. **Visibility layer: owned by issue #24; output bounding by #25.**
+4. **Visibility layer: shipped 2026-09-22 (issue #24); output bounding
+   still owned by #25.**
 5. **Retry bound: no entry needed** — already covered by the may-change
    list.
 

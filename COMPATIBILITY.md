@@ -187,17 +187,15 @@ These v1 capabilities are intentionally absent from v2 today — sequenced
 with the approved roadmap, not cancelled. No tool operation or field
 semantics change while they are absent; each is owned by an issue.
 
-- **Operator-visibility layer (#24)** — the footer status line, the
-  once-per-ticket settle warning, the switch/fork confirmation guards,
-  the quit/reload abort traces, and the live subagent browser
-  (`/subagents`, Ctrl+Shift+B). In v1 only the browser was hard-dependent
-  on Pi's TUI; the rest ran on plain `ctx.ui` status/notify/confirm calls.
-  Until this lands, async visibility is the ticket RPC
-  (poll/wait/cancel), delivery notices, and the shutdown wait status. The
-  v1 tree-navigation guard's *safety* function — results landing on a
-  branch the user navigated to — is already covered by v2's leaf-aware
-  delivery (non-waking append at the current leaf); the consent prompt is
-  what is deferred.
+- **Operator-visibility layer (#24)** — shipped 2026-09-22: the footer
+  status line, the once-per-ticket settle warning, the switch/fork consent
+  guards, the quit/reload abort traces, and the live subagent browser
+  (`/subagents`, Ctrl+Shift+B). Still deferred with #24: the
+  tree-navigation consent prompt (its safety half is already covered by
+  leaf-aware delivery — non-waking append at the current leaf), live rows
+  for in-flight sync dispatches (finished sync calls are retained; a
+  deliberate divergence from v1's live sync view), per-call RUNNING/DONE
+  tool markers, and agent names in the shutdown summary (ids only today).
 - **Large-output bounding (#25)** — v1 spilled subagent final outputs past
   8 000 chars to a temp file and rendered a 2 000-char tail with a
   pointer, keeping the full text in result details. V2 currently renders

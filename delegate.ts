@@ -36,6 +36,9 @@ import {
   dispatchFingerprint,
   OperationStore,
 } from "./src/operations.ts";
+import { createActivityStore } from "./src/activity.ts";
+import { registerSubagentBrowser } from "./src/browser.ts";
+import { VisibilitySignals } from "./src/visibility.ts";
 import { handleSessionRpc, SessionPool } from "./src/sessions.ts";
 import { TelemetryStore } from "./src/telemetry.ts";
 import { handleTicketRpc, TicketStore, ticketView } from "./src/tickets.ts";
@@ -380,10 +383,14 @@ Delegate runs subagent tasks synchronously or as an asynchronous ticket.
 `;
 
 export default function delegateExtension(api: ExtensionAPI): void {
-  const tickets = new TicketStore();
+  // TicketStore mutates first, visibility reads lazily — the observer arrow
+  // only runs on the first mutation, long after both exist.
+  const tickets = new TicketStore(() => visibility.sync());
+  const visibility = new VisibilitySignals(() => tickets.list());
   const admission = new AdmissionController();
   const sessions = new SessionPool();
-  const coordinator = new DispatchCoordinator(tickets);
+  const activity = createActivityStore();
+  const coordinator = new DispatchCoordinator(tickets, activity);
   const telemetry = new TelemetryStore();
   const operations = new OperationStore<DelegateResult>();
   let callSeq = 0;
@@ -638,8 +645,51 @@ export default function delegateExtension(api: ExtensionAPI): void {
     navigationEpoch += 1;
   });
 
-  api.on("session_shutdown", async (_event, ctx) => {
+  // ── Operator-visibility signals (issue #24) ─────────────────────────────
+  // The turn settling with live tickets is the "looks idle but isn't"
+  // moment: warn once per ticket; the footer carries it from there.
+  api.on("agent_settled", (_event, ctx) => {
+    visibility.onSettled(ctx);
+  });
+  // Session replacements are cancellable — consent before killing live work.
+  api.on("session_before_switch", (event, ctx) =>
+    visibility.guardReplacement(
+      ctx,
+      event.reason === "new" ? "Switching sessions" : "Resuming another session",
+    ),
+  );
+  api.on("session_before_fork", (_event, ctx) =>
+    visibility.guardReplacement(ctx, "Forking this session"),
+  );
+
+  // The live subagent browser: /subagents or Ctrl+Shift+B (TUI only).
+  registerSubagentBrowser(api, {
+    store: activity,
+    controls: {
+      pauseTicket: (id) => {
+        const ticket = tickets.get(id);
+        if (ticket !== undefined) tickets.pause(ticket);
+      },
+      resumeTicket: (id) => {
+        const ticket = tickets.get(id);
+        if (ticket !== undefined) tickets.resume(ticket);
+      },
+      ticketPaused: (id) => {
+        const ticket = tickets.get(id);
+        return ticket !== undefined && ticket.status === "running" && ticket.paused;
+      },
+    },
+  });
+
+  api.on("session_shutdown", async (event, ctx) => {
     shuttingDown = true;
+    // v1's quit/reload traces: name the live work being killed before the
+    // force-cancel makes it invisible (quit → stderr; reload → notify).
+    visibility.shutdownTrace(
+      event.reason,
+      ctx,
+      tickets.list().filter((ticket) => ticket.status === "running"),
+    );
     // Forced cancellation settles every ticket immediately and resolves its
     // waiters; delivery is suppressed by the latch above. Checked-out pooled
     // sessions must get their abort requests before the quiescence wait —
@@ -681,6 +731,9 @@ export default function delegateExtension(api: ExtensionAPI): void {
 
       async execute(_toolCallId, params, signal, onUpdate, ctx) {
         const call = validateCall(params);
+        // Every tool call re-arms the footer context (v1 semantics: the
+        // execute context carries the full UI surface for our lifetime).
+        visibility.captureFooterCtx(ctx);
         if (call.mode === "help") {
           return {
             content: [{ type: "text" as const, text: help }],

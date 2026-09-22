@@ -108,6 +108,17 @@ export class TicketStore {
   private readonly tickets = new Map<string, TicketEntry>();
   private seq = 0;
 
+  /**
+   * Optional lifecycle observer (extension-owned): fired after every
+   * caller-visible mutation so visibility signals can resync. The store
+   * never reads it beyond the call.
+   */
+  constructor(private readonly onChange?: () => void) {}
+
+  private changed(): void {
+    this.onChange?.();
+  }
+
   private newTicketId(): string {
     this.seq += 1;
     return `t-${this.seq.toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -148,6 +159,7 @@ export class TicketStore {
       executions: new Map(),
     };
     this.tickets.set(record.id, { record, rt });
+    this.changed();
     return record;
   }
 
@@ -158,6 +170,7 @@ export class TicketStore {
   /** Drop a ticket that never started (e.g. admission failed after create). */
   remove(id: string): void {
     this.tickets.delete(id);
+    this.changed();
   }
 
   list(): Ticket[] {
@@ -172,6 +185,7 @@ export class TicketStore {
     const outcomes = this.entry(ticket).record
       .outcomes as (TaskOutcome | undefined)[];
     outcomes[outcome.index] = outcome;
+    this.changed();
     this.maybeSettle(ticket);
   }
 
@@ -230,6 +244,7 @@ export class TicketStore {
     if (isTerminal(record.status) || status === "running") return false;
     record.status = status;
     record.paused = false;
+    this.changed();
     rt.pauseGate?.resolve();
     rt.settledGate.resolve();
     for (const notify of [...rt.waiters]) notify();
@@ -246,6 +261,7 @@ export class TicketStore {
     if (!record.paused) {
       record.paused = true;
       rt.pauseGate = new Deferred();
+      this.changed();
     }
     return `Ticket "${ticket.id}" paused. Queued tasks and upcoming model turns are held; in-flight work continues.`;
   }
@@ -263,6 +279,7 @@ export class TicketStore {
     record.paused = false;
     rt.pauseGate?.resolve();
     rt.pauseGate = undefined;
+    this.changed();
     return `Ticket "${ticket.id}" resumed.`;
   }
 
