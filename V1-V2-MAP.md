@@ -88,7 +88,7 @@ serial shared batches or parallel `isolated` edits.
 | Switch/fork confirmation guard | **Shipped** (2026-09-22) — consent UX; the safety half (results never wake the wrong leaf) is covered by v2's delivery design | issue #24 |
 | Quit trace / reload warning | **Shipped** (2026-09-22) — names tickets, not agent labels (v1 listed agents too) | issue #24 |
 | Tree-navigation consent prompt | **Shipped** (2026-09-22) — 2-way cancel/stay, a deliberate divergence (v1's third "hold" option dropped by owner decision); cancel force-cancels live tickets, stay blocks the transition | issue #24 |
-| Output spill | **Deferred, elevated** — v2 renders subagent output complete and unbounded (`src/format.ts:89`); a context bomb, not cosmetics | issue #25 |
+| Output spill | **Shipped** (2026-09-23) — settled/sync output over `output.spillThresholdChars` spills to an owner-only temp file with a bounded tail; running-ticket views tail-only, never write; lossless on write failure; full output in `details` | issue #25; `src/spill.ts`, `SPEC.md` "Output bounding" |
 | `agentOverrides` / `agentOverridesByParentModel` | **Dropped** | COMPATIBILITY breaking change; per-agent thinking/tools → task fields today, frontmatter once #7 lands |
 | `maxAsyncTickets` cap | **Dropped** | same entry; tickets uncapped, host-lifetime, bounded by `concurrency` on execution only |
 | Ticket TTL cleanup | Already deliberate (SPEC: host-lifetime tickets) | no action |
@@ -120,11 +120,11 @@ an accepted gap, recorded in `TEST-MIGRATION.md`.
 
 | Feature | v1 | v2 |
 | --- | --- | --- |
-| Result rendering | full render layer (branches, transcript text, spill) | compact status/integration/notice summaries |
+| Result rendering | full render layer (branches, transcript text, spill) | compact status/integration/notice summaries + spill bounding |
 | Session store | in-memory pool + custom layout | `<agentDir>/delegate-sessions/` file-backed, insert-on-success |
 | Provider extensions | allowlist | verified, provider-scoped allowlist; integration status recorded |
 | Scratch vs shared writer | (v1 scratch reserved on source) | scratch holds no source reservation — runs beside a shared writer |
-| Config surface | `maxConcurrent`, `concurrency{providers}`, `agentOverrides{,ByParentModel}`, `allowUnsafeSharedWrites`, `stallTimeoutMs`, `telemetry{enabled}`, `maxAsyncTickets`, `output.spill{Threshold,Tail}Chars` | `maxConcurrent`, `concurrency{default,providers,models}`, `stallTimeoutMs`, `models`, `telemetry{enabled,dbPath}` |
+| Config surface | `maxConcurrent`, `concurrency{providers}`, `agentOverrides{,ByParentModel}`, `allowUnsafeSharedWrites`, `stallTimeoutMs`, `telemetry{enabled}`, `maxAsyncTickets`, `output.spill{Threshold,Tail}Chars` | `maxConcurrent`, `concurrency{default,providers,models}`, `stallTimeoutMs`, `models`, `telemetry{enabled,dbPath}`, `output.spill{Threshold,Tail}Chars` |
 | Stall watchdog | 15 min default | 15 min default (parity) |
 | Package | published `@bermudi/pi-delegate` 0.1.21, esbuild bundle step | no bundle, `files: [delegate.ts, README]` |
 

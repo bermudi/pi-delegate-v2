@@ -28,7 +28,9 @@ Dispatch is synchronous by default. `async: true` applies to the whole batch,
 returns a ticket immediately, and later auto-delivers the batch result.
 Synchronous results preserve task input order and include aggregate usage when
 the Pi host supports it. A top-level `workspace` is the default for every task
-that does not name its own.
+that does not name its own. A synchronous result is error-valued only when
+every task failed — a partially failed batch is a normal result carrying each
+task's own status, mirroring an async ticket's `partial` settlement.
 
 A task accepts:
 
@@ -174,6 +176,44 @@ settles the ticket as `cancelled` regardless of late worker outcomes.
 A singular ticket RPC (poll with a ticket id, wait, cancel, pause, or resume)
 for an unknown id returns a tool error naming the missing ticket. Roster
 polling without a ticket id remains a successful empty/list response.
+
+### Output bounding
+
+Two audiences share one source of truth — each task's complete recorded
+output, which is never truncated or discarded. What differs is the
+LLM-facing projection:
+
+- **Settled output** (a synchronous result, or a terminal ticket's
+  poll/wait/delivery text): output at or below `output.spillThresholdChars`
+  chars is returned verbatim. Over the threshold, the complete output is
+  written to a temp file and the text carries only a bounded tail of at
+  most `output.spillTailChars` chars plus a pointer naming the file, the
+  full size, and that retention follows OS temp policy. A failed task's
+  partial output is bounded the same way. The tail never begins with a
+  lone half of a surrogate pair.
+- **Running-ticket views**: a poll or timed-out/aborted wait on a running
+  ticket bounds every recorded outcome to the tail budget only and never
+  writes a spill file or names one — the note states whether completion
+  will spill or include the full output.
+- **Recovery**: the complete output always remains on the ticket record
+  and in the `results` field of the tool result's and delivered message's
+  `details`; a human expanding the result sees it whole. If the spill
+  write itself fails, the complete output is returned in-context instead —
+  bounding degrades losslessly, never to a hard truncation.
+- **Stability**: once a settled ticket's record can no longer change,
+  repeated polls render one stable view — the same spill path, not a new
+  file per poll.
+
+Spill files live under the OS temp directory, named
+`delegate-output-<agent>-<random>.md`, created exclusively with owner-only
+permissions, and are never deleted by Delegate (pointers can persist in
+transcripts; the OS temp policy owns their lifecycle).
+
+`output.spillThresholdChars` (positive integer, default 8000) and
+`output.spillTailChars` (non-negative integer, default 2000) are read from
+the user-global `delegate.json`; malformed values fail the call before any
+task starts. Each ticket snapshots the bounds at creation — a later config
+edit does not retroactively reshape a settled ticket's rendered result.
 
 ### Background delivery
 

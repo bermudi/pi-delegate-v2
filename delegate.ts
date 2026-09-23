@@ -41,9 +41,10 @@ import { registerSubagentBrowser } from "./src/browser.ts";
 import { VisibilitySignals } from "./src/visibility.ts";
 import { handleSessionRpc, SessionPool } from "./src/sessions.ts";
 import { TelemetryStore } from "./src/telemetry.ts";
-import { handleTicketRpc, TicketStore, ticketView } from "./src/tickets.ts";
+import { handleTicketRpc, TicketStore } from "./src/tickets.ts";
 import {
   Deferred,
+  type OutputBounds,
   type ResolvedTask,
   type Ticket,
 } from "./src/types.ts";
@@ -466,11 +467,16 @@ export default function delegateExtension(api: ExtensionAPI): void {
     readonly createTicket?: (
       tasks: readonly ResolvedTask[],
       relabel: (label: string) => void,
+      config: DelegateConfig,
     ) => Ticket;
   }): Promise<{
     completion: Promise<DispatchOutcome>;
     notices: readonly string[];
     ticket: Ticket | undefined;
+    /** Resolved tasks, for settled-render spill labels on the sync path. */
+    tasks: readonly ResolvedTask[];
+    /** The loaded config's output bounds, for the sync result render. */
+    outputBounds: OutputBounds;
   }> => {
     const { requestedTasks, ctx, signal, onNotices, createTicket } = options;
     // The barrier is tracked before anything between here and the handoff
@@ -519,7 +525,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
       const config = loadDelegateConfig(agentDirResolution.dir);
       const tasks = await resolveTasks(requestedTasks, env, config);
       sessions.validateReuse(tasks);
-      ticket = createTicket?.(tasks, relabel);
+      ticket = createTicket?.(tasks, relabel, config);
       let owner = ticket?.id;
       if (owner === undefined) {
         callSeq += 1;
@@ -578,7 +584,13 @@ export default function delegateExtension(api: ExtensionAPI): void {
         .finally(() => {
           if (ticket) tickets.releaseSettlement(ticket);
         });
-      return { completion, notices, ticket };
+      return {
+        completion,
+        notices,
+        ticket,
+        tasks,
+        outputBounds: config.output,
+      };
     } catch (error) {
       // The one pre-handoff failure routine — the pipeline still owns the
       // barrier here. A disposal failure must never erase the root cause:
@@ -614,6 +626,8 @@ export default function delegateExtension(api: ExtensionAPI): void {
         return {
           notices: batch.notices,
           ticket: cancelledTicket,
+          tasks: batch.tasks,
+          outputBounds: batch.config.output,
           completion: coordinator
             .run(batch.tasks, {
               env: batch.env,
@@ -757,7 +771,14 @@ export default function delegateExtension(api: ExtensionAPI): void {
           const result = await handleTicketRpc(call, tickets, signal);
           return {
             content: [{ type: "text" as const, text: result.text }],
-            details: { mode: "ticket" as const, action: call.action },
+            details: {
+              mode: "ticket" as const,
+              action: call.action,
+              ticket: result.ticket?.id,
+              // The rendered text may be spill-bounded; the record is not —
+              // details keep the complete outcomes for the expanded view.
+              results: result.ticket?.outcomes,
+            },
             isError: result.isError,
           };
         }
@@ -800,7 +821,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
             const message = {
               customType: "delegate-result",
               content:
-                ticketView(ticket) +
+                tickets.view(ticket) +
                 (cancelled
                   ? "\nCancellation is cooperative; worker cleanup may still be pending."
                   : ""),
@@ -808,6 +829,8 @@ export default function delegateExtension(api: ExtensionAPI): void {
               details: {
                 ticket: ticket.id,
                 originLeafId: ticket.originLeafId,
+                // Complete outcomes — delivery text is spill-bounded.
+                results: ticket.outcomes,
               },
             };
             // api.sendMessage is fire-and-forget on the stock
@@ -880,7 +903,8 @@ export default function delegateExtension(api: ExtensionAPI): void {
               });
           };
 
-          const { completion, ticket, notices } = await runDispatchPipeline({
+          const { completion, ticket, notices, tasks, outputBounds } =
+            await runDispatchPipeline({
             requestedTasks: call.tasks,
             ctx,
             // One signal source in the pipeline: the caller's host signal
@@ -906,9 +930,10 @@ export default function delegateExtension(api: ExtensionAPI): void {
             createTicket:
               call.async === false
                 ? undefined
-                : (tasks, relabel) => {
+                : (tasks, relabel, config) => {
                     const created = tickets.create(tasks, {
                       holdSettlement: workspaceNeedsSettlementHold(tasks),
+                      outputBounds: config.output,
                     });
                     operationTicket = created;
                     // The barrier now has its durable name for the
@@ -972,7 +997,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
                 type: "text" as const,
                 text:
                   (notices.length > 0 ? `${notices.join("\n")}\n\n` : "") +
-                  formatDispatchResult(result.outcomes),
+                  formatDispatchResult(result.outcomes, tasks, outputBounds),
               },
             ],
             details: {
@@ -982,6 +1007,9 @@ export default function delegateExtension(api: ExtensionAPI): void {
                 id: outcome.id,
                 status: outcome.status,
               })),
+              // The rendered content is spill-bounded; details keep the
+              // complete outcomes for the expanded view and recovery.
+              results: result.outcomes,
             },
             usage: result.usage,
             isError: allFailed,

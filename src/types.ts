@@ -81,6 +81,20 @@ export type TicketStatus =
   | "cancelled";
 
 /**
+ * How caller-facing output text is bounded: at or under
+ * `spillThresholdChars` it stays verbatim; over it, only a
+ * `spillTailChars`-long tail stays in-context and the rest spills to an
+ * owner-only temp file (or degrades to the full output when the write
+ * fails). Snapshotted onto each ticket at creation so a poll of a
+ * long-settled ticket renders under the bounds it ran with — a later
+ * config change must not retroactively reshape a rendered result.
+ */
+export interface OutputBounds {
+  readonly spillThresholdChars: number;
+  readonly spillTailChars: number;
+}
+
+/**
  * Caller-visible ticket record: identity, lifecycle status, and per-task
  * results — the persistable-shaped half. The `TicketStore` is its sole
  * writer: every property is readonly, so any out-of-store write is a compile
@@ -98,6 +112,12 @@ export interface Ticket {
   /** Index-aligned per-task outcomes; entries appear as tasks finish. */
   readonly outcomes: readonly (TaskOutcome | undefined)[];
   readonly tasks: readonly ResolvedTask[];
+  /**
+   * Dispatch-scoped output-bounds snapshot captured at creation, so a
+   * settled ticket's poll/wait renders under the bounds it ran with even
+   * if `delegate.json` has since changed.
+   */
+  readonly outputBounds: OutputBounds;
   readonly createdAt: number;
   /**
    * Advisory notices attached at dispatch (e.g. same-call shared writers

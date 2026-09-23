@@ -70,11 +70,32 @@ describe("delegate dispatch contract", () => {
       });
 
       // The call itself completes; the failing task is reported as failed and
-      // the sibling's output is still returned.
+      // the sibling's output is still returned. A mixed batch is a result,
+      // not a tool error — same semantics as an async ticket's `partial`.
+      expect(result.isError).toBe(false);
       expect(result.text).toContain("OUTPUT-OK");
       expect(result.text).toMatch(/fail|error|exploded/i);
     },
   );
+
+  test("a synchronous batch where every task failed is a tool error", async () => {
+    // Issue #6's sync analog: an all-failure batch is error-valued like a
+    // ticket settling `failed`; a partial batch is not (see above).
+    session = await openDelegateBoundary();
+    const subagents = await installSubagentModel(session);
+    subagents.respond([
+      fauxAssistantMessage("", {
+        stopReason: "error",
+        errorMessage: "provider exploded",
+      }),
+    ]);
+
+    const result = await callDelegate(session, {
+      tasks: [{ prompt: "doomed" }],
+    });
+    expect(result.isError).toBe(true);
+    expect(result.text).toMatch(/exploded/i);
+  });
 
   test(
     "caller-provided task ids appear on results for correlation",

@@ -168,9 +168,11 @@ guidance toward the config; a configured reference that does not resolve in
 
 - **V1 per-agent override maps and housekeeping config keys are not read
   (2026-09-21 reconciliation).**
-  `agentOverrides`, `agentOverridesByParentModel`, `maxAsyncTickets`, and
-  `output.spillThresholdChars`/`output.spillTailChars` have no v2 meaning; stale entries
-  are silently ignored. Model choice for named agents lives only under
+  `agentOverrides`, `agentOverridesByParentModel`, and `maxAsyncTickets`
+  have no v2 meaning; stale entries are silently ignored.
+  (`output.spillThresholdChars`/`output.spillTailChars` regained their v1
+  meaning when output bounding shipped — see the deferred-capabilities
+  list below.) Model choice for named agents lives only under
   user-global `"models"`; per-agent `thinking`/`tools` preferences are
   task fields today and agent Markdown frontmatter once named profiles
   land (#7), keeping their v1 precedence below task fields. Async tickets
@@ -199,11 +201,15 @@ semantics change while they are absent; each is owned by an issue.
   in-flight sync dispatches (finished sync calls are retained), per-call
   RUNNING/DONE tool markers, and agent names in the shutdown summary
   (ids only today).
-- **Large-output bounding (#25)** — v1 spilled subagent final outputs past
-  8 000 chars to a temp file and rendered a 2 000-char tail with a
-  pointer, keeping the full text in result details. V2 currently renders
-  the complete output in the caller-visible result text unbounded; very
-  large subagent answers enter the parent context whole.
+- **Large-output bounding (#25)** — shipped 2026-09-23 with v1's
+  semantics: settled and synchronous results spill output past
+  `output.spillThresholdChars` (default 8 000) to an owner-only temp
+  file and render a `output.spillTailChars`-long (default 2 000)
+  surrogate-safe tail with a pointer; running-ticket views bound to the
+  tail only and never write a file; a failed write degrades to the full
+  output in-context; complete output stays in result `details` and on the
+  ticket record. Bounds snapshot per ticket at creation; a settled
+  ticket's frozen view keeps one stable spill path across polls.
 
 ## Known host limitations (accepted 2026-09-19, issue #3)
 

@@ -1,6 +1,8 @@
 import { integrationLines } from "./format.ts";
+import { renderOutputForLLM, renderOutputForPoll } from "./spill.ts";
 import type {
   ExecutionHandle,
+  OutputBounds,
   TaskOutcome,
   Ticket,
   TicketStatus,
@@ -38,6 +40,14 @@ interface TicketRuntime {
   readonly waiters: Set<() => void>;
   /** Live executions by task index, for cooperative abort. */
   readonly executions: Map<number, ExecutionHandle>;
+  /**
+   * Memoized terminal view, populated by `view` once the ticket's record
+   * can no longer change — every task has a caller-visible outcome and no
+   * execution remains live. Settled rendering can write spill files; the
+   * freeze keeps repeated polls pointing at one stable path instead of
+   * writing a fresh file per render.
+   */
+  settledView: string | undefined;
 }
 
 interface TicketEntry {
@@ -57,7 +67,7 @@ function completedCount(ticket: Ticket): number {
   return ticket.outcomes.filter((outcome) => outcome !== undefined).length;
 }
 
-function taskSection(outcome: TaskOutcome): string {
+function taskSection(ticket: Ticket, outcome: TaskOutcome): string {
   const head = `### Task ${outcome.id} — ${outcome.status === "ok" ? "completed" : outcome.status}`;
   const quarantined = outcome.quarantined
     ? "\n(worker termination unconfirmed — its write scope stays reserved)"
@@ -65,22 +75,32 @@ function taskSection(outcome: TaskOutcome): string {
   const integration = outcome.integration
     ? `\n${integrationLines(outcome.integration).join("\n")}`
     : "";
+  // The ticket's lifecycle decides the renderer, not the outcome's: while
+  // the ticket runs, even a finished task's output is bounded to a tail —
+  // a poll never writes a spill file. On a terminal ticket every recorded
+  // outcome renders through the spill boundary under the bounds snapshotted
+  // at creation. `outcome.output` itself stays complete either way.
+  const bounds = ticket.outputBounds;
+  const label = ticket.tasks[outcome.index]?.agent ?? outcome.id;
+  const render = isTerminal(ticket.status)
+    ? (output: string) => renderOutputForLLM(output, label, bounds)
+    : (output: string) => renderOutputForPoll(output, bounds);
   if (outcome.status === "ok") {
-    return `${head}\n${outcome.output ?? ""}${quarantined}${integration}`;
+    return `${head}\n${render(outcome.output ?? "")}${quarantined}${integration}`;
   }
   const detail = outcome.error ?? "no output";
-  const partial = outcome.output ? `\n${outcome.output}` : "";
+  const partial = outcome.output ? `\n${render(outcome.output)}` : "";
   return `${head}\n${detail}${partial}${quarantined}${integration}`;
 }
 
 /** Poll/wait view of one ticket. Poll is observational — never mutates. */
-export function ticketView(ticket: Ticket): string {
+function ticketView(ticket: Ticket): string {
   const lines = [
     `Ticket "${ticket.id}": ${statusWord(ticket)} — ${completedCount(ticket)}/${ticket.totalTasks} tasks finished.`,
     ...ticket.notices,
   ];
   for (const outcome of ticket.outcomes) {
-    if (outcome) lines.push("", taskSection(outcome));
+    if (outcome) lines.push("", taskSection(ticket, outcome));
   }
   return lines.join("\n");
 }
@@ -135,7 +155,10 @@ export class TicketStore {
 
   create(
     tasks: readonly ResolvedTask[],
-    options: { readonly holdSettlement: boolean },
+    options: {
+      readonly holdSettlement: boolean;
+      readonly outputBounds: OutputBounds;
+    },
   ): Ticket {
     const record: Writable<Ticket> = {
       id: this.newTicketId(),
@@ -144,6 +167,7 @@ export class TicketStore {
       totalTasks: tasks.length,
       outcomes: new Array<TaskOutcome | undefined>(tasks.length).fill(undefined),
       tasks,
+      outputBounds: options.outputBounds,
       createdAt: Date.now(),
       notices: [],
     };
@@ -157,6 +181,7 @@ export class TicketStore {
       finishedGate: new Deferred(),
       waiters: new Set(),
       executions: new Map(),
+      settledView: undefined,
     };
     this.tickets.set(record.id, { record, rt });
     this.changed();
@@ -165,6 +190,28 @@ export class TicketStore {
 
   get(id: string): Ticket | undefined {
     return this.tickets.get(id)?.record;
+  }
+
+  /**
+   * The poll/wait/delivery view. Running tickets bound every recorded
+   * outcome to a tail-only projection — a poll never writes a spill file;
+   * terminal tickets render settled output through the spill boundary under
+   * the bounds snapshotted at creation. A terminal view is memoized once it
+   * can no longer change — the finished gate has resolved and no execution
+   * remains live — so repeated polls of a settled ticket keep pointing at
+   * the same spill file rather than writing a new one per render.
+   */
+  view(ticket: Ticket): string {
+    const { record, rt } = this.entry(ticket);
+    if (
+      isTerminal(record.status) &&
+      rt.finishedGate.resolved &&
+      rt.executions.size === 0
+    ) {
+      rt.settledView ??= ticketView(record);
+      return rt.settledView;
+    }
+    return ticketView(record);
   }
 
   /** Drop a ticket that never started (e.g. admission failed after create). */
@@ -439,6 +486,11 @@ export class TicketStore {
 export interface TicketRpcResult {
   readonly text: string;
   readonly isError: boolean;
+  /**
+   * The resolved ticket when the call named a known one — lets the caller
+   * attach its complete (unbounded) outcomes to result details.
+   */
+  readonly ticket?: Ticket;
 }
 
 /** ticketAction RPCs against the store. */
@@ -464,25 +516,26 @@ export async function handleTicketRpc(
   }
   switch (call.action) {
     case "poll":
-      return { text: ticketView(ticket), isError: false };
+      return { text: store.view(ticket), isError: false, ticket };
     case "wait": {
       const { timedOut, aborted } = await store.wait(
         ticket,
         call.timeoutMs,
         signal,
       );
+      const view = store.view(ticket);
       const text = timedOut
-        ? `${ticketView(ticket)}\n\nWait timed out; the ticket is still ${statusWord(ticket)}.`
+        ? `${view}\n\nWait timed out; the ticket is still ${statusWord(ticket)}.`
         : aborted
-          ? `${ticketView(ticket)}\n\nWait detached; the caller aborted the wait. The ticket is still ${statusWord(ticket)}.`
-          : ticketView(ticket);
-      return { text, isError: false };
+          ? `${view}\n\nWait detached; the caller aborted the wait. The ticket is still ${statusWord(ticket)}.`
+          : view;
+      return { text, isError: false, ticket };
     }
     case "cancel":
-      return { text: store.cancel(ticket, call.force), isError: false };
+      return { text: store.cancel(ticket, call.force), isError: false, ticket };
     case "pause":
-      return { text: store.pause(ticket), isError: false };
+      return { text: store.pause(ticket), isError: false, ticket };
     case "resume":
-      return { text: store.resume(ticket), isError: false };
+      return { text: store.resume(ticket), isError: false, ticket };
   }
 }

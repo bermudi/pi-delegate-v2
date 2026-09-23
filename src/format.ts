@@ -1,4 +1,10 @@
-import type { ResolvedTask, TaskIntegration, TaskOutcome } from "./types.ts";
+import { renderOutputForLLM } from "./spill.ts";
+import type {
+  OutputBounds,
+  ResolvedTask,
+  TaskIntegration,
+  TaskOutcome,
+} from "./types.ts";
 
 /**
  * One advisory line per serialized shared-writer group: which tasks, which
@@ -74,8 +80,18 @@ export function integrationLines(integration: TaskIntegration): string[] {
   return lines;
 }
 
-/** Synchronous dispatch result body: one section per task, in input order. */
-export function formatDispatchResult(outcomes: readonly TaskOutcome[]): string {
+/**
+ * Synchronous dispatch result body: one section per task, in input order.
+ * Task output is projected through the spill boundary — over-threshold
+ * output becomes a tail plus a temp-file pointer; `outcome.output` itself
+ * stays complete for the details/recovery surface. A failed task's
+ * partial output is bounded the same way.
+ */
+export function formatDispatchResult(
+  outcomes: readonly TaskOutcome[],
+  tasks: readonly ResolvedTask[],
+  bounds: OutputBounds,
+): string {
   return outcomes
     .map((outcome) => {
       const head = `### Task ${outcome.id} — ${statusWord(outcome)}`;
@@ -85,11 +101,14 @@ export function formatDispatchResult(outcomes: readonly TaskOutcome[]): string {
       const integration = outcome.integration
         ? `\n${integrationLines(outcome.integration).join("\n")}`
         : "";
+      const label = tasks[outcome.index]?.agent ?? outcome.id;
       if (outcome.status === "ok") {
-        return `${head}\n${outcome.output ?? ""}${quarantined}${integration}`;
+        return `${head}\n${renderOutputForLLM(outcome.output ?? "", label, bounds)}${quarantined}${integration}`;
       }
       const detail = outcome.error ?? "no output";
-      const partial = outcome.output ? `\n\nPartial output:\n${outcome.output}` : "";
+      const partial = outcome.output
+        ? `\n\nPartial output:\n${renderOutputForLLM(outcome.output, label, bounds)}`
+        : "";
       return `${head}\n${detail}${partial}${quarantined}${integration}`;
     })
     .join("\n\n");

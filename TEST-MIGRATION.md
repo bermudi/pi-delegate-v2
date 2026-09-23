@@ -109,7 +109,9 @@ gaps.
   alignment; partial output/usage/touched files preserved on failure.
 - **Internal:** `formatCompletedTask`/`formatFailedTask` rendering, header
   markers, `fmt*`/`trunc*` helpers, touched-file extraction helpers.
-- **Covered now:** ordered results; sibling failure isolation; task-id echo;
+- **Covered now:** ordered results; sibling failure isolation — a mixed
+  sync batch is a normal result while an all-failure batch is error-valued
+  (#6's sync analog); task-id echo;
   aggregate usage on the tool result; parent-abort of an in-flight sync call
   settles as a structured cancellation (asserted in the cancellation
   regression suite via `callDelegateDetached` + raw-session `abort()`);
@@ -187,6 +189,35 @@ gaps.
   progress/onUpdate frames; roster wording details; replacement-session
   non-inheritance (no real session replacement is expressible through the
   harness — the emitted `session_shutdown` path is covered instead).
+
+### Output bounding (#25)
+
+- **Contract:** LLM-facing output is bounded — settled/sync output over
+  `output.spillThresholdChars` spills the complete output to an
+  owner-only `delegate-output-<agent>-<rand>.md` temp file and renders a
+  `output.spillTailChars` tail plus pointer; running-ticket views render
+  tail-only and never write or name a file; a failed write returns the
+  complete output in-context; empty/`"(no output)"` outputs pass through;
+  bounds snapshot per ticket at creation; a frozen settled view keeps one
+  stable spill path across polls; the complete record stays in `details`.
+- **Regression:** surrogate-pair-safe tail cut; exclusive create (no
+  overwrite on collision); mode 0o600.
+- **Internal:** `decideSpill`/`spillToTempFile`/render helpers, the v1
+  `spillFileOperations` test seam, exact pointer/note wording — v2
+  exercises the whole behavior through the tool boundary, steering the
+  spill directory with `TMPDIR` (`os.tmpdir()` reads it per call).
+- **Covered now:** pass-through under threshold; sync spill file
+  contents/name/mode + stable tail pointer + complete `details.results`;
+  failed-task partial bounded; running-ticket poll tail-only with zero
+  files, settling spills; pointer stability across settled polls;
+  creation-time bounds snapshot; lossless write-failure fallback;
+  surrogate-safe tail; empty/placeholder passthrough; malformed `output`
+  bounds reject before any task starts (`tests/contract/output-bounds.test.ts`).
+- **Provenance:** v1 `spill.test.ts` scenarios (threshold/tail, surrogate
+  pairs, file contract, write-failure degrade, poll no-file) replayed at
+  the public boundary; v1 `config.ts` `output` validation wording
+  preserved.
+- **Gap:** none identified.
 
 ### Cancellation
 
@@ -796,7 +827,10 @@ delivery", `tests/contract/delivery.test.ts`) — no Pi patch was added to
 v1 migration preservation (issue #8; `SPEC.md` "Telemetry",
 `tests/contract/telemetry.test.ts`); bounded duplicate-safe dispatch
 identity via `operationId` (issue #16; `SPEC.md` "Explicit operation
-identity", `tests/contract/operations.test.ts`).
+identity", `tests/contract/operations.test.ts`); LLM-facing output
+bounding with owner-only spill files, running-poll tail-only views, and
+lossless fallback (issue #25; `SPEC.md` "Output bounding",
+`tests/contract/output-bounds.test.ts`).
 
 Remaining:
 

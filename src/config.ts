@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join } from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { knownAgentNames } from "./profiles.ts";
+import type { OutputBounds } from "./types.ts";
 
 export interface ConcurrencyConfig {
   /** Per-model-key bound when no more specific entry applies. */
@@ -34,6 +35,13 @@ export interface DelegateConfig {
    */
   readonly stallTimeoutMs: number;
   readonly telemetry: TelemetryConfig;
+  /**
+   * LLM-facing output bounding: over `spillThresholdChars` a settled task's
+   * output spills to an owner-only temp file and only a `spillTailChars`
+   * tail stays in-context (see `spill.ts`). Dispatch-scoped: tickets
+   * snapshot these at creation.
+   */
+  readonly output: OutputBounds;
 }
 
 export const DEFAULT_CONFIG: DelegateConfig = {
@@ -42,6 +50,7 @@ export const DEFAULT_CONFIG: DelegateConfig = {
   models: {},
   stallTimeoutMs: 15 * 60 * 1000,
   telemetry: { enabled: false, dbPath: undefined },
+  output: { spillThresholdChars: 8000, spillTailChars: 2000 },
 };
 
 /**
@@ -164,6 +173,40 @@ export function loadDelegateConfig(agentDir: string): DelegateConfig {
     stallTimeoutMs:
       (stallTimeoutMs as number) ?? DEFAULT_CONFIG.stallTimeoutMs,
     telemetry: parseTelemetry(config.telemetry, path),
+    output: parseOutput(config.output, path),
+  };
+}
+
+/**
+ * Parse the optional `output` block: LLM-facing output bounding
+ * (`{ spillThresholdChars?, spillTailChars? }`). A malformed bound fails
+ * loudly — silently ignoring it could flood the caller's context.
+ */
+function parseOutput(value: unknown, path: string): OutputBounds {
+  if (value === undefined) return DEFAULT_CONFIG.output;
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`${path}: output must be an object.`);
+  }
+  const raw = value as Record<string, unknown>;
+  const threshold = raw.spillThresholdChars;
+  if (threshold !== undefined && !isPositiveInteger(threshold)) {
+    throw new Error(
+      `${path}: output.spillThresholdChars must be a positive integer; got ${JSON.stringify(threshold)}.`,
+    );
+  }
+  const tail = raw.spillTailChars;
+  if (
+    tail !== undefined &&
+    (typeof tail !== "number" || !Number.isInteger(tail) || tail < 0)
+  ) {
+    throw new Error(
+      `${path}: output.spillTailChars must be a non-negative integer; got ${JSON.stringify(tail)}.`,
+    );
+  }
+  return {
+    spillThresholdChars:
+      (threshold as number) ?? DEFAULT_CONFIG.output.spillThresholdChars,
+    spillTailChars: (tail as number) ?? DEFAULT_CONFIG.output.spillTailChars,
   };
 }
 

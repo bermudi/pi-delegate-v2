@@ -15,6 +15,7 @@ import type {
 import {
   callDelegate,
   installSubagentModel,
+  objectOf,
   openDelegateBoundary,
   ticketIdOf,
 } from "../support/pi-boundary.ts";
@@ -98,7 +99,14 @@ describe("async result delivery", () => {
       );
       await host.agent.waitForIdle();
       expect(sends).toHaveBeenCalledTimes(1);
-      expect(sends.mock.calls[0]![0].details).toEqual({ ticket, originLeafId });
+      const details = objectOf(sends.mock.calls[0]![0].details, "details");
+      expect(details.ticket).toBe(ticket);
+      expect(details.originLeafId).toBe(originLeafId);
+      // Complete outcomes ride the delivered message's details — the
+      // bounded text may point at a spill file while the record stays
+      // whole for the expanded view (#25).
+      const results = details.results as { output?: string }[] | undefined;
+      expect(results?.[0]?.output).toBe("DELIVERED-OUTPUT");
       expect(sends.mock.calls[0]![0].content).toContain("DELIVERED-OUTPUT");
       expect(sends.mock.calls[0]![1]).toEqual({
         deliverAs: "followUp",
