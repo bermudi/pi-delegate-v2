@@ -449,6 +449,30 @@ gaps.
 
 ### Explicit dispatch identity (#16)
 
+- **Contract:** `operationId` scopes a dispatch to one execution per live
+  key+request: the same normalized `{async, tasks}` reuses the in-flight
+  promise or settled result (sync result or async ticket), a changed
+  request conflicts before any work, retention is bounded (one-hour
+  expiry, 256 settled records, in-flight never evicted), the first caller
+  owns cancellation/context/progress/delivery, and unkeyed dispatches are
+  never deduplicated. Host-lifetime only; no crash or exactly-once claim.
+- **Regression:** concurrent retries share one gated execution; a
+  duplicate caller's aborted signal cannot cancel the shared operation;
+  post-settlement retries reuse; same-id changed requests conflict while
+  running and after settlement; forced-cancel results are reused, never
+  restarted; an in-flight async operation survives settled-cap pressure
+  and retries to the same ticket; expiry and capacity eviction permit
+  fresh operations; intentional unkeyed repeats always execute;
+  equivalent supported normalizations (flat task vs one-task array,
+  batch workspace default vs task workspace) count as identical.
+- **Internal:** the map, the fingerprint hash (SHA-256 today), and prune
+  mechanics are free to change; only the identity semantics and bounds
+  are contract.
+- **Covered now:** `tests/contract/operations.test.ts`, including
+  failed-result reuse after the configuration that caused the failure is
+  fixed, alongside forced-cancel result reuse.
+- **Gap:** none.
+
 ### Operator-visibility signals (issue #24)
 
 V1 evidence: `status.ts` (footer formats, settle warning, replacement
@@ -475,30 +499,6 @@ guards), `extension.ts` shutdown traces, `browser.ts`/`browser-state.ts`
   an accepted gap, not a coverage target.
 - **Gap:** live sync-run rows (deliberate divergence, #24); RUNNING/DONE
   tool markers.
-
-- **Contract:** `operationId` scopes a dispatch to one execution per live
-  key+request: the same normalized `{async, tasks}` reuses the in-flight
-  promise or settled result (sync result or async ticket), a changed
-  request conflicts before any work, retention is bounded (one-hour
-  expiry, 256 settled records, in-flight never evicted), the first caller
-  owns cancellation/context/progress/delivery, and unkeyed dispatches are
-  never deduplicated. Host-lifetime only; no crash or exactly-once claim.
-- **Regression:** concurrent retries share one gated execution; a
-  duplicate caller's aborted signal cannot cancel the shared operation;
-  post-settlement retries reuse; same-id changed requests conflict while
-  running and after settlement; forced-cancel results are reused, never
-  restarted; an in-flight async operation survives settled-cap pressure
-  and retries to the same ticket; expiry and capacity eviction permit
-  fresh operations; intentional unkeyed repeats always execute;
-  equivalent supported normalizations (flat task vs one-task array,
-  batch workspace default vs task workspace) count as identical.
-- **Internal:** the map, the fingerprint hash (SHA-256 today), and prune
-  mechanics are free to change; only the identity semantics and bounds
-  are contract.
-- **Covered now:** `tests/contract/operations.test.ts`, including
-  failed-result reuse after the configuration that caused the failure is
-  fixed, alongside forced-cancel result reuse.
-- **Gap:** none.
 
 ## First tranche
 

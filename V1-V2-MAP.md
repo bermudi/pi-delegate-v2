@@ -1,8 +1,8 @@
 # v1 → v2 difference map
 
 Snapshot generated 2026-09-21 by comparing `../pi-delegate` @ `e17a23c`
-against this repo @ `d180a89`; updated 2026-09-22 against `56e6a14`
-(v1 HEAD has since advanced to `6b194ae`, prose-only). **Not a behavioral
+against this repo @ `d180a89`; updated 2026-09-23 against `3e316ab`
+(v1 HEAD `6b194ae`, prose-only). **Not a behavioral
 authority** — `SPEC.md`, `INVARIANTS.md`, and `COMPATIBILITY.md` remain
 the contracts. This map organizes what differs, what is missing, and what
 still needs a decision.
@@ -16,10 +16,10 @@ hooks, tool behavior). V1 internals are non-binding per `COMPATIBILITY.md`.
 
 | | v1 (`e17a23c`) | v2 (`56e6a14`) |
 | --- | --- | --- |
-| Shape | ~40 modules, grown organically | 1 entry + 21 `src/` modules, spec-first |
-| Test suite | 330 KB+ across 20+ files | 158 live tests, 18 files, **0 fail, 0 pending** |
+| Shape | ~40 modules, grown organically | 1 entry + 23 `src/` modules, spec-first |
+| Test suite | 330 KB+ across 20+ files | 177 live tests, 20 files, **0 fail, 0 pending** |
 | Behavioral authority | README + code | `SPEC.md` / `INVARIANTS.md` / `COMPATIBILITY.md` |
-| Implemented subsystems | all (incl. TUI) | everything except output bounding (#25) and named Markdown profiles (#7); visibility layer shipped (#24) 2026-09-22 |
+| Implemented subsystems | all (incl. TUI) | everything except named Markdown profiles (#7); visibility layer shipped (#24) 2026-09-22, output bounding shipped (#25) 2026-09-23 |
 
 ---
 
@@ -103,12 +103,13 @@ remove them when upgrading.
 
 `TEST-MIGRATION.md` still lists "Usage properties" as a remaining slice
 (sync-result aggregate usage is wired in `details.usage` but untested at
-the boundary), plus twelve per-subsystem **Gap** entries: overlap warnings
+the boundary), plus the per-subsystem **Gap** entries: overlap warnings
 on results, per-provider limit variants, abort-of-queued-while-parked,
-delivered-result suppression after waiter consumption, mid-turn pause
-semantics, eviction after stalled/deadline runs, read-only+writer
-parallelism, nested-repo gitdirs, cancel-before-apply retention,
-retry-count visibility, stall structured outcomes, async-no-usage.
+aborted-worker-completes-ok, delivered-result suppression after waiter
+consumption, mid-turn pause semantics, eviction after stalled/deadline
+runs, read-only+writer parallelism, nested-repo gitdirs, cancel-before-apply
+retention, retry-count visibility, stall structured outcomes,
+async-no-usage.
 
 New with the visibility layer: footer lifecycle, pause/resume footer,
 multi-ticket merge, and the once-per-activation settle warning are
@@ -155,8 +156,8 @@ browser (#24).
    the replacement; delivery safety already held either way.
 3. **`agentOverrides` maps and housekeeping keys: dropped** — recorded as a
    breaking change with migration guidance.
-4. **Visibility layer: shipped 2026-09-22 (issue #24); output bounding
-   still owned by #25.**
+4. **Visibility layer: shipped 2026-09-22 (issue #24); output bounding:
+   shipped 2026-09-23 (issue #25).**
 5. **Retry bound: no entry needed** — already covered by the may-change
    list.
 

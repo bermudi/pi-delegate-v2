@@ -171,7 +171,7 @@ guidance toward the config; a configured reference that does not resolve in
   `agentOverrides`, `agentOverridesByParentModel`, and `maxAsyncTickets`
   have no v2 meaning; stale entries are silently ignored.
   (`output.spillThresholdChars`/`output.spillTailChars` regained their v1
-  meaning when output bounding shipped — see the deferred-capabilities
+  meaning when output bounding shipped — see the shipped-capabilities
   list below.) Model choice for named agents lives only under
   user-global `"models"`; per-agent `thinking`/`tools` preferences are
   task fields today and agent Markdown frontmatter once named profiles
@@ -183,11 +183,12 @@ guidance toward the config; a configured reference that does not resolve in
   (frontmatter later); drop the stale keys; rely on concurrency bounds and
   polling rather than a ticket cap or TTL sweep.
 
-## v2 deferred capabilities (not dropped)
+## v2 deferred capabilities — all since shipped
 
-These v1 capabilities are intentionally absent from v2 today — sequenced
-with the approved roadmap, not cancelled. No tool operation or field
-semantics change while they are absent; each is owned by an issue.
+These v1 capabilities were deferred past the initial v2 cut — sequenced
+with the approved roadmap, not cancelled — and have now shipped. Each
+entry records what shipped, its issue, and any deliberate divergences
+from v1.
 
 - **Operator-visibility layer (#24)** — shipped 2026-09-22: the footer
   status line, the once-per-ticket settle warning, the switch/fork consent
