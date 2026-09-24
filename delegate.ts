@@ -797,7 +797,12 @@ export default function delegateExtension(api: ExtensionAPI): void {
               ticket: result.ticket?.id,
               // The rendered text may be spill-bounded; the record is not —
               // details keep the complete outcomes for the expanded view.
-              results: result.ticket?.outcomes,
+              // Only poll/wait carry them: cancel/pause/resume expand to
+              // their action response text, not the ticket document.
+              results:
+                call.action === "poll" || call.action === "wait"
+                  ? result.ticket?.outcomes
+                  : undefined,
               ...(result.ticket !== undefined &&
               result.ticket.notices.length > 0
                 ? { notices: result.ticket.notices }
