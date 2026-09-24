@@ -64,16 +64,20 @@ describe("delegate output bounding", () => {
   let session: TestSession | undefined;
   let spillDir: string | undefined;
   let savedTmpdir: string | undefined;
+  let tmpdirOverridden = false;
 
   afterEach(() => {
     session?.dispose();
     session = undefined;
-    if (savedTmpdir === undefined) {
-      delete process.env.TMPDIR;
-    } else {
-      process.env.TMPDIR = savedTmpdir;
+    if (tmpdirOverridden) {
+      if (savedTmpdir === undefined) {
+        delete process.env.TMPDIR;
+      } else {
+        process.env.TMPDIR = savedTmpdir;
+      }
+      savedTmpdir = undefined;
+      tmpdirOverridden = false;
     }
-    savedTmpdir = undefined;
     if (spillDir !== undefined) {
       fs.rmSync(spillDir, { recursive: true, force: true });
       spillDir = undefined;
@@ -84,6 +88,7 @@ describe("delegate output bounding", () => {
   function useSpillDir(): string {
     spillDir = fs.mkdtempSync(path.join(os.tmpdir(), "delegate-spill-test-"));
     savedTmpdir = process.env.TMPDIR;
+    tmpdirOverridden = true;
     process.env.TMPDIR = spillDir;
     return spillDir;
   }
@@ -313,6 +318,7 @@ describe("delegate output bounding", () => {
       output: { spillThresholdChars: 50, spillTailChars: 20 },
     });
     savedTmpdir = process.env.TMPDIR;
+    tmpdirOverridden = true;
     spillDir = fs.mkdtempSync(path.join(os.tmpdir(), "delegate-spill-test-"));
     // An unwritable target: os.tmpdir() resolves inside a directory that
     // does not exist, so every spill create fails.
