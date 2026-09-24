@@ -260,12 +260,10 @@ describe("delegate output bounding", () => {
     const firstPath = spilledPathOf(first.text);
     expect(firstPath).toBeDefined();
     expect(spilledPathOf(second.text)).toBe(firstPath);
-    // The wait's settle-time render may spill before the view freezes
-    // (worker quiescence lands after caller settlement); the frozen view
-    // is what repeated polls must share.
-    const files = spillFiles(dir);
-    expect(files.length).toBeGreaterThanOrEqual(1);
-    expect(files.length).toBeLessThanOrEqual(2);
+    // The wait's settle-time render may run before the view freezes
+    // (worker quiescence lands after caller settlement), but per-outcome
+    // memoization means every render of this outcome shares one file.
+    expect(spillFiles(dir)).toHaveLength(1);
   });
 
   test(

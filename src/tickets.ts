@@ -48,6 +48,15 @@ interface TicketRuntime {
    * writing a fresh file per render.
    */
   settledView: string | undefined;
+  /**
+   * Spill-rendered output per recorded outcome — at most one spill file
+   * per outcome. A terminal ticket can be re-rendered before `settledView`
+   * freezes (executions may stay registered for the session's life under
+   * quarantine); this keeps every render pointing at one stable path.
+   * A replaced outcome (late worker truth) is a new object and gets its
+   * own render.
+   */
+  readonly renderedOutputs: WeakMap<TaskOutcome, string>;
 }
 
 interface TicketEntry {
@@ -71,6 +80,7 @@ function taskSection(
   ticket: Ticket,
   outcome: TaskOutcome,
   whole: boolean,
+  renderedOutputs?: WeakMap<TaskOutcome, string>,
 ): string {
   const head = `### Task ${outcome.id} — ${outcome.status === "ok" ? "completed" : outcome.status}`;
   const quarantined = outcome.quarantined
@@ -83,14 +93,22 @@ function taskSection(
   // the ticket runs, even a finished task's output is bounded to a tail —
   // a poll never writes a spill file. On a terminal ticket every recorded
   // outcome renders through the spill boundary under the bounds snapshotted
-  // at creation. `outcome.output` itself stays complete either way. A
-  // `whole` view (the human expanded render) skips bounding entirely.
+  // at creation, memoized per outcome so re-renders before the view freezes
+  // keep one stable spill path. `outcome.output` itself stays complete
+  // either way. A `whole` view (the human expanded render) skips bounding
+  // entirely.
   const bounds = ticket.outputBounds;
   const label = ticket.tasks[outcome.index]?.agent ?? outcome.id;
   const render = whole
     ? (output: string) => output
     : isTerminal(ticket.status)
-      ? (output: string) => renderOutputForLLM(output, label, bounds)
+      ? (output: string) => {
+          const cached = renderedOutputs?.get(outcome);
+          if (cached !== undefined) return cached;
+          const rendered = renderOutputForLLM(output, label, bounds);
+          renderedOutputs?.set(outcome, rendered);
+          return rendered;
+        }
       : (output: string) => renderOutputForPoll(output, bounds);
   if (outcome.status === "ok") {
     return `${head}\n${render(outcome.output ?? "")}${quarantined}${integration}`;
@@ -101,13 +119,18 @@ function taskSection(
 }
 
 /** Poll/wait view of one ticket. Poll is observational — never mutates. */
-function ticketView(ticket: Ticket, whole = false): string {
+function ticketView(
+  ticket: Ticket,
+  whole = false,
+  renderedOutputs?: WeakMap<TaskOutcome, string>,
+): string {
   const lines = [
     `Ticket "${ticket.id}": ${statusWord(ticket)} — ${completedCount(ticket)}/${ticket.totalTasks} tasks finished.`,
     ...ticket.notices,
   ];
   for (const outcome of ticket.outcomes) {
-    if (outcome) lines.push("", taskSection(ticket, outcome, whole));
+    if (outcome)
+      lines.push("", taskSection(ticket, outcome, whole, renderedOutputs));
   }
   return lines.join("\n");
 }
@@ -189,6 +212,7 @@ export class TicketStore {
       waiters: new Set(),
       executions: new Map(),
       settledView: undefined,
+      renderedOutputs: new WeakMap(),
     };
     this.tickets.set(record.id, { record, rt });
     this.changed();
@@ -203,10 +227,13 @@ export class TicketStore {
    * The poll/wait/delivery view. Running tickets bound every recorded
    * outcome to a tail-only projection — a poll never writes a spill file;
    * terminal tickets render settled output through the spill boundary under
-   * the bounds snapshotted at creation. A terminal view is memoized once it
-   * can no longer change — the finished gate has resolved and no execution
-   * remains live — so repeated polls of a settled ticket keep pointing at
-   * the same spill file rather than writing a new one per render.
+   * the bounds snapshotted at creation, memoized per recorded outcome so a
+   * terminal-but-unfrozen ticket (executions still draining, possibly
+   * forever under quarantine) re-renders without writing a new file per
+   * poll. A terminal view is also memoized whole once it can no longer
+   * change — the finished gate has resolved and no execution remains
+   * live — so repeated polls of a settled ticket keep pointing at the
+   * same spill file rather than writing a new one per render.
    */
   view(ticket: Ticket): string {
     const { record, rt } = this.entry(ticket);
@@ -215,10 +242,10 @@ export class TicketStore {
       rt.finishedGate.resolved &&
       rt.executions.size === 0
     ) {
-      rt.settledView ??= ticketView(record);
+      rt.settledView ??= ticketView(record, false, rt.renderedOutputs);
       return rt.settledView;
     }
-    return ticketView(record);
+    return ticketView(record, false, rt.renderedOutputs);
   }
 
   /**
