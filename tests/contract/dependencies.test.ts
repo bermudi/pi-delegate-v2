@@ -1,0 +1,436 @@
+import { afterEach, describe, expect, test } from "bun:test";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { execSync } from "node:child_process";
+import type { TestSession } from "@marcfargas/pi-test-harness";
+import {
+  fauxAssistantMessage,
+  fauxToolCall,
+  type FauxResponseFactory,
+} from "@earendil-works/pi-ai";
+import {
+  callDelegate,
+  configureDelegate,
+  installSubagentModel,
+  objectOf,
+  openDelegateBoundary,
+} from "../support/pi-boundary.ts";
+
+function gitInit(dir: string): void {
+  execSync(
+    "git init -q && git config user.email t@t && git config user.name t && git commit -qm init --allow-empty",
+    { cwd: dir },
+  );
+}
+
+describe("delegate dependency graph and handoffs", () => {
+  let session: TestSession | undefined;
+  const dirs: string[] = [];
+
+  function tempDir(): string {
+    const dir = mkdtempSync(join(tmpdir(), "delegate-v2-dep-"));
+    dirs.push(dir);
+    return dir;
+  }
+
+  afterEach(() => {
+    session?.dispose();
+    session = undefined;
+    for (const dir of dirs.splice(0)) {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test(
+    "unknown, self-referencing, and cyclic dependencies reject before any task starts",
+    async () => {
+      // SPEC: the whole graph validates before any task starts; invalid
+      // graphs are whole-call errors, not per-task failures.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+
+      const invalid: Record<string, unknown>[] = [
+        // Unknown reference.
+        {
+          tasks: [
+            { id: "a", prompt: "x" },
+            { prompt: "y", dependsOn: ["nope"] },
+          ],
+        },
+        // Self-dependency.
+        {
+          tasks: [{ id: "a", prompt: "x", dependsOn: ["a"] }],
+        },
+        // Two-task cycle.
+        {
+          tasks: [
+            { id: "a", prompt: "x", dependsOn: ["b"] },
+            { id: "b", prompt: "y", dependsOn: ["a"] },
+          ],
+        },
+        // Generated-id ambiguity: tasks[0] answers to 'task-1' and
+        // tasks[1] claims it explicitly — a reference cannot be resolved.
+        {
+          tasks: [
+            { prompt: "x" },
+            { id: "task-1", prompt: "y", dependsOn: ["task-1"] },
+          ],
+        },
+      ];
+      for (const arguments_ of invalid) {
+        const result = await callDelegate(session, arguments_);
+        expect(result.isError).toBe(true);
+        expect(result.text).toMatch(/depend|cycle|ambiguous|unknown/i);
+      }
+      expect(subagents.state.callCount).toBe(0);
+    },
+  );
+
+  test(
+    "a dependent runs only after its prerequisites and receives their output",
+    async () => {
+      // SPEC: a task starts only after every prerequisite finished; its
+      // prompt carries each prerequisite's bounded final output.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+
+      const timeline: string[] = [];
+      const prompts: string[] = [];
+      const turn: FauxResponseFactory = async (context) => {
+        const messages = JSON.stringify(context.messages);
+        prompts.push(messages);
+        // Dispatch on each task's own prompt phrase — prerequisite outputs
+        // arrive inside handoffs and must not re-trigger their branches.
+        if (messages.includes("BUILD the thing")) {
+          timeline.push("build");
+          return fauxAssistantMessage("BUILD-OUTPUT-TOKEN");
+        }
+        if (messages.includes("REVIEW the build")) {
+          timeline.push("review");
+          return fauxAssistantMessage("REVIEW-OUTPUT");
+        }
+        timeline.push("publish");
+        return fauxAssistantMessage("PUBLISH-OUTPUT");
+      };
+      // Three calls: the chain is sequential, so the FIFO order is fixed.
+      subagents.respond([turn, turn, turn]);
+
+      const result = await callDelegate(session, {
+        tasks: [
+          // No explicit id: the generated 'task-1' is a valid reference.
+          { prompt: "BUILD the thing" },
+          { id: "review", prompt: "REVIEW the build", dependsOn: ["task-1"] },
+          { prompt: "PUBLISH it", dependsOn: ["review"] },
+        ],
+      });
+      expect(result.isError).toBe(false);
+      expect(timeline).toEqual(["build", "review", "publish"]);
+
+      // The dependent's prompt carries the prerequisite's output, labelled
+      // as a handoff — not just raw text spliced in.
+      const reviewPrompt = prompts.find((p) => p.includes("REVIEW"))!;
+      expect(reviewPrompt).toContain("BUILD-OUTPUT-TOKEN");
+      expect(reviewPrompt).toMatch(/handoff|prerequisite/i);
+      const publishPrompt = prompts.find((p) => p.includes("PUBLISH"))!;
+      expect(publishPrompt).toContain("REVIEW-OUTPUT");
+    },
+  );
+
+  test(
+    "a failed prerequisite blocks its dependent but unrelated branches still run",
+    async () => {
+      // SPEC: a dependent runs only if every prerequisite ended ok;
+      // otherwise it is visibly blocked — consuming no worker — while
+      // independent branches proceed.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+
+      // A model-attributable failure does not retry; the free branch and
+      // the failer each make exactly one provider call.
+      const turn: FauxResponseFactory = async (context) => {
+        if (JSON.stringify(context.messages).includes("FAILER")) {
+          return fauxAssistantMessage("", {
+            stopReason: "error",
+            errorMessage: "usage limit exceeded; upgrade your plan",
+          });
+        }
+        return fauxAssistantMessage("FREE-OUTPUT");
+      };
+      subagents.respond([turn, turn]);
+
+      const result = await callDelegate(session, {
+        tasks: [
+          { id: "failer", prompt: "FAILER task" },
+          { id: "dependent", prompt: "depends", dependsOn: ["failer"] },
+          { id: "free", prompt: "FREE independent" },
+        ],
+      });
+      // Two non-successes and one success → a normal (partial) result.
+      expect(result.isError).toBe(false);
+      // The dependent never reached a provider: blocked tasks consume no
+      // worker, session, or slot.
+      expect(subagents.state.callCount).toBe(2);
+
+      const details = objectOf(result.details, "details");
+      const results = details.results as
+        | { id: string; status: string; error?: string; blockedBy?: string[] }[]
+        | undefined;
+      const byId = new Map(results?.map((r) => [r.id, r]));
+      expect(byId.get("failer")?.status).toBe("failed");
+      expect(byId.get("free")?.status).toBe("ok");
+      const dependent = byId.get("dependent");
+      expect(dependent?.status).toBe("blocked");
+      expect(dependent?.blockedBy).toEqual(["failer"]);
+      expect(result.text).toContain("blocked");
+      expect(result.text).toMatch(/failer/);
+    },
+  );
+
+  test(
+    "blocking cascades through a chain with the original reason visible",
+    async () => {
+      // SPEC: blocking is per-edge; a blocked task blocks its own
+      // dependents, and each blocked outcome names its prerequisites.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      subagents.respond([
+        fauxAssistantMessage("", {
+          stopReason: "error",
+          errorMessage: "usage limit exceeded; upgrade your plan",
+        }),
+      ]);
+
+      const result = await callDelegate(session, {
+        tasks: [
+          { id: "a", prompt: "FAILER first" },
+          { id: "b", prompt: "mid", dependsOn: ["a"] },
+          { id: "c", prompt: "last", dependsOn: ["b"] },
+        ],
+      });
+      const details = objectOf(result.details, "details");
+      const results = details.results as
+        | { id: string; status: string }[]
+        | undefined;
+      const byId = new Map(results?.map((r) => [r.id, r]));
+      expect(byId.get("a")?.status).toBe("failed");
+      expect(byId.get("b")?.status).toBe("blocked");
+      expect(byId.get("c")?.status).toBe("blocked");
+      // Only the failer consumed a worker.
+      expect(subagents.state.callCount).toBe(1);
+      // The leaf's block names its own prerequisite, keeping the chain
+      // inspectable edge by edge.
+      expect(result.text).toMatch(/'b'/);
+    },
+  );
+
+  test(
+    "a dependent on a scratch prerequisite receives output, not edits",
+    async () => {
+      // SPEC: a scratch prerequisite's edits are discarded with its copy;
+      // only its output is handed off, and the handoff says so.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      const dir = tempDir();
+
+      const prompts: string[] = [];
+      const turn: FauxResponseFactory = async (context) => {
+        const messages = JSON.stringify(context.messages);
+        prompts.push(messages);
+        if (messages.includes("DEPENDENT")) {
+          return fauxAssistantMessage("DEPENDENT-DONE");
+        }
+        if (context.messages.some((m) => m.role === "toolResult")) {
+          return fauxAssistantMessage("SCRATCH-FINDINGS");
+        }
+        return fauxAssistantMessage([
+          fauxToolCall("write", { path: "scratch-only.txt", content: "x" }),
+        ]);
+      };
+      subagents.respond([turn, turn, turn]);
+
+      const result = await callDelegate(session, {
+        tasks: [
+          {
+            id: "probe",
+            prompt: "PROBE scratch",
+            cwd: dir,
+            tools: ["write"],
+            workspace: "scratch",
+          },
+          {
+            prompt: "DEPENDENT consume",
+            cwd: dir,
+            tools: ["read"],
+            dependsOn: ["probe"],
+          },
+        ],
+      });
+      expect(result.isError).toBe(false);
+      // The scratch write stayed inside the discarded copy.
+      expect(existsSync(join(dir, "scratch-only.txt"))).toBe(false);
+      const dependentPrompt = prompts.find((p) => p.includes("DEPENDENT"))!;
+      expect(dependentPrompt).toContain("SCRATCH-FINDINGS");
+      expect(dependentPrompt).toMatch(/discarded/);
+    },
+  );
+
+  test(
+    "a dependent on an isolated prerequisite sees its applied changes, not just a summary",
+    async () => {
+      // SPEC: an isolated prerequisite's proposal applies before the
+      // dependent phase starts, so a downstream reviewer reads the real
+      // tree. Ordering the cross-kind pair is also what admits it.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      const dir = tempDir();
+      gitInit(dir);
+
+      let dependentSawFile = false;
+      const prompts: string[] = [];
+      const turn: FauxResponseFactory = async (context) => {
+        const messages = JSON.stringify(context.messages);
+        prompts.push(messages);
+        if (messages.includes("REVIEW")) {
+          // The dependent's cwd is the source tree: the prerequisite's
+          // applied file must already be there.
+          dependentSawFile = existsSync(join(dir, "dep-built.txt"));
+          return fauxAssistantMessage("REVIEW-DONE");
+        }
+        if (context.messages.some((m) => m.role === "toolResult")) {
+          return fauxAssistantMessage("BUILD-SUMMARY");
+        }
+        return fauxAssistantMessage([
+          fauxToolCall("write", { path: "dep-built.txt", content: "built" }),
+        ]);
+      };
+      subagents.respond([turn, turn, turn]);
+
+      const result = await callDelegate(session, {
+        tasks: [
+          {
+            id: "build",
+            prompt: "BUILD the artifact",
+            cwd: dir,
+            tools: ["write"],
+            workspace: "isolated",
+          },
+          {
+            prompt: "REVIEW the applied work",
+            cwd: dir,
+            tools: ["read"],
+            dependsOn: ["build"],
+          },
+        ],
+      });
+      expect(result.isError).toBe(false);
+      expect(dependentSawFile).toBe(true);
+      expect(readFileSync(join(dir, "dep-built.txt"), "utf8")).toBe("built");
+      // The handoff names the applied files so the reviewer knows to look.
+      const dependentPrompt = prompts.find((p) => p.includes("REVIEW"))!;
+      expect(dependentPrompt).toContain("dep-built.txt");
+      expect(dependentPrompt).toContain("BUILD-SUMMARY");
+    },
+  );
+
+  test(
+    "an unordered shared/isolated overlap still rejects; dependsOn ordering admits it",
+    async () => {
+      // SPEC: same-call shared/isolated overlap is admitted only when the
+      // graph orders every overlapping pair. The unordered case is pinned
+      // by the workspace contract tests; this proves the ordered case runs.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      const dir = tempDir();
+      gitInit(dir);
+
+      const timeline: string[] = [];
+      const turn: FauxResponseFactory = async (context) => {
+        const messages = JSON.stringify(context.messages);
+        if (context.messages.some((m) => m.role === "toolResult")) {
+          timeline.push(messages.includes("SECOND") ? "second" : "first");
+          return fauxAssistantMessage("DONE");
+        }
+        const file = messages.includes("SECOND")
+          ? "second.txt"
+          : "first.txt";
+        return fauxAssistantMessage([
+          fauxToolCall("write", { path: file, content: file }),
+        ]);
+      };
+      subagents.respond([turn, turn, turn, turn]);
+
+      const result = await callDelegate(session, {
+        tasks: [
+          {
+            id: "first",
+            prompt: "FIRST write",
+            cwd: dir,
+            tools: ["write"],
+            workspace: "shared",
+          },
+          {
+            prompt: "SECOND write",
+            cwd: dir,
+            tools: ["write"],
+            workspace: "isolated",
+            dependsOn: ["first"],
+          },
+        ],
+      });
+      expect(result.isError).toBe(false);
+      // The isolated task's baseline was taken after the shared write —
+      // its proposal merges back on top of it, not beside it.
+      expect(timeline).toEqual(["first", "second"]);
+      expect(readFileSync(join(dir, "first.txt"), "utf8")).toBe("first.txt");
+      expect(readFileSync(join(dir, "second.txt"), "utf8")).toBe("second.txt");
+    },
+  );
+
+  test(
+    "a handoff is bounded — only the prerequisite's output tail reaches the dependent",
+    async () => {
+      // SPEC: the handoff projection is bounded by
+      // output.spillThresholdChars; the full output stays on the
+      // prerequisite's own result.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      configureDelegate(session, {
+        output: { spillThresholdChars: 40, spillTailChars: 40 },
+      });
+
+      const prompts: string[] = [];
+      const turn: FauxResponseFactory = async (context) => {
+        const messages = JSON.stringify(context.messages);
+        prompts.push(messages);
+        if (messages.includes("DEPENDENT")) {
+          return fauxAssistantMessage("DEPENDENT-DONE");
+        }
+        return fauxAssistantMessage(`HEAD-${"x".repeat(200)}-TAIL`);
+      };
+      subagents.respond([turn, turn]);
+
+      const result = await callDelegate(session, {
+        tasks: [
+          { id: "loud", prompt: "LOUD producer" },
+          { prompt: "DEPENDENT consumer", dependsOn: ["loud"] },
+        ],
+      });
+      expect(result.isError).toBe(false);
+      const dependentPrompt = prompts.find((p) => p.includes("DEPENDENT"))!;
+      // The tail survives; the truncated head does not.
+      expect(dependentPrompt).toContain("-TAIL");
+      expect(dependentPrompt).not.toContain("HEAD-x");
+      // The prerequisite's own outcome keeps the complete output even
+      // though its rendered section is spill-bounded too.
+      const details = objectOf(result.details, "details");
+      const results = details.results as { output?: string }[] | undefined;
+      expect(results?.[0]?.output).toContain("HEAD-");
+    },
+  );
+});

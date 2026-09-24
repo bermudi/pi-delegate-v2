@@ -19,7 +19,8 @@ export type ActivityStatus =
   | "paused"
   | "ok"
   | "failed"
-  | "cancelled";
+  | "cancelled"
+  | "blocked";
 
 export interface ActivityToolCall {
   /** Start of the call (ms epoch); the preview is rewritten when it ends. */
@@ -90,7 +91,12 @@ const OMITTED_MARKER = "[Earlier text omitted]";
 
 /** Terminal statuses: they end a row's clock. */
 function isSettled(status: ActivityStatus): boolean {
-  return status === "ok" || status === "failed" || status === "cancelled";
+  return (
+    status === "ok" ||
+    status === "failed" ||
+    status === "cancelled" ||
+    status === "blocked"
+  );
 }
 
 // --- ANSI sanitization -----------------------------------------------------

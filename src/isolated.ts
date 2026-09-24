@@ -910,20 +910,26 @@ async function cleanupGroup(
 }
 
 /**
- * Prepare detached worker worktrees for every isolated task, one group per
- * source repository. Each group gets a synthetic baseline commit capturing
- * the source's dirty state (tracked, deleted, and untracked) without
- * touching the user's branch or index. Throws — failing the whole call —
- * when a source root is unusable; everything created so far is removed.
+ * Prepare detached worker worktrees for every isolated task in `phase`,
+ * one group per source repository. Each group gets a synthetic baseline
+ * commit capturing the source's dirty state (tracked, deleted, and
+ * untracked) without touching the user's branch or index. Throws —
+ * failing the whole call or phase — when a source root is unusable;
+ * everything created so far is removed. The phase filter keeps a
+ * dependent's baseline at its phase's start, after earlier phases'
+ * proposals applied.
  */
 export async function prepareIsolated(
   tasks: readonly ResolvedTask[],
   artifactBase: string,
-  signal?: AbortSignal,
+  signal: AbortSignal | undefined,
   excludedPaths: readonly string[] = [],
+  phase: number,
 ): Promise<IsolatedPlan | undefined> {
   const isolatedIndexes = tasks
-    .map((task, index) => (task.workspace === "isolated" ? index : -1))
+    .map((task, index) =>
+      task.workspace === "isolated" && task.phase === phase ? index : -1,
+    )
     .filter((index) => index >= 0);
   if (!isolatedIndexes.length) return undefined;
 

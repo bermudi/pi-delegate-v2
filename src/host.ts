@@ -25,6 +25,7 @@ import {
   isWriter,
 } from "./profiles.ts";
 import { configPathOf, configuredModelFor, type DelegateConfig } from "./config.ts";
+import { resolveDependencyGraph } from "./graph.ts";
 import type { TaskInput } from "./validation.ts";
 import type { ResolvedTask, Workspace } from "./types.ts";
 
@@ -215,6 +216,10 @@ export async function resolveTasks(
     }
   }
 
+  // The graph was validated in validation.ts; resolution re-derives the
+  // same ids to attach dependency indexes and phases to each task.
+  const graph = resolveDependencyGraph(tasks);
+
   const resolved: ResolvedTask[] = [];
   for (const [index, task] of tasks.entries()) {
     const where = `tasks[${index}]${task.id ? ` (id '${task.id}')` : ""}`;
@@ -285,6 +290,8 @@ export async function resolveTasks(
       deadlineMs: task.deadlineMs,
       workspace,
       writeRoots: reserves ? await writeRootsOf(cwd) : undefined,
+      dependsOn: graph.deps[index]!,
+      phase: graph.phases[index]!,
     } satisfies ResolvedTask);
   }
   return resolved;

@@ -131,6 +131,12 @@ const taskSchema = Type.Object(
           "shared/scratch/isolated. 'shared' edits the tree; writers in one repo run one at a time in task order. 'isolated' runs each task in a private Git worktree — same-repo edits run in parallel and merge in order. 'scratch' runs once in a disposable copy and discards every change — for write-capable tasks whose value is the answer, not the edits; read-only tasks cannot use it.",
       }),
     ),
+    dependsOn: Type.Optional(
+      Type.Array(Type.String(), {
+        description:
+          "Ids of tasks in this batch that must succeed before this one starts; their outputs are handed off.",
+      }),
+    ),
   },
   { additionalProperties: false },
 );
@@ -338,8 +344,16 @@ Delegate runs subagent tasks synchronously or as an asynchronous ticket.
 - Task fields: \`prompt\` (required unless \`resumeFrom\`), \`id\` (correlation
   key), \`agent\` (named profile), \`cwd\`, \`systemPrompt\`,
   \`tools\` (\`*\`/\`ro\` groups or names), \`thinking\`, \`deadlineMs\`,
-  \`sessionId\`, \`resumeFrom\`, \`workspace\` (shared/scratch/isolated).
+  \`sessionId\`, \`resumeFrom\`, \`workspace\` (shared/scratch/isolated),
+  \`dependsOn\` (task ids to run first).
   A top-level \`workspace\` is the batch default.
+- \`dependsOn\` orders tasks in one batch: name earlier task ids (an
+  explicit \`id\`, or the generated \`task-1\`, \`task-2\`, ...). A task
+  starts only after every prerequisite finished successfully — applied
+  isolated work included — and its prompt carries each prerequisite's
+  bounded output. A prerequisite that failed, was cancelled, or left its
+  isolated proposal unapplied blocks the dependent with a visible reason;
+  unrelated branches still run.
 - \`operationId\` (1-64 letters/digits/./_/-) makes a dispatch duplicate-safe:
   same id + same request returns the original in-flight or settled result;
   same id + a changed request is an error. Dispatch-only.
@@ -557,13 +571,12 @@ export default function delegateExtension(api: ExtensionAPI): void {
         dispatchSignal,
         telemetrySpan.ownedPaths,
       );
-      const prepared = plan;
       // The handoff. This invocation is the try block's last statement and
       // the completion it yields is composed and returned, never awaited
       // here — the ownership comment above spells out why that makes the
       // catch below provably pre-handoff.
       const completion = coordinator
-        .run(prepared.tasks, {
+        .run(tasks, {
           env,
           config,
           grant,
@@ -571,18 +584,19 @@ export default function delegateExtension(api: ExtensionAPI): void {
           signal: dispatchSignal,
           ticket,
           quiescence: barrier,
-          finalize: (outcomes) =>
+          preparePhase: (phase) => plan!.preparePhase(phase),
+          reconcilePhase: (phase, outcomes) =>
             // The dispatch facts the batch actually holds: plans consume
             // what applies to them (only isolated reconciliation reads
             // this context).
-            prepared.finalize(outcomes, {
+            plan!.reconcilePhase(phase, outcomes, {
               signal: dispatchSignal,
               shouldApplySource: () => !dispatchSignal?.aborted,
               retainedReason: ticket
                 ? "The ticket was cancelled before source application."
                 : "The call was aborted before source application.",
             }),
-          onWorkerQuiesced: (taskIndex) => prepared.cleanupWorker(taskIndex),
+          onWorkerQuiesced: (taskIndex) => plan!.cleanupWorker(taskIndex),
         })
         .then((outcome) => {
           telemetrySpan.finish(outcome, ticket?.status);
@@ -1020,11 +1034,13 @@ export default function delegateExtension(api: ExtensionAPI): void {
           }
 
           const result = await completion;
-          // SPEC: error-valued only when every task failed — cancelled and
-          // partially failed batches are normal results carrying each
-          // task's own status, mirroring a ticket's `partial` settlement.
+          // SPEC: error-valued only when every task failed or was blocked —
+          // cancelled and partially failed batches are normal results
+          // carrying each task's own status, mirroring a ticket's `partial`
+          // settlement.
           const allFailed = result.outcomes.every(
-            (outcome) => outcome.status === "failed",
+            (outcome) =>
+              outcome.status === "failed" || outcome.status === "blocked",
           );
           return {
             content: [

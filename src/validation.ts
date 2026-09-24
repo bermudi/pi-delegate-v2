@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import { isAbsolute } from "node:path";
+import { resolveDependencyGraph } from "./graph.ts";
 import { expandTools, getBuiltinProfile, knownAgentNames } from "./profiles.ts";
 
 export interface TaskInput {
@@ -15,6 +16,7 @@ export interface TaskInput {
   readonly resumeFrom?: string;
   readonly deadlineMs?: number;
   readonly workspace?: "shared" | "scratch" | "isolated";
+  readonly dependsOn?: string[];
 }
 
 export type ValidatedCall =
@@ -461,4 +463,8 @@ function validateTasks(tasks: readonly TaskInput[]): void {
       }
     }
   });
+  // The whole graph must validate before any task starts: unknown
+  // references, self-dependencies, cycles, and ambiguous ids are
+  // whole-call errors (SPEC "Dependencies and handoffs").
+  resolveDependencyGraph(tasks);
 }

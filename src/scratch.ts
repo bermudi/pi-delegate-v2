@@ -175,18 +175,23 @@ export interface ScratchPlan {
 }
 
 /**
- * Prepare a disposable copy for every scratch task, then remap its cwd into
- * the copy. Throws — failing the whole call — when a source tree cannot be
- * copied; everything created so far is removed. Copies are per-task: two
- * scratch tasks on one source never see each other's writes.
+ * Prepare a disposable copy for every scratch task in `phase`, then remap
+ * its cwd into the copy. Throws — failing the whole call or phase — when a
+ * source tree cannot be copied; everything created so far is removed.
+ * Copies are per-task: two scratch tasks on one source never see each
+ * other's writes. The phase filter exists so a dependent's copy is taken
+ * at its phase's start, after earlier phases' proposals applied.
  */
 export async function prepareScratch(
   tasks: readonly ResolvedTask[],
   scratchBase: string,
-  signal?: AbortSignal,
+  signal: AbortSignal | undefined,
+  phase: number,
 ): Promise<ScratchPlan | undefined> {
   const scratchIndexes = tasks
-    .map((task, index) => (task.workspace === "scratch" ? index : -1))
+    .map((task, index) =>
+      task.workspace === "scratch" && task.phase === phase ? index : -1,
+    )
     .filter((index) => index >= 0);
   if (!scratchIndexes.length) return undefined;
 

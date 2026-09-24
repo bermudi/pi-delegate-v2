@@ -500,6 +500,35 @@ guards), `extension.ts` shutdown traces, `browser.ts`/`browser-state.ts`
 - **Gap:** live sync-run rows (deliberate divergence, #24); RUNNING/DONE
   tool markers.
 
+### Dependencies and handoffs (issue #18)
+
+New v2 contract — no v1 evidence; the dependency graph is an additive
+`dependsOn` field, so there is nothing to migrate.
+
+- **Contract:** `dependsOn` names same-batch prerequisites by explicit id or
+  generated `task-N`; the whole graph validates before any task starts
+  (unknown references, self-dependencies, cycles, ambiguous ids are
+  whole-call errors); a dependent runs only after every prerequisite is
+  confirmed-quiescent and ended `ok` — isolated prerequisites must also
+  have applied (or cleanly empty) proposals; a failed/unapplied
+  prerequisite blocks the dependent visibly without consuming a worker,
+  while unrelated branches still run; a dependent's prompt carries each
+  prerequisite's bounded output plus what became of its work (applied file
+  list, discarded-scratch note); scratch/isolated workspace preparation is
+  phase-late so dependents see earlier applied changes; same-call
+  shared/isolated overlap is admitted only when the graph orders every
+  overlapping pair. Live tests in `tests/contract/dependencies.test.ts`.
+- **Regression:** a serialization predecessor edge from an earlier-phase
+  task to a later-phase one deadlocked the phase loop — same-phase pairs
+  still chain, cross-phase pairs rely on the phase boundary
+  (`admission.ts`).
+- **Internal:** graph resolution/phasing helpers (`graph.ts`) — not
+  boundary-tested directly.
+- **Gap:** blocked outcomes under `async` tickets poll/delivery views;
+  cancellation racing a dep gate (superseded paths asserted by code
+  review); a quarantined prerequisite unblocking a dependent on late
+  worker truth.
+
 ## First tranche
 
 | V1 evidence | Class | V2 treatment |

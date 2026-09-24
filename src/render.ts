@@ -44,7 +44,8 @@ function isOutcome(value: unknown): value is TaskOutcome {
     typeof value.id === "string" &&
     (value.status === "ok" ||
       value.status === "failed" ||
-      value.status === "cancelled")
+      value.status === "cancelled" ||
+      value.status === "blocked")
   );
 }
 

@@ -104,6 +104,28 @@ use any design that makes these properties true and testable.
   its sessions, deadlines, workspace reservations, and protection against
   conflicting work.
 
+## Dependencies and handoffs
+
+- The dependency graph MUST be fully validated before any task starts:
+  unknown references, self-dependencies, cycles, and ambiguous ids are
+  whole-call errors.
+- A task MUST NOT start until every declared prerequisite has reached a
+  confirmed-quiescent terminal outcome; a provisional outcome MUST NOT
+  unblock dependents.
+- A prerequisite that did not succeed — including an isolated prerequisite
+  whose proposal was not applied — MUST block its dependents with a visible
+  reason and MUST NOT block unrelated branches. A blocked task consumes no
+  worker, session, or concurrency slot.
+- A task's scratch or isolated workspace MUST be prepared no earlier than
+  its phase: a copy or baseline taken before earlier phases applied would
+  hide their work. A dependent MUST see every earlier phase's applied
+  changes — never only the prerequisite's summary.
+- Cross-kind overlap MAY be admitted only when the dependency graph orders
+  every overlapping shared/isolated pair in some direction; unordered
+  cross-kind overlap MUST still reject.
+- Dependency blocking MUST NOT weaken cancellation: a task reached while
+  the batch is cancelled is cancelled, not blocked.
+
 ## Shared writes
 
 - Admission MUST fail closed when the physical cwd/Git scope is ambiguous.

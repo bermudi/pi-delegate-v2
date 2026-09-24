@@ -1,4 +1,5 @@
 import { sep } from "node:path";
+import { dependsTransitively } from "./graph.ts";
 import type { ResolvedTask } from "./types.ts";
 
 /** True when canonical root `a` equals, contains, or is contained in `b`. */
@@ -124,20 +125,50 @@ export class AdmissionController {
     const predecessors = new Map<number, number>();
     const serialized: { tasks: readonly number[]; roots: readonly string[] }[] =
       [];
+    const deps = tasks.map((task) => task.dependsOn);
     for (const group of groups.values()) {
       const kinds = new Set(group.map((task) => task.workspace));
       if (kinds.size > 1) {
-        const roots = [
-          ...new Set(group.flatMap((task) => task.writeRoots!)),
-        ].join(", ");
-        throw new Error(
-          `Conflicting workspaces: shared and isolated tasks in one call overlap at ${roots}. Split them into separate calls.`,
+        // Mixed shared/isolated overlap is admitted only when the
+        // dependency graph orders every overlapping cross-kind pair —
+        // either direction works: a shared dependent reads the tree
+        // after the isolated proposal applied; an isolated dependent
+        // is worktreed after the shared writer stopped. Unordered
+        // pairs could still run concurrently and must reject.
+        const unordered = group.some((a, i) =>
+          group.some(
+            (b, j) =>
+              i < j &&
+              a.workspace !== b.workspace &&
+              !dependsTransitively(deps, a.index, b.index) &&
+              !dependsTransitively(deps, b.index, a.index),
+          ),
         );
+        if (unordered) {
+          const roots = [
+            ...new Set(group.flatMap((task) => task.writeRoots!)),
+          ].join(", ");
+          throw new Error(
+            `Conflicting workspaces: shared and isolated tasks in one call overlap at ${roots}. ` +
+              `Split them into separate calls, or order them with dependsOn.`,
+          );
+        }
       }
-      // Same-call shared writers serialize in task order.
+      // Same-call shared writers serialize in task order — but only
+      // within a dependency phase. A predecessor edge to a later-phase
+      // task would deadlock the phase loop (the earlier phase cannot
+      // finish while it waits on a task that has not started), and a
+      // cross-phase pair is already serialized by the phase boundary
+      // itself, so the edge buys nothing either way.
       if (group[0]!.workspace === "shared" && group.length > 1) {
-        for (let i = 1; i < group.length; i++) {
-          predecessors.set(group[i]!.index, group[i - 1]!.index);
+        const byPhase = new Map<number, number[]>();
+        for (const task of group) {
+          byPhase.set(task.phase, [...(byPhase.get(task.phase) ?? []), task.index]);
+        }
+        for (const members of byPhase.values()) {
+          for (let i = 1; i < members.length; i++) {
+            predecessors.set(members[i]!, members[i - 1]!);
+          }
         }
         serialized.push({
           tasks: group.map((task) => task.index),

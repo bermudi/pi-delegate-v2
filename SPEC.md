@@ -29,8 +29,9 @@ returns a ticket immediately, and later auto-delivers the batch result.
 Synchronous results preserve task input order and include aggregate usage when
 the Pi host supports it. A top-level `workspace` is the default for every task
 that does not name its own. A synchronous result is error-valued only when
-every task failed — a partially failed batch is a normal result carrying each
-task's own status, mirroring an async ticket's `partial` settlement.
+every task failed or was blocked — a partially failed batch is a normal
+result carrying each task's own status, mirroring an async ticket's
+`partial` settlement.
 
 A task accepts:
 
@@ -47,6 +48,7 @@ A task accepts:
 | `resumeFrom` | Absolute `.jsonl` transcript path |
 | `deadlineMs` | Positive wall-clock budget beginning after queueing |
 | `workspace` | `shared`, `scratch`, or `isolated` |
+| `dependsOn` | Ids of tasks in this batch that must succeed first; their outputs are handed off |
 
 Omitting `agent` creates an `inline` task with `*` by default. The built-ins are:
 
@@ -96,7 +98,56 @@ Tasks run concurrently subject to global and per-model limits. Overlapping
 same-call shared writers serialize in task order, and the result names the
 serialized tasks and scope with the `isolated` remedy — independent same-repo
 edits are meant to run in parallel worktrees. Overlap with active work, or
-between shared and isolated work, rejects the whole call before execution.
+between shared and isolated work, rejects the whole call before execution —
+except as ordered by explicit dependencies below.
+
+### Dependencies and handoffs
+
+A task may name prerequisites in the same batch via `dependsOn`, a list of
+task ids (caller `id`s or generated `task-N` ids). Dependencies are always
+explicit; they are never inferred from task prose. The complete graph is
+validated before any task starts: unknown references, self-dependencies,
+cycles, and ambiguous ids fail the whole call.
+
+Dependencies partition the batch into phases. A task with no prerequisites
+is phase 0; any other task's phase is one deeper than its deepest
+prerequisite. A phase starts only after every earlier phase has finished —
+including its isolated reconciliation — so a task's tree always contains
+every earlier phase's applied work: a `shared` task reads the source
+directly, and a `scratch` copy or `isolated` baseline is captured at its
+phase's start. A reviewer depending on a builder sees the actual changes,
+not merely the builder's summary. A `scratch` prerequisite hands off only
+its output — its edits are discarded by definition.
+
+A task runs only when every prerequisite ended `ok` — for an isolated
+prerequisite, with its proposal applied or cleanly empty. Otherwise it is
+`blocked`: a caller-visible terminal status naming the blocking
+prerequisites and their reasons, consuming no worker, session, or
+concurrency slot. Blocking is per-edge — independent branches still run —
+and cancellation supersedes it: a task reached while the batch is cancelled
+is `cancelled`, not `blocked`. A dependent waits for its prerequisite's
+confirmed quiescence before evaluating, so a worker that only provisionally
+settled can never unblock downstream work.
+
+A starting dependent receives each prerequisite's handoff appended to its
+prompt: the prerequisite's id, its terminal state (with the applied file
+list for an applied isolated prerequisite, or a discarded-edits note for a
+scratch one), and its final output bounded to the dispatch's
+`output.spillThresholdChars` as a tail. The complete output stays on the
+task record; the handoff is a projection of it, as with spill.
+
+Same-call overlapping shared and isolated tasks still reject — unless the
+dependency graph orders every overlapping cross-kind pair, in either
+direction. A shared task that transitively depends on an isolated task
+reads the tree after that proposal applied; an isolated task that depends
+on a shared task is worktreed after that writer stopped. Unordered overlap
+remains a whole-call error.
+
+Settlement treats `blocked` as a non-success that ran no worker: a batch is
+`partial` when at least one task succeeded, `failed` when none did and at
+least one failed or was blocked, and `cancelled` only when every task was
+cancelled. The synchronous result is error-valued when every task failed
+or was blocked.
 
 ### Explicit operation identity
 

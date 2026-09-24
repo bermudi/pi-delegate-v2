@@ -195,7 +195,7 @@ function spillPointer(
  * would land on a trailing surrogate, advance one so the result never
  * starts with a lone half of an astral character.
  */
-function tailOf(s: string, n: number): string {
+export function tailOf(s: string, n: number): string {
   if (s.length <= n) return s;
   let start = s.length - n;
   if (start > 0 && (s.charCodeAt(start) & 0xfc00) === 0xdc00) start++;

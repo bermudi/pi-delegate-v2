@@ -7,6 +7,11 @@ import {
   type DelegateConfig,
 } from "./config.ts";
 import { runTask, type RunControls } from "./execution.ts";
+import {
+  blockingReason,
+  handoffAppendix,
+  prerequisiteSatisfied,
+} from "./graph.ts";
 import type { HostEnvironment } from "./host.ts";
 import type { ActivityStore } from "./activity.ts";
 import type { SessionPool } from "./sessions.ts";
@@ -128,7 +133,20 @@ export class DispatchCoordinator {
       sessions: SessionPool;
       signal?: AbortSignal;
       ticket?: Ticket;
-      finalize?: (
+      /**
+       * Prepare the workspaces of one dependency phase, returning the
+       * phase's tasks with any scratch/isolated cwd remapped. Runs before
+       * that phase's first task starts — later phases prepare after
+       * earlier phases' proposals applied, so dependents see their work.
+       */
+      preparePhase?: (phase: number) => Promise<readonly ResolvedTask[]>;
+      /**
+       * Reconcile one phase's workspaces after all its outcomes are
+       * recorded — isolated proposals apply (or retain) here, inside the
+       * admission-reservation window, before the next phase starts.
+       */
+      reconcilePhase?: (
+        phase: number,
         outcomes: TaskOutcome[],
       ) => Promise<readonly TaskOutcome[]>;
       onWorkerQuiesced?: (taskIndex: number) => Promise<void>;
@@ -194,54 +212,90 @@ export class DispatchCoordinator {
     const loaders = new Map<string, Promise<DefaultResourceLoader>>();
 
     try {
-      await Promise.all(
-        tasks.map((task) =>
-          this.runOne(
-            task,
-            options,
-            grant,
-            loaders,
-            outcomes,
-            quiescence,
-            fullyQuiesced,
-          ),
-        ),
+      // Dependency phases run in order: every task in a phase waits for
+      // the whole earlier phase — including its isolated reconciliation —
+      // before it starts, so a dependent's tree carries prerequisite work.
+      const phases = [...new Set(tasks.map((task) => task.phase))].sort(
+        (a, b) => a - b,
       );
-      // Defensive: runOne is exception-safe and every exit records an
-      // outcome, but a silent gap would skip finalization and leak
-      // reservations. A missing outcome means the task's state is unknown —
-      // quarantine it rather than assume the root is clean. This names the
-      // blocker: shutdown will wait on this dispatch's quiescence barrier
-      // while the reservation stays held, so the task must be visible.
-      for (const task of tasks) {
-        if (outcomes[task.index] === undefined) {
-          console.error(
-            `[delegate] internal dispatch error for task ${task.id} (index ${task.index}): no outcome was recorded; quarantining its write scope and holding shutdown quiescence for this dispatch`,
-          );
-          const outcome: TaskOutcome = {
-            index: task.index,
-            id: task.id,
-            status: "failed",
-            error: "internal dispatch error: no outcome was recorded",
-            retries: 0,
-            quarantined: true,
-          };
-          outcomes[task.index] = outcome;
-          if (options.ticket) {
-            this.tickets.recordOutcome(options.ticket, outcome);
+      for (const phase of phases) {
+        const phaseTasks = tasks.filter((task) => task.phase === phase);
+        const preparedByIndex = new Map<number, ResolvedTask>();
+        let prepError: unknown;
+        if (options.preparePhase !== undefined) {
+          try {
+            for (const prepared of await options.preparePhase(phase)) {
+              preparedByIndex.set(prepared.index, prepared);
+            }
+          } catch (error) {
+            // A phase's workspace preparation failed: its non-shared tasks
+            // record pre-worker failures below; shared tasks have no
+            // workspace to prepare and still run.
+            prepError = error;
+            console.error(
+              `[delegate] workspace preparation for phase ${phase} failed: ${error instanceof Error ? error.message : String(error)}`,
+            );
           }
         }
-      }
-      if (options.finalize) {
-        const ticket = options.ticket;
-        try {
-          await options.finalize(outcomes as TaskOutcome[]);
-        } finally {
-          if (ticket) {
-            // The finalized (integration-annotated) outcomes are the ticket's
-            // terminal record; settlement is held until they land.
-            for (const outcome of outcomes) {
-              if (outcome) this.tickets.recordOutcome(ticket, outcome);
+        await Promise.all(
+          phaseTasks.map((task) =>
+            this.runOne(
+              preparedByIndex.get(task.index) ?? task,
+              options,
+              grant,
+              loaders,
+              outcomes,
+              quiescence,
+              fullyQuiesced,
+              tasks,
+              prepError,
+            ),
+          ),
+        );
+        // Defensive: runOne is exception-safe and every exit records an
+        // outcome, but a silent gap would skip reconciliation, block every
+        // dependent on a never-resolving quiescence gate, and leak
+        // reservations. A missing outcome means the task's state is
+        // unknown — quarantine it rather than assume the root is clean.
+        // This names the blocker: shutdown will wait on this dispatch's
+        // quiescence barrier while the reservation stays held, so the task
+        // must be visible.
+        for (const task of phaseTasks) {
+          if (outcomes[task.index] === undefined) {
+            console.error(
+              `[delegate] internal dispatch error for task ${task.id} (index ${task.index}): no outcome was recorded; quarantining its write scope and holding shutdown quiescence for this dispatch`,
+            );
+            const outcome: TaskOutcome = {
+              index: task.index,
+              id: task.id,
+              status: "failed",
+              error: "internal dispatch error: no outcome was recorded",
+              retries: 0,
+              quarantined: true,
+            };
+            outcomes[task.index] = outcome;
+            if (options.ticket) {
+              this.tickets.recordOutcome(options.ticket, outcome);
+            }
+          }
+        }
+        if (options.reconcilePhase !== undefined) {
+          const ticket = options.ticket;
+          try {
+            await options.reconcilePhase(phase, outcomes as TaskOutcome[]);
+          } finally {
+            if (ticket) {
+              // The reconciled (integration-annotated) outcomes are the
+              // ticket's terminal record; settlement is held until they
+              // land.
+              const phaseIndexes = new Set(
+                phaseTasks.map((task) => task.index),
+              );
+              for (const outcome of outcomes) {
+                if (outcome && phaseIndexes.has(outcome.index)) {
+                  this.tickets.recordOutcome(ticket, outcome);
+                }
+              }
             }
           }
         }
@@ -284,6 +338,8 @@ export class DispatchCoordinator {
     outcomes: (TaskOutcome | undefined)[],
     quiescence: Map<number, Deferred>,
     fullyQuiesced: Map<number, Deferred>,
+    tasks: readonly ResolvedTask[],
+    prepError: unknown,
   ): Promise<void> {
     const ticket = options.ticket;
     // The composed signal propagates the (long-lived) dispatch and ticket
@@ -430,6 +486,77 @@ export class DispatchCoordinator {
     // A throw anywhere below is an infrastructure fault, not a task failure —
     // convert it so Promise.all can never reject while siblings still run.
     try {
+      // Dependency gate: every prerequisite's confirmed quiescence first —
+      // a provisional (quarantined) one may still be mutating — then its
+      // terminal state decides. A failed, cancelled, or unapplied-isolated
+      // prerequisite blocks the dependent visibly without it consuming a
+      // worker, session, or slot; cancellation supersedes the block.
+      if (task.dependsOn.length > 0) {
+        for (const depIndex of task.dependsOn) {
+          await Promise.race([
+            quiescence.get(depIndex)?.promise ?? Promise.resolve(),
+            onAbort(signal),
+          ]);
+          if (signal.aborted) {
+            record({ index: task.index, id: task.id, status: "cancelled", retries: 0 });
+            return;
+          }
+        }
+        const blockers = task.dependsOn.filter(
+          (depIndex) =>
+            !prerequisiteSatisfied(outcomes[depIndex]!, tasks[depIndex]!),
+        );
+        if (blockers.length > 0) {
+          record({
+            index: task.index,
+            id: task.id,
+            status: "blocked",
+            error:
+              `blocked by ${blockers
+                .map(
+                  (depIndex) =>
+                    `'${tasks[depIndex]!.id}' — it ${blockingReason(outcomes[depIndex], tasks[depIndex]!)}`,
+                )
+                .join("; ")}`,
+            blockedBy: blockers.map((depIndex) => tasks[depIndex]!.id),
+            retries: 0,
+          });
+          return;
+        }
+      }
+      // A phase whose workspace preparation failed cannot run its
+      // non-shared tasks — a scratch/isolated task without its workspace
+      // would touch the real tree. This is a pre-worker failure: nothing
+      // ran, so no quarantine.
+      if (prepError !== undefined && task.workspace !== "shared") {
+        record({
+          index: task.index,
+          id: task.id,
+          status: "failed",
+          error: `workspace preparation failed: ${prepError instanceof Error ? prepError.message : String(prepError)}`,
+          retries: 0,
+        });
+        return;
+      }
+      // The handoff: each declared prerequisite's bounded final output and
+      // what became of its work is appended to this task's prompt. Every
+      // prerequisite is confirmed-quiescent and satisfied at this point,
+      // so the projection reads final outcomes only.
+      const effectiveTask: ResolvedTask =
+        task.dependsOn.length > 0
+          ? {
+              ...task,
+              prompt:
+                task.prompt +
+                handoffAppendix(
+                  task.dependsOn.map((depIndex) => ({
+                    task: tasks[depIndex]!,
+                    outcome: outcomes[depIndex]!,
+                  })),
+                  options.config.output,
+                ),
+            }
+          : task;
       while (true) {
         if (ticket) await this.waitWhilePaused(ticket, signal);
         if (signal.aborted) {
@@ -502,7 +629,7 @@ export class DispatchCoordinator {
               }
             }
             const outcome = await runTask(
-              task,
+              effectiveTask,
               controls,
               loaders,
               (handle) => {

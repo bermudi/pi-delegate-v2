@@ -77,6 +77,16 @@ release notes and migration guidance; it must not arrive as rewrite drift.
   request conflicts. This is not content deduplication — unkeyed dispatches
   always execute — and not an exactly-once crash/restart guarantee —
   identity is host-lifetime only with bounded retention.
+- Explicit task dependencies with output and workspace handoffs (issue #18):
+  an additive contract — a task `dependsOn` field names same-batch
+  prerequisites by id; the graph is fully validated before spawn; the batch
+  runs in dependency phases so a later phase's tree always contains earlier
+  phases' applied isolated work; each prerequisite's bounded output is
+  appended to the dependent's prompt; a failed, cancelled, or unapplied
+  prerequisite blocks its dependents as `blocked` with visible reasons while
+  unrelated branches run. Same-call shared/isolated write-scope overlap is
+  newly admitted when the graph orders every overlapping cross-kind pair —
+  a relaxation of a former whole-call rejection, in the permissive direction.
 - Opt-in, fail-open local telemetry that never stores prompt/output content,
   with stable call/task outcome meaning and explicit migration or versioning
   for existing databases. Telemetry stays disabled unless the user sets

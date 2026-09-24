@@ -27,9 +27,20 @@ export interface ResolvedTask {
    * cwd reachable beside the Git top-level, so both are listed.
    */
   readonly writeRoots: readonly string[] | undefined;
+  /**
+   * Prerequisite task indexes within this batch (resolved `dependsOn`,
+   * deduplicated). Empty for a phase-0 task.
+   */
+  readonly dependsOn: readonly number[];
+  /**
+   * Dependency depth: 0 with no prerequisites, else one deeper than the
+   * deepest prerequisite. Phases run in order — a phase starts only after
+   * every earlier phase finished, including its isolated reconciliation.
+   */
+  readonly phase: number;
 }
 
-export type TaskStatus = "ok" | "failed" | "cancelled";
+export type TaskStatus = "ok" | "failed" | "cancelled" | "blocked";
 
 /** How an isolated task's proposal ended up relative to the source tree. */
 export type IntegrationStatus =
@@ -65,6 +76,11 @@ export interface TaskOutcome {
   readonly usage?: Usage;
   /** Isolated-workspace reconciliation result, when the task ran isolated. */
   readonly integration?: TaskIntegration;
+  /**
+   * For a `blocked` outcome: the prerequisite task ids whose terminal
+   * states prevented the run. The `error` text carries their reasons.
+   */
+  readonly blockedBy?: readonly string[];
   /**
    * True when the task's session could not be confirmed quiescent and was
    * left undisposed. Callers must keep its reservations alive — work may
