@@ -67,7 +67,11 @@ function completedCount(ticket: Ticket): number {
   return ticket.outcomes.filter((outcome) => outcome !== undefined).length;
 }
 
-function taskSection(ticket: Ticket, outcome: TaskOutcome): string {
+function taskSection(
+  ticket: Ticket,
+  outcome: TaskOutcome,
+  whole: boolean,
+): string {
   const head = `### Task ${outcome.id} — ${outcome.status === "ok" ? "completed" : outcome.status}`;
   const quarantined = outcome.quarantined
     ? "\n(worker termination unconfirmed — its write scope stays reserved)"
@@ -79,12 +83,15 @@ function taskSection(ticket: Ticket, outcome: TaskOutcome): string {
   // the ticket runs, even a finished task's output is bounded to a tail —
   // a poll never writes a spill file. On a terminal ticket every recorded
   // outcome renders through the spill boundary under the bounds snapshotted
-  // at creation. `outcome.output` itself stays complete either way.
+  // at creation. `outcome.output` itself stays complete either way. A
+  // `whole` view (the human expanded render) skips bounding entirely.
   const bounds = ticket.outputBounds;
   const label = ticket.tasks[outcome.index]?.agent ?? outcome.id;
-  const render = isTerminal(ticket.status)
-    ? (output: string) => renderOutputForLLM(output, label, bounds)
-    : (output: string) => renderOutputForPoll(output, bounds);
+  const render = whole
+    ? (output: string) => output
+    : isTerminal(ticket.status)
+      ? (output: string) => renderOutputForLLM(output, label, bounds)
+      : (output: string) => renderOutputForPoll(output, bounds);
   if (outcome.status === "ok") {
     return `${head}\n${render(outcome.output ?? "")}${quarantined}${integration}`;
   }
@@ -94,13 +101,13 @@ function taskSection(ticket: Ticket, outcome: TaskOutcome): string {
 }
 
 /** Poll/wait view of one ticket. Poll is observational — never mutates. */
-function ticketView(ticket: Ticket): string {
+function ticketView(ticket: Ticket, whole = false): string {
   const lines = [
     `Ticket "${ticket.id}": ${statusWord(ticket)} — ${completedCount(ticket)}/${ticket.totalTasks} tasks finished.`,
     ...ticket.notices,
   ];
   for (const outcome of ticket.outcomes) {
-    if (outcome) lines.push("", taskSection(ticket, outcome));
+    if (outcome) lines.push("", taskSection(ticket, outcome, whole));
   }
   return lines.join("\n");
 }
@@ -212,6 +219,16 @@ export class TicketStore {
       return rt.settledView;
     }
     return ticketView(record);
+  }
+
+  /**
+   * The expanded human view of the ticket: the `view` document with every
+   * recorded output rendered whole — bounding is an LLM-context economy,
+   * not a display one. Unlike `view` it is never memoized and never
+   * touches the filesystem: no spill files, no frozen terminal render.
+   */
+  fullView(ticket: Ticket): string {
+    return ticketView(this.entry(ticket).record, true);
   }
 
   /** Drop a ticket that never started (e.g. admission failed after create). */

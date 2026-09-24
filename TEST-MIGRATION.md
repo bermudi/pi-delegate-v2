@@ -212,7 +212,12 @@ gaps.
   files, settling spills; pointer stability across settled polls;
   creation-time bounds snapshot; lossless write-failure fallback;
   surrogate-safe tail; empty/placeholder passthrough; malformed `output`
-  bounds reject before any task starts (`tests/contract/output-bounds.test.ts`).
+  bounds reject before any task starts
+  (`tests/contract/output-bounds.test.ts`); the registered tool/message
+  renderers show the complete recorded output when expanded — sync
+  result, running and settled ticket polls, and the delivered
+  `delegate-result` message — while collapsed views keep the bounded
+  content (`tests/contract/rendering.test.ts`).
 - **Provenance:** v1 `spill.test.ts` scenarios (threshold/tail, surrogate
   pairs, file contract, write-failure degrade, poll no-file) replayed at
   the public boundary; v1 `config.ts` `output` validation wording

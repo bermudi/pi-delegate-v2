@@ -120,7 +120,7 @@ an accepted gap, recorded in `TEST-MIGRATION.md`.
 
 | Feature | v1 | v2 |
 | --- | --- | --- |
-| Result rendering | full render layer (branches, transcript text, spill) | compact status/integration/notice summaries + spill bounding |
+| Result rendering | full render layer (branches, transcript text, spill) | compact status/integration/notice summaries + spill bounding; expanded views re-render complete outcomes from `details.results` |
 | Session store | in-memory pool + custom layout | `<agentDir>/delegate-sessions/` file-backed, insert-on-success |
 | Provider extensions | allowlist | verified, provider-scoped allowlist; integration status recorded |
 | Scratch vs shared writer | (v1 scratch reserved on source) | scratch holds no source reservation — runs beside a shared writer |

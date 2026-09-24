@@ -38,6 +38,10 @@ import {
 } from "./src/operations.ts";
 import { createActivityStore } from "./src/activity.ts";
 import { registerSubagentBrowser } from "./src/browser.ts";
+import {
+  createMessageRenderer,
+  createResultRenderer,
+} from "./src/render.ts";
 import { VisibilitySignals } from "./src/visibility.ts";
 import { handleSessionRpc, SessionPool } from "./src/sessions.ts";
 import { TelemetryStore } from "./src/telemetry.ts";
@@ -182,6 +186,9 @@ const argumentsSchema = Type.Object(
 type DelegateArguments = Static<typeof argumentsSchema>;
 type DelegateDetails = Record<string, unknown>;
 type DelegateResult = AgentToolResult<DelegateDetails>;
+
+/** customType of the custom message that delivers a settled async batch. */
+const DELIVERED_MESSAGE_TYPE = "delegate-result";
 
 type TaskSchemaArguments = Static<typeof taskSchema>;
 
@@ -689,6 +696,14 @@ export default function delegateExtension(api: ExtensionAPI): void {
     visibility.guardReplacement(ctx, "Forking this session"),
   );
 
+  // Delivered results follow the same expanded-view contract as tool
+  // results (SPEC "Recovery"): collapsed keeps the host's default
+  // custom-message chrome; expanded renders the complete recorded outcomes.
+  api.registerMessageRenderer(
+    DELIVERED_MESSAGE_TYPE,
+    createMessageRenderer(tickets),
+  );
+
   // The live subagent browser: /subagents or Ctrl+Shift+B (TUI only).
   registerSubagentBrowser(api, {
     store: activity,
@@ -755,6 +770,11 @@ export default function delegateExtension(api: ExtensionAPI): void {
         "Run subagent tasks. Sync returns results; async returns a ticket; tasks:[] shows help. Same-repo writers serialize under 'shared'; 'isolated' runs independent edits in parallel; 'scratch' discards a disposable copy's changes.",
       parameters: argumentsSchema,
       prepareArguments,
+      // The stock renderer only displays `content` — which is the
+      // spill-bounded projection — so expansion never showed the whole
+      // output. This renderer keeps the collapsed preview but renders the
+      // complete recorded outcomes from details when expanded.
+      renderResult: createResultRenderer(tickets),
 
       async execute(_toolCallId, params, signal, onUpdate, ctx) {
         const call = validateCall(params);
@@ -778,6 +798,10 @@ export default function delegateExtension(api: ExtensionAPI): void {
               // The rendered text may be spill-bounded; the record is not —
               // details keep the complete outcomes for the expanded view.
               results: result.ticket?.outcomes,
+              ...(result.ticket !== undefined &&
+              result.ticket.notices.length > 0
+                ? { notices: result.ticket.notices }
+                : {}),
             },
             isError: result.isError,
           };
@@ -819,7 +843,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
             }
             const cancelled = ticket.status === "cancelled";
             const message = {
-              customType: "delegate-result",
+              customType: DELIVERED_MESSAGE_TYPE,
               content:
                 tickets.view(ticket) +
                 (cancelled
@@ -831,6 +855,9 @@ export default function delegateExtension(api: ExtensionAPI): void {
                 originLeafId: ticket.originLeafId,
                 // Complete outcomes — delivery text is spill-bounded.
                 results: ticket.outcomes,
+                ...(ticket.notices.length > 0
+                  ? { notices: ticket.notices }
+                  : {}),
               },
             };
             // api.sendMessage is fire-and-forget on the stock
@@ -1010,6 +1037,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
               // The rendered content is spill-bounded; details keep the
               // complete outcomes for the expanded view and recovery.
               results: result.outcomes,
+              ...(notices.length > 0 ? { notices } : {}),
             },
             usage: result.usage,
             isError: allFailed,

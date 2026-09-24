@@ -23,6 +23,18 @@ const CREATE_ATTEMPTS = 5;
 // lossless always — if the spill write fails, we degrade to full output
 // in-context rather than hard-truncate.
 
+/**
+ * Bounds that never bound: `decideSpill` can never fire under them, so no
+ * spill file is ever written and every output renders whole. The human
+ * expanded views (tool result, ticket poll, delivered message) render
+ * recorded output through them — spill is an LLM-context economy, not a
+ * display one.
+ */
+export const UNBOUNDED_OUTPUT: OutputBounds = {
+  spillThresholdChars: Number.POSITIVE_INFINITY,
+  spillTailChars: Number.POSITIVE_INFINITY,
+};
+
 /** Decision over an output string: spill or not, and what stays in-context. */
 export interface SpillDecision {
   /** True when the output exceeds the threshold and should be spilled. */
