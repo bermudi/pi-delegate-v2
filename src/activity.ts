@@ -31,7 +31,11 @@ export interface ActivityToolCall {
 }
 
 export interface ActivityRow {
-  /** `${ticketId ?? "sync"}:${taskId}` */
+  /**
+   * Store-assigned unique key: `${ticketId}:${taskId}` for ticket rows,
+   * `sync:${taskId}#<seq>` for retained sync runs (task ids repeat across
+   * dispatches, so the sequence keeps distinct runs distinct).
+   */
   key: string;
   kind: "ticket" | "sync";
   ticketId: string | undefined;
@@ -292,6 +296,8 @@ interface OpenTool {
 
 /** Store-private mutable entry; snapshots are copied out on read. */
 interface MutableEntry {
+  /** The entry's own map key — rowOf and pruning must not re-derive it. */
+  key: string;
   kind: "ticket" | "sync";
   ticketId: string | undefined;
   taskId: string;
@@ -325,7 +331,7 @@ function shiftOpenTools(openTools: Map<string, OpenTool>, removed: number): void
 
 function rowOf(entry: MutableEntry): ActivityRow {
   return {
-    key: `${entry.ticketId ?? "sync"}:${entry.taskId}`,
+    key: entry.key,
     kind: entry.kind,
     ticketId: entry.ticketId,
     taskId: entry.taskId,
@@ -355,6 +361,13 @@ function compareRows(a: ActivityRow, b: ActivityRow): number {
 
 export function createActivityStore(): ActivityStore {
   const entries = new Map<string, MutableEntry>();
+  let syncSeq = 0;
+  /**
+   * taskId → the key of that task's latest retained sync run. Task ids are
+   * per-dispatch, so a fresh dispatch reuses the same ids; startedAt
+   * distinguishes a repeated record for one run from a new run.
+   */
+  const latestSyncRun = new Map<string, { startedAt: number; key: string }>();
 
   /** An empty ticket id stands in for an inline (sync) run. */
   const normalizeTicketId = (ticketId: string): string | undefined =>
@@ -367,6 +380,7 @@ export function createActivityStore(): ActivityStore {
     if (existing) return existing;
     const now = Date.now();
     const created: MutableEntry = {
+      key,
       kind: id === undefined ? "sync" : "ticket",
       ticketId: id,
       taskId,
@@ -404,7 +418,10 @@ export function createActivityStore(): ActivityStore {
     }
     finished.sort((a, b) => (a.endedAt ?? 0) - (b.endedAt ?? 0));
     for (const entry of finished.slice(0, -RETAINED_SYNC_LIMIT)) {
-      entries.delete(`${entry.ticketId ?? "sync"}:${entry.taskId}`);
+      entries.delete(entry.key);
+      if (latestSyncRun.get(entry.taskId)?.key === entry.key) {
+        latestSyncRun.delete(entry.taskId);
+      }
     }
   };
 
@@ -419,6 +436,7 @@ export function createActivityStore(): ActivityStore {
         return;
       }
       entries.set(key, {
+        key,
         kind: "ticket",
         ticketId: info.ticketId,
         taskId: info.taskId,
@@ -499,7 +517,12 @@ export function createActivityStore(): ActivityStore {
     },
 
     retainSyncRun(info): void {
-      const key = `sync:${info.taskId}`;
+      const prior = latestSyncRun.get(info.taskId);
+      const key =
+        prior !== undefined && prior.startedAt === info.startedAt
+          ? prior.key
+          : `sync:${info.taskId}#${++syncSeq}`;
+      latestSyncRun.set(info.taskId, { startedAt: info.startedAt, key });
       const label = sanitizeLine(info.label) || "inline";
       const prompt = truncateHead(sanitizeText(info.prompt), PROMPT_LIMIT);
       const summary = truncateTail(
@@ -520,6 +543,7 @@ export function createActivityStore(): ActivityStore {
         existing.openTools.clear();
       } else {
         entries.set(key, {
+          key,
           kind: "sync",
           ticketId: undefined,
           taskId: info.taskId,
