@@ -1015,8 +1015,11 @@ export default function delegateExtension(api: ExtensionAPI): void {
           }
 
           const result = await completion;
+          // SPEC: error-valued only when every task failed — cancelled and
+          // partially failed batches are normal results carrying each
+          // task's own status, mirroring a ticket's `partial` settlement.
           const allFailed = result.outcomes.every(
-            (outcome) => outcome.status !== "ok",
+            (outcome) => outcome.status === "failed",
           );
           return {
             content: [

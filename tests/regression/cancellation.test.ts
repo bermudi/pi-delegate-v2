@@ -385,6 +385,52 @@ test(
 );
 
 test(
+  "an all-cancelled sync batch is a normal result, not a tool error",
+  async () => {
+    // SPEC "Dispatch": a synchronous result is error-valued only when
+    // every task FAILED. A batch whose every outcome is cancelled — here
+    // by a parent abort mid-flight — reports each task's cancelled status
+    // on an ordinary result; the caller's own abort is not a tool error.
+    session = await openDelegateBoundary();
+    const subagents = await installSubagentModel(session);
+
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const gated: FauxResponseFactory = async () => {
+      await gate;
+      return fauxAssistantMessage("TOO-LATE");
+    };
+    subagents.respond([gated, gated]);
+
+    const pending = callDelegateDetached(session, {
+      tasks: [
+        { prompt: "hang one", tools: ["read"] },
+        { prompt: "hang two", tools: ["read"] },
+      ],
+    });
+
+    // Both provider calls demonstrably in flight before the abort lands.
+    const deadline = Date.now() + 5000;
+    while (subagents.state.callCount < 2 && Date.now() < deadline) {
+      await new Promise((r) => setImmediate(r));
+    }
+    expect(subagents.state.callCount).toBe(2);
+
+    await (session.session as AgentSession).abort();
+
+    const result = await pending;
+    expect(result.text).toMatch(/cancel/i);
+    expect(result.isError).toBe(false);
+    const details = result.details as
+      | { tasks?: { status?: string }[] }
+      | undefined;
+    expect(details?.tasks?.every((t) => t.status === "cancelled")).toBe(true);
+
+    release();
+  },
+);
+
+test(
   "aborting mid-stream is a cancellation, not an error, and no extra turn starts",
   async () => {
     session = await openDelegateBoundary();
