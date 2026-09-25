@@ -28,6 +28,11 @@ authoritative.
   ephemeral in /tmp; method reproducible from this document), never raw
   transcript dumps. No prompt content is quoted in this report; examples are
   cited by `session-file:line`.
+- Amended 2026-09-25 after independent re-verification against the raw
+  corpus: the full-schema completion in #1's calls, the absence of
+  `pause`/`resume`/`close` from modern-era calls, and glm-5.3's rejection
+  date-spread were each re-checked directly; wording corrected where it
+  over-attributed intent or causality.
 
 ## Model league table (modern era, raw)
 
@@ -49,6 +54,9 @@ authoritative.
 | C | hy3-free | 8 | 1 | 12.5% |
 | B | zai-org/GLM-5.3 | 3 | 2 | 66.7% |
 
+*Table lists models with ≥3 modern calls — 954 of 964; the remaining 10
+calls spread across sub-3-call models, none of which failed.*
+
 Headline: **glm-5.3 is the Tier-A outlier** — 13x the failure rate of
 gpt-5.6-sol, which carried 49% of all modern traffic across 100+ varied
 sessions. Tier-C small models with non-trivial volume are clean
@@ -66,12 +74,23 @@ Worst case: one glm-5.3 session (`--home-daniel-build-agent-extensions--/
 re-issuing the same kitchen-sink combo with minor variations 15 consecutive
 times.
 
-Attribution: **shared**. The contract is exclusive-mode and the error text
-names the fix ("call it separately"), which models read and apply — but the
-tool *description* never says modes are mutually exclusive, and nothing in
-the schema signals that `ticketAction` changes the meaning of every other
-field. Models that batch aggressively reach for one call that does
-everything.
+Attribution: **shared — and the calls show the mechanism**. The glm-5.3
+kitchen-sinks are not a deliberate grab-bag: all 17 pathology-session calls
+populate *every* optional field with a typed default — `async:false`,
+`ticket:""`, `sessionId:""`, `timeoutMs:0`, per-task `model:""`,
+`deadlineMs:0`, `force:false`. That is full-schema completion — emitting
+the schema rather than choosing fields — not an intent to "do everything in
+one call". #7's `deadlineMs:0` hits carry the same signature, and #8's
+`agent:""` is consistent with it (though those come mostly from muse-spark
+models: one tendency, not proven one cause). The contract is exclusive-mode
+and the error text names the fix ("call it separately"), which every model
+except glm-5.3 read and applied; glm-5.3 re-emitted the same shape 15
+consecutive times. The tool *description* never says modes are mutually
+exclusive — still worth fixing, but with tempered expectations: prose
+targets intent, and the demonstrated recovery mechanism in this corpus is
+the corrective error text. Normalizing inert typed defaults (empty string,
+zero, false) is an untested alternative that would need per-field rules — a
+zero timeout is not an omitted timeout.
 
 ### 2. `timeoutMs` on a synchronous dispatch — 13 rejections
 
@@ -127,15 +146,19 @@ turn budget. Structural: no error message can fix a truncated call.
 One gpt-5.6-luna call pasted an entire review prompt into the `thinking`
 field (caught by enum validation, VitaShell session L35). Bad enum values
 for `workspace`/`thinking` total 3. `deadlineMs <= 0`: 16 silent-shape hits,
-mostly old-era glm-5.3.
+mostly old-era glm-5.3 — the same typed-default completion as #1, not a
+field mix-up.
 
-### 8. Benign habits the shims absorb — no errors, but real model confusion
+### 8. Benign habits the shims absorb — no errors
 
 `agent:""` (15 modern, 14 from muse-spark-1.2-contributor-free), `tools` as
 string (21, mostly old-era glm-5.3), flat task fields with no `tasks` array
 (5 modern — zai-org/GLM-5.3 3x), `tasks: []` help probes (10, mostly
 first-contact test sessions). The shims silently recovered all of these with
-no downstream failures — a design that worked.
+no downstream failures — a design that worked. `agent:""` is the benign end
+of #1's schema completion (a default-filled field); the format habits
+(`tools` as string, flat fields) are separate shape errors, not confusion
+about semantics.
 
 ## Behavioral findings
 
@@ -145,8 +168,10 @@ no downstream failures — a design that worked.
   auto-delivery carried the load; v2 must not depend on models polling.
 - Control usage (modern): `wait` 63 > `poll` 29 > `cancel` 2 >
   `sessionAction:list` 19. **`pause`, `resume`, `sessionAction:close`: zero
-  uses in two months.** Dead surface that costs description tokens and
-  (per finding #1) invites kitchen-sink confusion.
+  uses in two months.** Dead surface that costs description tokens — and no
+  more: no modern-era call contains them (the only corpus occurrences are 19
+  legacy `action:"close"` calls, all pre-cutoff), so no observed kitchen-sink
+  was built on them.
 - `context: "with-parent-transcript"`: 2 of 694. Models respect the
   fresh-context default; the expensive option is avoided without coercion.
 - `thinking: "high"` dominates (728/836 task-level uses); xhigh 38, max 11.
@@ -177,11 +202,19 @@ no downstream failures — a design that worked.
    use async + wait" in the description. Kills failure family #2 outright.
 2. **State mode exclusivity in the tool description**, not only in errors:
    "one operation per call — dispatch tasks OR ticket control OR session
-   control." Cheap tokens, directly targets the #1 family.
+   control." Cheap and correct — but tempered by #1's mechanism: if
+   kitchen-sinking is schema completion rather than intent, prose may not
+   prevent it (glm-5.3 ignored 15 corrective errors naming the exact fix).
+   Do it anyway; every other model recovered via error text, and clearer
+   description can only help the intent-driven cases.
 3. **Reject the task `model` field** (already spec'd) — validated by data:
    every model-name failure was an invented or mis-scoped name.
 4. **Cut or hide `pause`/`resume`/`sessionAction:close`** — zero uses in two
-   months; their description surface contributes to kitchen-sink confusion.
+   months. The case is token cost and surface area alone: no observed
+   kitchen-sink used them, so the original "contributes to kitchen-sink
+   confusion" claim was unsupported. One complication: `close` had 19 legacy
+   flat-`action` uses before the Aug-15 cutoff — demand existed under the
+   old shape, so its modern absence may be the rename, not vanished need.
 5. **Add a payload-size hint to the manual** ("split large multi-task
    dispatches across calls; keep arguments well under the output-token
    budget") — truncation is unrecoverable by error messages.
@@ -196,6 +229,8 @@ no downstream failures — a design that worked.
   old-era habits were counted only when re-emitted post-cutoff.
 - gpt-5.6-sol's 468-call sample spans 100+ projects; glm-5.3's 155 calls are
   concentrated in fewer sessions — its 22.6% rate is robust (failures in 10
-  distinct sessions) but per-session variance is high.
+  distinct sessions; rejections on 11 distinct session-days spanning
+  2026-08-17 → 2026-09-25, so not an artifact of one build) but per-session
+  variance is high.
 - Classification is prefix/heuristic-based on extracted fields; the raw
   extracted dataset was ephemeral (/tmp), this document is the record.
