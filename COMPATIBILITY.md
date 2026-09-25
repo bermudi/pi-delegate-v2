@@ -52,6 +52,10 @@ release notes and migration guidance; it must not arrive as rewrite drift.
 - Async fire-and-forget tickets, poll/wait/cancel/pause/resume behavior,
   idempotent settlement, retained results, and session-tree leaf-aware delivery
   as specified in `SPEC.md` "Background delivery".
+- Saved async ticket results are pollable on a cold extension instance; an
+  unfinished snapshot is `interrupted`, not resumed or automatically delivered.
+  Subagent Pi auto-retry is disabled in favor of Delegate's bounded,
+  side-effect-aware retry, including provider reset-window handling.
 - Operation on a stock, unmodified Pi installation through its public
   extension API. Requiring a patched, forked, or unreleased Pi host is a
   breaking change, not an implementation detail.
@@ -244,9 +248,13 @@ worked around with a host modification.
   workers to actually stop. Cancellation is cooperative, so a worker whose
   provider or tool ignores the abort delays shutdown for as long as it runs.
   A visible status names the tickets being waited on.
-- **Host-lifetime tickets.** Tickets and undelivered results do not survive
-  `/reload` or session replacement. Durable recovery is a separate roadmap
-  item, not part of this contract.
+- **Saved tickets, not resumed work.** Ticket identities and saved results
+  survive `/reload` and session replacement under the same agent directory;
+  orderly shutdown cancels active tickets. An unclean exit leaves a running
+  ticket `interrupted` with any saved outcomes, never a resumed worker.
+  Undelivered results are not automatically delivered on restart. OperationId
+  records, worker sessions, write reservations, and unfinished side effects
+  are not restored; this is not an exactly-once or replay guarantee.
 - **Current-leaf append.** A result that cannot wake its origin leaf is
   appended at whatever leaf is current when it settles, and enters model
   context there on the next turn.

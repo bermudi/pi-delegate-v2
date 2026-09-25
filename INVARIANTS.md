@@ -47,7 +47,8 @@ use any design that makes these properties true and testable.
 - Settled-record retention MUST be bounded: expiry after one hour, at most
   256 settled records, oldest-settled evicted first.
 - Operation identity MUST live only as long as the host extension/session;
-  no persistence, crash recovery, or exactly-once claim may be made.
+  saved tickets MUST NOT deduplicate a new dispatch by operationId, and no
+  exactly-once execution claim may be made.
 
 ## Conversation isolation
 
@@ -80,6 +81,15 @@ use any design that makes these properties true and testable.
 
 ## Ticket state
 
+- An async ticket MUST be saved before its workers start. Saved terminal
+  outcomes MUST remain pollable on a new extension instance using the same
+  agent directory. A formerly running ticket MUST be reported as interrupted
+  after an unclean restart, never resumed, delivered, or mistaken for an
+  ordinary failure. Completed outcomes remain visible; unfinished effects
+  are unknown. Persistence failures MUST be visible, not swallowed.
+- Recovered tickets MUST NOT own live sessions, questions, worker handles,
+  reservations, or delivery rights. Automatic replay of an unfinished task
+  is forbidden without a separate side-effect-safe contract.
 - A waiting question MUST remain owned by its running ticket and worker.
   Yielding execution capacity MUST NOT yield the session, workspace, admission
   reservation, or confirmed-quiescence obligation. Capacity MUST be reacquired

@@ -43,13 +43,13 @@ describe("regression: failure propagation and retries", () => {
   );
 
   test(
-    "a model-attributable failure does not retry on the same model and suggests a model swap",
+    "a usage limit does not retry on the same model and reports the account limit",
     async () => {
       // v1 evidence: lifecycle.test.ts "model-attributable error (usage limit)
       // → failureKind model_error, no whole-task retry, model-swap hint" and
       // delegate.test.ts "model_error failure → hint names the model field".
-      // SPEC: model/account failures do not blindly retry on the same model
-      // and provide a different-model recovery hint.
+      // New v2 issue #26: preserve the no-retry regression, but don't
+      // suggest switching models for a potentially time-bounded quota.
       session = await openDelegateBoundary();
       const subagents = await installSubagentModel(session);
       subagents.respond([
@@ -63,7 +63,8 @@ describe("regression: failure propagation and retries", () => {
         tasks: [{ prompt: "quota-bound" }],
       });
       expect(result.text).toMatch(/usage limit|quota|upgrade/i);
-      expect(result.text).toMatch(/model/i);
+      expect(result.text).toMatch(/account|limit resets/i);
+      expect(result.text).toContain("No automatic resume");
       expect(subagents.state.callCount).toBe(1);
     },
   );

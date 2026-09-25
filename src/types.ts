@@ -94,7 +94,8 @@ export type TicketStatus =
   | "completed"
   | "partial"
   | "failed"
-  | "cancelled";
+  | "cancelled"
+  | "interrupted";
 
 /**
  * How caller-facing output text is bounded: at or under
@@ -127,7 +128,8 @@ export interface Ticket {
   readonly totalTasks: number;
   /** Index-aligned per-task outcomes; entries appear as tasks finish. */
   readonly outcomes: readonly (TaskOutcome | undefined)[];
-  readonly tasks: readonly ResolvedTask[];
+  /** Only labels and correlation ids are required to render saved tickets. */
+  readonly tasks: readonly Pick<ResolvedTask, "id" | "agent">[];
   /** Unanswered worker questions (never persisted across host shutdown). */
   readonly questions: readonly WorkerQuestion[];
   /**
@@ -137,6 +139,8 @@ export interface Ticket {
    */
   readonly outputBounds: OutputBounds;
   readonly createdAt: number;
+  /** Cold-read ticket with no worker or admission reservation in this host. */
+  readonly recovered?: boolean;
   /**
    * Advisory notices attached at dispatch (e.g. same-call shared writers
    * serializing); rendered at the top of ticket views.

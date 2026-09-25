@@ -22,8 +22,11 @@ is appended to the current branch without waking and enters context on the
 next turn, with a notice announcing it. Tickets remain pollable even if
 delivery fails. Shutdown force-cancels outstanding tickets without follow-up
 delivery and waits for their workers to actually stop before letting the
-session end. Tickets are host-lifetime only — they are not persisted across
-reload or session replacement.
+session end. Ticket results are saved under the agent directory and can be
+polled after reload or session replacement. Unfinished tickets from an unclean
+exit show as `interrupted`, never automatically restarted. Owner-only files
+under `delegate-tickets/` hold full outputs and are not automatically deleted.
+`operationId` deduplication and automatic delivery do not survive restart.
 
 ## Worker questions
 

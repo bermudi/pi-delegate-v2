@@ -323,6 +323,13 @@ export async function createSubagentSession(
           join(env.agentDir, DELEGATE_TREES.sessions),
         )
       : SessionManager.inMemory(task.cwd);
+  // Pi's default per-turn retry (three attempts with a two-second backoff)
+  // runs before Delegate can inspect the final error. In particular it would
+  // immediately retry a provider-supplied hour-long reset window. This is
+  // an in-memory child setting, not the parent's/global settings; Delegate
+  // owns bounded, side-effect-aware whole-task retry instead.
+  const settingsManager = SettingsManager.inMemory();
+  settingsManager.setRetryEnabled(false);
   const { session } = await createAgentSession({
     cwd: task.cwd,
     agentDir: env.agentDir,
@@ -343,7 +350,7 @@ export async function createSubagentSession(
       }),
     ],
     sessionManager,
-    settingsManager: SettingsManager.inMemory(),
+    settingsManager,
     resourceLoader,
   });
   return session;

@@ -106,3 +106,11 @@ V1 is evidence for behavior, never a design source. When consulting it:
 - `INVARIANTS.md` properties are red lines: cancellation/quiescence, session
   reuse, ticket state, shared-write admission, and isolated application must
   not be weakened to make implementation easier.
+- Async tickets now save owner-only full outcomes under the agent directory;
+  cold polling recovers results, but running snapshots become `interrupted`
+  (never resumed or delivered). `operationId` stays host-lifetime; do not
+  mistake ticket recovery for exactly-once dispatch.
+- Pi's child `AgentSession` auto-retries retryable provider errors by default
+  before Delegate sees them. Child session settings disable that in memory;
+  Delegate's own side-effect-aware retry decides whether a short retry is
+  safe. Recheck this seam on Pi upgrades.

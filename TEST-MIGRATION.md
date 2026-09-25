@@ -40,23 +40,38 @@ copy its fixtures, mocks, call graph, or intermediate assertions.
   on a different runtime, update the support layer — not the tests.
 - The harness session's `agentDir` is its temporary cwd, so
   `<cwd>/delegate.json` stands in for the user-global config file. Pi
-  0.84.2 exposes no `agentDir` on `ExtensionContext` and the harness
-  session is in-memory, so v2 resolves that cwd only as a *warned*
-  fallback (#12): `openDelegateBoundary` therefore sets
-  `DELEGATE_AGENT_DIR` to the session cwd — the explicit seam the warning
-  recommends — keeping the suite on the env source and warning-clean.
-  All bun test files share ONE process, so the env var is process-global;
-  it is safe only under the suite's discipline: every test opens its
-  session via openDelegateBoundary immediately before dispatching, one
-  live session at a time, serially. Tests exercising the cwd fallback or
-  the session-store layout save/delete/restore the variable around the
-  call.
+  0.87 still does not expose `agentDir` on `ExtensionContext`; the boundary
+  fixture supplies an instance-local session directory underneath the
+  harness cwd. Tests of cwd fallback opt out explicitly. Cold-ticket tests
+  point a second boundary's session directory at the first one's agent
+  directory; no process-global env override is needed.
 - Assertions target observable outcomes (result text/isError/details, ticket
   status wording, filesystem effects, provider call counts), never v1 prose
   or internal state. Exact ticket-id format and wording stay loose on
   purpose.
 
 ## Coverage map
+
+### Restart visibility and provider limits (#26)
+
+- **Contract:** ticket creation and outcomes survive a cold extension instance;
+  unfinished snapshots show `interrupted` without worker replay, questions,
+  delivery, or live reservations. Storage is owner-only and malformed/insecure
+  records fail visibly. Provider reset-window errors do not trigger an
+  immediate child retry; unhinted short rate limits may still get one
+  side-effect-safe retry. Quota/account guidance does not claim auto-resume.
+- **Covered now:** `tests/contract/recovery.test.ts` drives poll/wait/roster
+  across separate public-tool instances, a running snapshot, invalid
+  storage, failed writes after launch, and orderly shutdown;
+  `tests/contract/provider-limits.test.ts` proves the provider-call
+  counts and guidance. `tests/regression/failure-propagation.test.ts` retains
+  the v1 no-whole-task-retry scenario but replaces its model-swap expectation
+  with the new account-limit contract.
+- **Gap:** process-kill recovery and session replacement through Pi's own
+  navigation API are not independently exercised by these tests. The journal
+  has no automatic retention policy.
+- **Provenance:** new v2 issue #26; v1 lifecycle.test.ts model-attributable
+  failure scenario is regression evidence, not a migrated implementation test.
 
 ### Async worker questions (#17)
 
@@ -397,16 +412,16 @@ gaps.
 
 ### Failure propagation and retries
 
-- **Contract:** transient failures may retry; model/account failures do not
-  blindly retry on the same model and hint at a different model; exhausted
-  retries return the last error; validation failure starts no tasks.
+- **Contract:** transient failures may retry; account and provider-window
+  failures do not blindly retry on the same model; exhausted retries return
+  the last error; validation failure starts no tasks.
 - **Regression:** retry accounting stays aligned on abort during backoff;
-  observed bash activity suppresses whole-task retry; result text preserves
-  the model-swap hint.
+  observed bash activity suppresses whole-task retry; usage-limit results
+  retain the provider reason without promising auto-resume.
 - **Internal:** `isModelAttributableError`, retry-gating internals, backoff
   timing.
-- **Covered now:** transient retry to success; model-attributable no-retry +
-  model hint; serialized successor after predecessor failure; batch
+- **Covered now:** transient retry to success; usage-limit no-retry +
+  account-limit hint; serialized successor after predecessor failure; batch
   validation starts nothing; the `deadlineMs` budget is shared across
   attempts and the retry backoff (a deadline shorter than the backoff
   prevents the second attempt entirely).

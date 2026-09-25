@@ -1,4 +1,7 @@
+import { randomUUID } from "node:crypto";
+import { join } from "node:path";
 import { integrationLines } from "./format.ts";
+import { TicketJournal } from "./ticket-journal.ts";
 import { renderOutputForLLM, renderOutputForPoll } from "./spill.ts";
 import type {
   ExecutionHandle,
@@ -88,7 +91,9 @@ function taskSection(
 ): string {
   const head = `### Task ${outcome.id} — ${outcome.status === "ok" ? "completed" : outcome.status}`;
   const quarantined = outcome.quarantined
-    ? "\n(worker termination unconfirmed — its write scope stays reserved)"
+    ? ticket.recovered
+      ? "\n(worker termination was unconfirmed; no live reservation was restored — inspect the workspace before new writes)"
+      : "\n(worker termination unconfirmed — its write scope stays reserved)"
     : "";
   const integration = outcome.integration
     ? `\n${integrationLines(outcome.integration).join("\n")}`
@@ -130,6 +135,9 @@ function ticketView(
 ): string {
   const lines = [
     `Ticket "${ticket.id}": ${statusWord(ticket)} — ${completedCount(ticket)}/${ticket.totalTasks} tasks finished.`,
+    ...(ticket.status === "interrupted"
+      ? ["This run stopped without a final record. Unfinished tasks may have changed files or run commands; nothing will resume automatically."]
+      : []),
     ...ticket.notices,
     ...ticket.questions.map((q) =>
       `Waiting for parent answer: task ${q.taskId}, question ${q.id}: ${q.question}\nReply with delegate({ ticketAction: "answer", ticket: "${ticket.id}", taskId: "${q.taskId}", questionId: "${q.id}", answer: "..." }).`),
@@ -162,7 +170,7 @@ function rosterView(tickets: readonly Ticket[]): string {
  */
 export class TicketStore {
   private readonly tickets = new Map<string, TicketEntry>();
-  private seq = 0;
+  private journal: TicketJournal | undefined;
 
   /**
    * Optional lifecycle observer (extension-owned): fired after every
@@ -178,9 +186,71 @@ export class TicketStore {
     this.onChange?.();
   }
 
+  /** Load once per extension lifetime. Never adopt another agent directory. */
+  connect(agentDir: string): void {
+    if (this.journal !== undefined) {
+      if (this.journal.dir !== join(agentDir, "delegate-tickets")) {
+        throw new Error("Delegate agent directory changed during this session; ticket recovery requires a single agent directory.");
+      }
+      return;
+    }
+    const journal = new TicketJournal(agentDir);
+    const saved = journal.load();
+    for (const item of saved) {
+      const recovered: Ticket = {
+        id: item.id,
+        status: item.status === "running" ? "interrupted" : item.status,
+        paused: false,
+        tasks: item.tasks,
+        totalTasks: item.tasks.length,
+        outcomes: item.outcomes.map((outcome) => outcome ?? undefined),
+        questions: [],
+        outputBounds: item.outputBounds,
+        createdAt: item.createdAt,
+        recovered: true,
+        notices: item.notices,
+      };
+      this.tickets.set(item.id, { record: recovered, rt: this.runtime(false) });
+    }
+    this.journal = journal;
+    if (saved.length > 0) {
+      console.info(`[delegate] recovered ${saved.length} ticket record(s) from ${journal.dir}; unfinished work is interrupted, not restarted`);
+      this.changed();
+    }
+  }
+
+  private runtime(holdSettlement: boolean): TicketRuntime {
+    return {
+      cancellation: new AbortController(),
+      questionSeq: 0,
+      pendingQuestions: new Map(),
+      answeredQuestions: new Map(),
+      holdSettlement,
+      pauseGate: undefined,
+      settledGate: new Deferred(),
+      finishedGate: new Deferred(),
+      waiters: new Set(),
+      executions: new Map(),
+      settledView: undefined,
+      renderedOutputs: new WeakMap(),
+    };
+  }
+
+  private save(record: Ticket): void {
+    try {
+      this.journal?.save(record);
+    } catch (error) {
+      console.error(
+        `[delegate] ticket ${record.id} recovery save failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      const writable = record as Writable<Ticket>;
+      const note = "Ticket recovery save failed; after a restart the saved status or results may be stale. Check Delegate logs.";
+      if (!writable.notices.includes(note)) writable.notices = [...writable.notices, note];
+    }
+  }
+
   private newTicketId(): string {
-    this.seq += 1;
-    return `t-${this.seq.toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    return `t-${randomUUID()}`;
   }
 
   /** Live machinery for `ticket`; entries share the record's lifetime. */
@@ -213,20 +283,10 @@ export class TicketStore {
     };
     // Isolated batches settle only after reconciliation has annotated the
     // outcomes — a terminal ticket must already show applied/conflict state.
-    const rt: TicketRuntime = {
-      cancellation: new AbortController(),
-      questionSeq: 0,
-      pendingQuestions: new Map(),
-      answeredQuestions: new Map(),
-      holdSettlement: options.holdSettlement,
-      pauseGate: undefined,
-      settledGate: new Deferred(),
-      finishedGate: new Deferred(),
-      waiters: new Set(),
-      executions: new Map(),
-      settledView: undefined,
-      renderedOutputs: new WeakMap(),
-    };
+    if (!this.journal) throw new Error("Ticket storage not initialized; async dispatch cannot start.");
+    // Creation must be durable before a worker can start.
+    this.journal.save(record);
+    const rt = this.runtime(options.holdSettlement);
     this.tickets.set(record.id, { record, rt });
     this.changed();
     return record;
@@ -274,6 +334,8 @@ export class TicketStore {
   /** Drop a ticket that never started (e.g. admission failed after create). */
   remove(id: string): void {
     this.tickets.delete(id);
+    try { this.journal?.remove(id); }
+    catch (error) { console.error(`[delegate] removing unstarted ticket ${id} failed`, error); }
     this.changed();
   }
 
@@ -289,6 +351,7 @@ export class TicketStore {
     const outcomes = this.entry(ticket).record
       .outcomes as (TaskOutcome | undefined)[];
     outcomes[outcome.index] = outcome;
+    this.save(this.entry(ticket).record);
     this.changed();
     this.maybeSettle(ticket);
   }
@@ -354,7 +417,9 @@ export class TicketStore {
    * serializing). The sole write path for the ticket's notices.
    */
   setNotices(ticket: Ticket, notices: readonly string[]): void {
-    this.entry(ticket).record.notices = [...notices];
+    const record = this.entry(ticket).record;
+    record.notices = [...notices];
+    this.save(record);
   }
 
   /**
@@ -404,6 +469,7 @@ export class TicketStore {
     if (isTerminal(record.status) || status === "running") return false;
     record.status = status;
     record.paused = false;
+    this.save(record);
     for (const [id, question] of rt.pendingQuestions) {
       console.info(`[delegate] ticket ${ticket.id} invalidated question ${id}: ${status}`);
       question.reject(new Error(`Question ${id} cancelled: ticket ${status}.`));
@@ -636,6 +702,13 @@ export async function handleTicketRpc(
     return {
       text: `Ticket '${call.ticket ?? ""}' not found.`,
       isError: true,
+    };
+  }
+  if (ticket.recovered && call.action !== "poll" && call.action !== "wait") {
+    return {
+      text: `Ticket '${ticket.id}' is a recovered ${ticket.status} result; ${call.action} cannot restart or change it.`,
+      isError: true,
+      ticket,
     };
   }
   switch (call.action) {

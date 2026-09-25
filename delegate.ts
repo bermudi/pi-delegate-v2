@@ -835,6 +835,9 @@ export default function delegateExtension(api: ExtensionAPI): void {
             details: { mode: "help" as const },
           };
         }
+        // A ticket RPC may be the first call after a restart. Connect before
+        // dispatch as well so the creation record precedes every worker.
+        tickets.connect(resolveAgentDir(ctx).dir);
         if (call.mode === "ticket") {
           const result = await handleTicketRpc(call, tickets, signal);
           return {

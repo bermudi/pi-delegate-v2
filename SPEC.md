@@ -221,6 +221,30 @@ delegate({ ticketAction: "answer", ticket, taskId, questionId, answer })
 
 Tickets remain pollable after settlement.
 
+### Restart visibility
+
+Async ticket identities, completed task outcomes (including full output), and
+terminal results are saved under the resolved agent directory in owner-only
+storage. On a new extension instance, poll, wait, and the roster expose saved
+tickets without starting children or replaying delivery. A ticket last recorded
+as running becomes terminal `interrupted`: its saved outcomes remain visible,
+but unfinished tasks have unknown effects and are never restarted by polling,
+waiting, or redispatching an `operationId`. An orderly session shutdown still
+cancels running tickets before it completes. Recovered tickets cannot be
+paused, resumed, answered, or cancelled; new tickets use fresh opaque ids.
+No live write reservation is recovered: an orphaned subprocess may still be
+mutating a shared tree after a process crash. Inspect it before new writes.
+
+If storage cannot be initialized or the ticket creation record cannot be
+written, async dispatch fails before workers start. A later save failure is
+logged and disclosed on that ticket; disk recovery may then show an older
+snapshot, conservatively marking unfinished work interrupted. Corrupt or
+unsupported saved records fail visibly rather than being silently discarded.
+Saving tickets does not guarantee exactly-once execution, automatic recovery
+of the child session, or delivery after a restart. Saved results contain task
+outputs and must be treated as private; Delegate does not automatically delete
+them.
+
 ### Worker questions (#17)
 
 Only async-ticket workers have a delegate-owned `ask_parent` tool, independently
@@ -329,9 +353,9 @@ still waits for the safe outcome.
 Session shutdown — quit, `/reload`, `/new`, `/resume`, `/fork` — rejects new
 dispatches, force-cancels every running ticket with no follow-up delivery,
 and then holds the shutdown until every worker's quiescence is confirmed,
-showing a visible waiting status. Replacement sessions never inherit tickets
-or workspace reservations; there is nothing left to inherit. Tickets are
-host-lifetime only and are not persisted across shutdown.
+showing a visible waiting status. Replacement sessions never inherit live
+workers or workspace reservations. They may poll saved ticket results from
+the same agent directory, but do not auto-deliver them.
 
 Because Pi runs extension lifecycle handlers in order, a preceding
 extension's slow handler can delay Delegate's shutdown or tree hooks. A
@@ -410,9 +434,13 @@ model, base prompt, and provider-extension configuration are frozen; incompatibl
 reuse is rejected. `resumeFrom` rehydrates a durable transcript and may then be
 pooled under a new `sessionId`.
 
-Transient whole-task failures may retry. Model/account failures do not blindly
-retry on the same model and surface as model-attributed, pointing the operator
-at the user-side model configuration — callers have no model recourse.
+Transient whole-task failures may retry. Temporary rate limits without a
+provider reset window can receive one short retry only before side effects;
+limits with a reset window, exhausted quota, billing, and authentication do not
+receive an immediate retry. The failure distinguishes waiting for a provider
+window from account/configuration problems and preserves any provider-supplied
+reset hint. It does not promise an exact reset time or auto-resume. Callers
+cannot select a different model.
 
 Stall timeouts measure inactivity; deadlines measure wall-clock time.
 Cancellation does not promise rollback or immediate termination. Delegate does

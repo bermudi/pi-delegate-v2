@@ -15,6 +15,7 @@ import {
   MAX_TASK_ATTEMPTS,
   MODEL_SWAP_HINT,
   RETRY_DELAY_MS,
+  limitHint,
   sleep,
 } from "./retry.ts";
 import type { PooledSession, SessionPool } from "./sessions.ts";
@@ -548,12 +549,15 @@ export class TaskExecution implements ExecutionHandle {
       }
       if (stopReason === "error") {
         const error = errorMessage ?? "the provider returned an error";
+        const hint = limitHint(error);
         return {
           status: "failed",
           output: text || undefined,
-          error: isModelAttributableError(error)
-            ? `${error} — ${MODEL_SWAP_HINT}`
-            : error,
+          error: hint !== undefined
+            ? `${error} — ${hint}`
+            : isModelAttributableError(error)
+              ? `${error} — ${MODEL_SWAP_HINT}`
+              : error,
           usage,
           hadSideEffects: this.hadSideEffects,
           quarantined: this.quarantined,
