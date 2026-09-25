@@ -283,6 +283,41 @@ export class DispatchCoordinator {
           const ticket = options.ticket;
           try {
             await options.reconcilePhase(phase, outcomes as TaskOutcome[]);
+          } catch (error) {
+            // The tree's integration failed mid-flight: later phases can
+            // never run on it. Settle every unstarted task now — a task
+            // without an outcome never entered runOne, so no worker can
+            // exist: a pre-worker failure needs no quarantine, and
+            // resolving its gates here is what keeps the batch's shutdown
+            // barrier from waiting forever on tasks that will never run.
+            // The error still propagates: the batch fails as a whole once
+            // the finally below has recorded this phase's reconciled
+            // outcomes.
+            const reason = `workspace reconciliation failed: ${
+              error instanceof Error ? error.message : String(error)
+            }`;
+            console.error(
+              `[delegate] workspace reconciliation for phase ${phase} failed: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+            );
+            for (const task of tasks) {
+              if (outcomes[task.index] !== undefined) continue;
+              const outcome: TaskOutcome = {
+                index: task.index,
+                id: task.id,
+                status: "failed",
+                error: reason,
+                retries: 0,
+              };
+              outcomes[task.index] = outcome;
+              quiescence.get(task.index)!.resolve();
+              fullyQuiesced.get(task.index)!.resolve();
+              if (ticket) {
+                this.tickets.recordOutcome(ticket, outcome);
+              }
+            }
+            throw error;
           } finally {
             if (ticket) {
               // The reconciled (integration-annotated) outcomes are the
