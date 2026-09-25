@@ -606,9 +606,13 @@ export class DispatchCoordinator {
           record({ index: task.index, id: task.id, status: "cancelled", retries: 0 });
           return;
         }
-        const releaseBoth = () => {
+        let held: (() => void) | undefined = () => {
           release();
           modelRelease();
+        };
+        const releaseBoth = () => {
+          held?.();
+          held = undefined;
         };
         if (!ticket?.paused || signal.aborted) {
           try {
@@ -634,6 +638,33 @@ export class DispatchCoordinator {
                   : undefined,
               waitWhilePaused: (runSignal) =>
                 ticket ? this.waitWhilePaused(ticket, runSignal ?? signal) : Promise.resolve(),
+              askQuestion: ticket === undefined ? undefined : async (question, toolSignal) => {
+                const combined = combineSignals(signal, toolSignal);
+                try {
+                  // The pending tool still owns its session and admission
+                  // reservation. Only execution semaphores are yielded.
+                  const waiting = this.tickets.ask(ticket, task.index, question, combined.signal);
+                  releaseBoth();
+                  const answer = await waiting;
+                  if (combined.signal.aborted || ticket.status !== "running") {
+                    throw new Error("Question cancelled before worker could resume.");
+                  }
+                  const nextModel = await this.acquireOrAborted(this.modelSemaphore(task, options.config), combined.signal);
+                  if (!nextModel) throw new Error("Question cancelled while awaiting model capacity.");
+                  const nextGlobal = await this.acquireOrAborted(this.semaphore, combined.signal);
+                  if (!nextGlobal) {
+                    nextModel();
+                    throw new Error("Question cancelled while awaiting execution capacity.");
+                  }
+                  held = () => { nextGlobal(); nextModel(); };
+                  if (combined.signal.aborted || ticket.status !== "running") {
+                    throw new Error("Question cancelled before worker resumed.");
+                  }
+                  return answer;
+                } finally {
+                  combined.dispose();
+                }
+              },
             };
             if (this.activity !== undefined && ticket !== undefined) {
               try {

@@ -32,6 +32,8 @@ export interface RunControls {
   readonly sessions: SessionPool;
   /** Block while the owning ticket is paused; resolves early on abort. */
   readonly waitWhilePaused: (signal?: AbortSignal) => Promise<void>;
+  /** Only async-ticket workers can ask; callback parks the execution slot. */
+  readonly askQuestion?: (question: string, signal: AbortSignal) => Promise<string>;
   /** Whether this run's work has been cancelled or its deadline fired. */
   readonly isAborted: () => boolean;
   /** Combined cancellation signal (ticket cancel, parent abort, deadline). */
@@ -203,6 +205,7 @@ export class TaskExecution implements ExecutionHandle {
   private stallSuspended = false;
   /** While suspended, the frozen countdown to re-arm on resume. */
   private stallRemaining: number | undefined;
+  private exclusiveQuestionTurn = false;
   /** Resolves the moment cancellation is requested, however it arrives. */
   private readonly abortRequested = new Deferred();
   private readonly done: Promise<AttemptResult>;
@@ -396,7 +399,31 @@ export class TaskExecution implements ExecutionHandle {
       this.poolEntry = this.controls.sessions.checkout(this.task);
       session =
         this.poolEntry?.session ??
-        (await createSubagentSession(this.task, this.controls.env, loader));
+        (await createSubagentSession(
+          this.task, this.controls.env, loader,
+          (question, signal) => this.controls.sessions.askQuestion(session!, question, signal),
+        ));
+      this.controls.sessions.bindQuestion(session, this.controls.askQuestion === undefined
+        ? undefined
+        : async (question, signal) => {
+            if (!this.exclusiveQuestionTurn) {
+              throw new Error("ask_parent must be the only tool call in its model turn.");
+            }
+            if (this.abortReason !== undefined || this.controls.isAborted() || signal.aborted) {
+              throw new Error("Question cancelled before it could be asked.");
+            }
+            this.suspendStall();
+            try {
+              const answer = await this.controls.askQuestion!(question, signal);
+              if (this.abortReason !== undefined || this.controls.isAborted() || signal.aborted) {
+                throw new Error("Question cancelled while waiting for its answer.");
+              }
+              return answer;
+            } finally {
+              this.resumeStall();
+            }
+          });
+      session.setActiveToolsByName([...this.task.tools, ...(this.controls.askQuestion ? ["ask_parent"] : [])]);
       this.session = session;
       // A cancellation that landed during session creation found no session
       // to abort; honor it now — the session must never be prompted. A
@@ -454,6 +481,10 @@ export class TaskExecution implements ExecutionHandle {
       // first event.
       const unsubscribe = child.subscribe((event: AgentSessionEvent) => {
         this.noteActivity();
+        if (event.type === "message_end" && event.message.role === "assistant") {
+          const calls = event.message.content.filter((part) => part.type === "toolCall");
+          this.exclusiveQuestionTurn = calls.length === 1 && calls[0]?.name === "ask_parent";
+        }
         // The activity sink is diagnostics (issue #24): a throwing observer
         // must never break the run it observes.
         try {
@@ -489,6 +520,7 @@ export class TaskExecution implements ExecutionHandle {
         await session.waitForIdle();
       } finally {
         unsubscribe();
+        this.controls.sessions.bindQuestion(session, undefined);
         agent.prepareNextTurnWithContext = previous;
       }
 
@@ -568,6 +600,7 @@ export class TaskExecution implements ExecutionHandle {
       };
     } finally {
       this.controls.signal.removeEventListener("abort", onAbort);
+      if (session) this.controls.sessions.bindQuestion(session, undefined);
       this.clearStall();
       this.finished = true;
     }

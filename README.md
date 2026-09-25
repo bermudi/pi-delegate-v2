@@ -25,6 +25,22 @@ delivery and waits for their workers to actually stop before letting the
 session end. Tickets are host-lifetime only — they are not persisted across
 reload or session replacement.
 
+## Worker questions
+
+Workers on async tickets can use `ask_parent` (as their only tool call in a
+turn). The question appears in ticket polls and a parent notification. Answer
+it with the ticket, task, and question identifiers shown there:
+
+```json
+{ "ticketAction": "answer", "ticket": "…", "taskId": "…", "questionId": "…", "answer": "Use the existing format." }
+```
+
+Waiting releases execution capacity, **not** the worker's workspace or
+shared-write reservation. Task deadlines keep running. A parent already
+waiting on the ticket is released to answer; unanswered questions are never
+guessed or automatically escalated to a human. Synchronous workers cannot
+ask questions.
+
 ## Parent conversation isolation (breaking change)
 
 Tasks no longer accept `context`, including `context: "fresh"` or

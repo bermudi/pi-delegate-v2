@@ -80,6 +80,15 @@ use any design that makes these properties true and testable.
 
 ## Ticket state
 
+- A waiting question MUST remain owned by its running ticket and worker.
+  Yielding execution capacity MUST NOT yield the session, workspace, admission
+  reservation, or confirmed-quiescence obligation. Capacity MUST be reacquired
+  before an answer lets worker execution continue.
+- A question MUST NOT wake the wrong parent branch. Cancellation, deadline,
+  and shutdown MUST invalidate pending questions; late answers MUST NOT
+  resurrect terminal work. Question waits MUST NOT count as stall inactivity,
+  but explicit deadlines MUST keep counting.
+
 - Ticket terminal state MUST be internally consistent and idempotent regardless
   of racing completion, cancellation, and shutdown.
 - Running and cancelling tickets remain unavailable for conflicting work;

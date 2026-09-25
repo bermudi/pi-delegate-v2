@@ -23,10 +23,13 @@ export type ValidatedCall =
   | { readonly mode: "help" }
   | {
       readonly mode: "ticket";
-      readonly action: "poll" | "wait" | "cancel" | "pause" | "resume";
+      readonly action: "poll" | "wait" | "cancel" | "pause" | "resume" | "answer";
       readonly ticket: string | undefined;
       readonly force: boolean;
       readonly timeoutMs: number | undefined;
+      readonly taskId: string | undefined;
+      readonly questionId: string | undefined;
+      readonly answer: string | undefined;
     }
   | {
       readonly mode: "session";
@@ -41,13 +44,16 @@ export type ValidatedCall =
     };
 
 export interface RawArguments {
-  readonly ticketAction?: "poll" | "cancel" | "wait" | "pause" | "resume";
+  readonly ticketAction?: "poll" | "cancel" | "wait" | "pause" | "resume" | "answer";
   readonly sessionAction?: "close" | "list";
   readonly sessionId?: string;
   readonly async?: boolean;
   readonly ticket?: string;
   readonly force?: boolean;
   readonly timeoutMs?: number;
+  readonly taskId?: string;
+  readonly questionId?: string;
+  readonly answer?: string;
   /** Batch-level workspace default; a task's own `workspace` wins. */
   readonly workspace?: "shared" | "scratch" | "isolated";
   readonly tasks?: TaskInput[];
@@ -164,7 +170,7 @@ const FIELD_RULES: Record<keyof RawArguments, FieldRule> = {
     foreign: {
       session: `sessionAction cannot be combined with ticket, force, or timeoutMs.`,
     },
-    detached: `ticket requires ticketAction "poll", "wait", "cancel", "pause", or "resume".`,
+    detached: `ticket requires ticketAction "poll", "wait", "cancel", "pause", "resume", or "answer".`,
     requirement: {
       unless: "poll",
       message: (action) =>
@@ -194,6 +200,24 @@ const FIELD_RULES: Record<keyof RawArguments, FieldRule> = {
       value: "wait",
       forbiddenMessage: `timeoutMs is valid only with ticketAction "wait".`,
     },
+  },
+  taskId: {
+    mode: "ticket", carried: carriedWhenDefined("taskId"), signalsIntent: true,
+    detached: `taskId requires ticketAction "answer".`,
+    foreign: { session: `taskId is valid only with ticketAction "answer".`, dispatch: `taskId is valid only with ticketAction "answer".` },
+    onlyWith: { value: "answer", forbiddenMessage: `taskId is valid only with ticketAction "answer".`, missingMessage: `ticketAction "answer" requires taskId.` },
+  },
+  questionId: {
+    mode: "ticket", carried: carriedWhenDefined("questionId"), signalsIntent: true,
+    detached: `questionId requires ticketAction "answer".`,
+    foreign: { session: `questionId is valid only with ticketAction "answer".`, dispatch: `questionId is valid only with ticketAction "answer".` },
+    onlyWith: { value: "answer", forbiddenMessage: `questionId is valid only with ticketAction "answer".`, missingMessage: `ticketAction "answer" requires questionId.` },
+  },
+  answer: {
+    mode: "ticket", carried: carriedWhenDefined("answer"), signalsIntent: true,
+    detached: `answer requires ticketAction "answer".`,
+    foreign: { session: `answer is valid only with ticketAction "answer".`, dispatch: `answer is valid only with ticketAction "answer".` },
+    onlyWith: { value: "answer", forbiddenMessage: `answer is valid only with ticketAction "answer".`, missingMessage: `ticketAction "answer" requires a nonempty answer.` },
   },
   sessionId: {
     mode: "session",
@@ -358,6 +382,9 @@ export function validateCall(args: RawArguments): ValidatedCall {
       ticket: args.ticket,
       force: args.force === true,
       timeoutMs: args.timeoutMs,
+      taskId: args.taskId,
+      questionId: args.questionId,
+      answer: args.answer,
     };
   }
 

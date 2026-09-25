@@ -10,6 +10,7 @@ import {
 } from "./fsx.ts";
 import {
   createAgentSession,
+  defineTool,
   DefaultResourceLoader,
   ModelRuntime,
   SessionManager,
@@ -18,6 +19,7 @@ import {
   type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import type { Api, Model } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import {
   CHILD_TOOLS,
   expandTools,
@@ -311,6 +313,7 @@ export async function createSubagentSession(
   task: ResolvedTask,
   env: HostEnvironment,
   resourceLoader: DefaultResourceLoader,
+  askParent: (question: string, signal: AbortSignal) => Promise<string>,
 ): Promise<AgentSession> {
   const sessionManager = task.resumeFrom
     ? SessionManager.open(task.resumeFrom)
@@ -326,7 +329,19 @@ export async function createSubagentSession(
     modelRuntime: env.modelRuntime,
     model: task.model,
     thinkingLevel: task.thinking,
-    tools: [...task.tools],
+    tools: [...task.tools, "ask_parent"],
+    customTools: [
+      defineTool({
+        name: "ask_parent",
+        label: "Ask Parent",
+        description: "Ask the parent a question and wait for its explicit answer. Use as the only tool call in this turn; it is available only on async tickets.",
+        parameters: Type.Object({ question: Type.String({ minLength: 1 }) }),
+        execute: async (_id, params, signal) => ({
+          content: [{ type: "text" as const, text: await askParent(params.question, signal ?? new AbortController().signal) }],
+          details: {},
+        }),
+      }),
+    ],
     sessionManager,
     settingsManager: SettingsManager.inMemory(),
     resourceLoader,

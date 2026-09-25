@@ -58,6 +58,22 @@ copy its fixtures, mocks, call graph, or intermediate assertions.
 
 ## Coverage map
 
+### Async worker questions (#17)
+
+- **Contract:** async-only child `ask_parent` and correlated ticket `answer`;
+  visible unanswered questions; parked execution capacity with session/write
+  reservation retained; deadline, cancellation, pause, duplicate/late answers;
+  a parent ticket wait returns on a question rather than deadlocking.
+- **Covered now:** provider-free public-tool tests in `tests/contract/questions.test.ts`
+  exercise ask/answer/resume, another ticket using yielded capacity, shared
+  write rejection while parked, wrong/duplicate/late answers, pause,
+  cancellation, deadline, invalid RPCs, and a parent already waiting.
+  Also covers rejection of parallel tool calls, questions from reused
+  pooled sessions, and cancellation while reacquiring capacity.
+  `tool-boundary.test.ts` checks the published schema.
+- **Provenance:** new v2 issue #17 contract; no v1 worker-question scenario
+  exists. These are new contract tests, not migrated v1 internals.
+
 ### Parent conversation removal (#14)
 
 - **Contract:** no parent transcript extraction/injection; obsolete `context`

@@ -128,6 +128,8 @@ export interface Ticket {
   /** Index-aligned per-task outcomes; entries appear as tasks finish. */
   readonly outcomes: readonly (TaskOutcome | undefined)[];
   readonly tasks: readonly ResolvedTask[];
+  /** Unanswered worker questions (never persisted across host shutdown). */
+  readonly questions: readonly WorkerQuestion[];
   /**
    * Dispatch-scoped output-bounds snapshot captured at creation, so a
    * settled ticket's poll/wait renders under the bounds it ran with even
@@ -148,6 +150,12 @@ export interface Ticket {
    */
   readonly originLeafId?: string | null;
   readonly originEpoch?: number;
+}
+
+export interface WorkerQuestion {
+  readonly id: string;
+  readonly taskId: string;
+  readonly question: string;
 }
 
 export interface ExecutionHandle {

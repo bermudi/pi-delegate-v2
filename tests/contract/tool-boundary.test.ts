@@ -35,10 +35,13 @@ describe("delegate public tool contract", () => {
     expect(Object.keys(top).sort()).toEqual(
       [
         "async",
+        "answer",
         "force",
         "operationId",
         "sessionAction",
         "sessionId",
+        "questionId",
+        "taskId",
         "tasks",
         "ticket",
         "ticketAction",
@@ -79,6 +82,7 @@ describe("delegate public tool contract", () => {
       "wait",
       "pause",
       "resume",
+      "answer",
     ]);
     expect(objectOf(top.sessionAction).enum).toEqual(["close", "list"]);
     expect(objectOf(fields.workspace).enum).toEqual([

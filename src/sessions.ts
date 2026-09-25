@@ -106,6 +106,19 @@ export interface SessionSettle {
  */
 export class SessionPool {
   private readonly entries = new Map<string, PooledSession>();
+  /** Active invocation of the delegate-owned tool; never part of frozen tools. */
+  private readonly questionHandlers = new WeakMap<AgentSession, (question: string, signal: AbortSignal) => Promise<string>>();
+
+  bindQuestion(session: AgentSession, handler: ((question: string, signal: AbortSignal) => Promise<string>) | undefined): void {
+    if (handler) this.questionHandlers.set(session, handler);
+    else this.questionHandlers.delete(session);
+  }
+
+  askQuestion(session: AgentSession, question: string, signal: AbortSignal): Promise<string> {
+    const handler = this.questionHandlers.get(session);
+    if (!handler) throw new Error("ask_parent is only available during an async ticket run.");
+    return handler(question, signal);
+  }
   private closed = false;
 
   /**

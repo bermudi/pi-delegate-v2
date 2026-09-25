@@ -205,11 +205,14 @@ delegate({ ticketAction: "poll", ticket? })
 delegate({ ticketAction: "wait", ticket, timeoutMs? })
 delegate({ ticketAction: "pause" | "resume", ticket })
 delegate({ ticketAction: "cancel", ticket, force? })
+delegate({ ticketAction: "answer", ticket, taskId, questionId, answer })
 ```
 
 - `poll` returns one ticket or the ticket roster.
 - `wait` blocks until settlement or timeout. Timeout/parent abort detaches the
-  waiter; it does not cancel background work.
+  waiter; it does not cancel background work. A pending worker question also
+  detaches the waiter immediately with the question visible, rather than
+  deadlocking the parent who needs to answer it.
 - `pause` cooperatively stops queued tasks and future model turns, not current
   model/tool work or subprocesses.
 - `resume` continues the same ticket.
@@ -217,6 +220,38 @@ delegate({ ticketAction: "cancel", ticket, force? })
   and does not undo completed writes or commands.
 
 Tickets remain pollable after settlement.
+
+### Worker questions (#17)
+
+Only async-ticket workers have a delegate-owned `ask_parent` tool, independently
+of their ordinary tool list; sync workers do not. It takes a nonempty `question`
+string. A worker must issue it as the **only tool call in that model turn**;
+parallel tool calls alongside a question fail the question rather than
+releasing capacity while other tools may still run. At most one unanswered
+question is allowed per task. The question is correlated to its ticket, task
+id, and opaque question id, visible in single-ticket polls, roster polls,
+timed-out waits, and a parent notification. The worker's tool call waits for
+the answer; the parent sends a nonempty answer through the ticket RPC above.
+There is no automatic human escalation or guessed answer; the parent may ask
+the human explicitly. A parent must not wait on the ticket it needs to answer.
+
+Identical repeat answers are idempotent while the ticket is running; a different
+repeat answer is an error. Unknown, wrong-task, late, cancelled, and terminal
+answers are errors, not successful no-ops. The question stops being pending
+when answered, cancelled, or its worker ends; cancellation/shutdown prevents
+an answer from restarting it. Pausing a ticket does not erase questions:
+an answer may be recorded during pause, but the worker may not continue its
+next model turn until resumed. The question wait suspends the inactivity
+watchdog; explicit task deadlines continue to count wall time. Deadline,
+cancellation, and shutdown interrupt unanswered questions without resurrecting
+terminal work.
+
+An exclusively question-waiting worker yields its global and per-model
+execution slots while parked, and reacquires both before its answer returns
+to the child. Its session, workspace admission, and write reservations remain
+owned throughout — another dispatch with conflicting write scope still
+rejects. A question notification uses background delivery's leaf-aware
+wake/append rule, but does not settle or deliver the ticket's final result.
 
 A naturally settled batch is `completed` only when every task succeeded. It is
 `partial` when at least one task succeeded and at least one did not,

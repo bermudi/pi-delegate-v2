@@ -144,7 +144,7 @@ const taskSchema = Type.Object(
 const argumentsSchema = Type.Object(
   {
     ticketAction: Type.Optional(
-      stringEnum(["poll", "cancel", "wait", "pause", "resume"], {
+      stringEnum(["poll", "cancel", "wait", "pause", "resume", "answer"], {
         description: "Ticket operation.",
       }),
     ),
@@ -166,6 +166,9 @@ const argumentsSchema = Type.Object(
     timeoutMs: Type.Optional(
       Type.Number({ description: "Maximum ticket wait duration." }),
     ),
+    taskId: Type.Optional(Type.String({ minLength: 1, description: "Task asking the question (answer RPC)." })),
+    questionId: Type.Optional(Type.String({ minLength: 1, description: "Question identifier from ticket poll (answer RPC)." })),
+    answer: Type.Optional(Type.String({ minLength: 1, description: "Parent answer to the worker's question." })),
     tasks: Type.Optional(
       Type.Array(taskSchema, {
         minItems: 0,
@@ -386,6 +389,9 @@ Delegate runs subagent tasks synchronously or as an asynchronous ticket.
 - \`ticketAction: "cancel"\` — previews without \`force\`; with \`force: true\`
   the ticket is cancelled now and in-flight tasks are asked to stop
   (cooperative; no rollback).
+- \`ticketAction: "answer"\` — answer a worker's pending \`ask_parent\`
+  question using \`ticket\`, \`taskId\`, \`questionId\`, and \`answer\`.
+  Poll to see outstanding questions. Only async workers can ask.
 - \`ticketAction: "pause"\` / \`"resume"\` — hold and release queued work; a
   paused ticket stays live and keeps its reservations.
 
@@ -407,7 +413,35 @@ Delegate runs subagent tasks synchronously or as an asynchronous ticket.
 export default function delegateExtension(api: ExtensionAPI): void {
   // TicketStore mutates first, visibility reads lazily — the observer arrow
   // only runs on the first mutation, long after both exist.
-  const tickets = new TicketStore(() => visibility.sync());
+  const questionContexts = new Map<string, ExtensionContext>();
+  const tickets = new TicketStore(() => {
+    visibility.sync();
+    for (const id of questionContexts.keys()) {
+      if (tickets.get(id)?.status !== "running") questionContexts.delete(id);
+    }
+  }, (ticket, question) => {
+    const ctx = questionContexts.get(ticket.id);
+    if (ctx === undefined || shuttingDown) return;
+    const message = {
+      customType: "delegate-question",
+      content: `Worker ${question.taskId} on ticket ${ticket.id} asks: ${question.question}\nAnswer with delegate({ ticketAction: "answer", ticket: "${ticket.id}", taskId: "${question.taskId}", questionId: "${question.id}", answer: "..." }). Do not wait on this ticket while it needs your answer.`,
+      display: true,
+      details: { ticket: ticket.id, taskId: question.taskId, questionId: question.id },
+    };
+    try {
+      const sameLeaf =
+        navigationEpoch === ticket.originEpoch &&
+        (ticket.originLeafId === null ||
+          ctx.sessionManager.getBranch().some((entry) => entry.id === ticket.originLeafId));
+      if (sameLeaf) api.sendMessage(message, { deliverAs: "followUp", triggerTurn: true });
+      else {
+        api.sendMessage(message, { triggerTurn: false });
+        ctx.ui.notify(`Worker ${question.taskId} asks a question on ticket ${ticket.id}; poll and answer it on this branch.`, "info");
+      }
+    } catch (error) {
+      console.error(`[delegate] notifying question ${ticket.id}/${question.id} failed (poll the ticket): ${error instanceof Error ? error.message : String(error)}`);
+    }
+  });
   const visibility = new VisibilitySignals(() => tickets.list());
   const admission = new AdmissionController();
   const sessions = new SessionPool();
@@ -821,6 +855,9 @@ export default function delegateExtension(api: ExtensionAPI): void {
               result.ticket.notices.length > 0
                 ? { notices: result.ticket.notices }
                 : {}),
+              ...(call.action === "poll" || call.action === "wait"
+                ? { questions: result.ticket?.questions }
+                : {}),
             },
             isError: result.isError,
           };
@@ -982,6 +1019,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
                       outputBounds: config.output,
                     });
                     operationTicket = created;
+                    questionContexts.set(created.id, ctx);
                     // The barrier now has its durable name for the
                     // shutdown status.
                     relabel(`ticket "${created.id}"`);

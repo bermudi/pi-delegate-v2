@@ -6,6 +6,7 @@ import type {
   TaskOutcome,
   Ticket,
   TicketStatus,
+  WorkerQuestion,
 } from "./types.ts";
 import { Deferred } from "./types.ts";
 import type { ResolvedTask } from "./types.ts";
@@ -20,6 +21,9 @@ type Writable<T> = { -readonly [K in keyof T]: T[K] };
  * stays free of it.
  */
 interface TicketRuntime {
+  questionSeq: number;
+  readonly pendingQuestions: Map<string, { taskIndex: number; resolve: (answer: string) => void; reject: (error: Error) => void }>;
+  readonly answeredQuestions: Map<string, { taskIndex: number; answer: string }>;
   /** Aborts in-flight executions when force-cancelled. */
   readonly cancellation: AbortController;
   /**
@@ -127,6 +131,8 @@ function ticketView(
   const lines = [
     `Ticket "${ticket.id}": ${statusWord(ticket)} — ${completedCount(ticket)}/${ticket.totalTasks} tasks finished.`,
     ...ticket.notices,
+    ...ticket.questions.map((q) =>
+      `Waiting for parent answer: task ${q.taskId}, question ${q.id}: ${q.question}\nReply with delegate({ ticketAction: "answer", ticket: "${ticket.id}", taskId: "${q.taskId}", questionId: "${q.id}", answer: "..." }).`),
   ];
   for (const outcome of ticket.outcomes) {
     if (outcome)
@@ -139,10 +145,10 @@ function rosterView(tickets: readonly Ticket[]): string {
   if (tickets.length === 0) {
     return "No tickets. Dispatch tasks with async: true to create one.";
   }
-  const lines = tickets.map(
-    (ticket) =>
-      `- "${ticket.id}" ${statusWord(ticket)} — ${completedCount(ticket)}/${ticket.totalTasks} tasks finished`,
-  );
+  const lines = tickets.flatMap((ticket) => [
+    `- "${ticket.id}" ${statusWord(ticket)} — ${completedCount(ticket)}/${ticket.totalTasks} tasks finished`,
+    ...ticket.questions.map((q) => `  waiting for answer: ${q.taskId}/${q.id}: ${q.question}`),
+  ]);
   return `Tickets:\n${lines.join("\n")}`;
 }
 
@@ -163,7 +169,10 @@ export class TicketStore {
    * caller-visible mutation so visibility signals can resync. The store
    * never reads it beyond the call.
    */
-  constructor(private readonly onChange?: () => void) {}
+  constructor(
+    private readonly onChange?: () => void,
+    private readonly onQuestion?: (ticket: Ticket, question: WorkerQuestion) => void,
+  ) {}
 
   private changed(): void {
     this.onChange?.();
@@ -197,6 +206,7 @@ export class TicketStore {
       totalTasks: tasks.length,
       outcomes: new Array<TaskOutcome | undefined>(tasks.length).fill(undefined),
       tasks,
+      questions: [],
       outputBounds: options.outputBounds,
       createdAt: Date.now(),
       notices: [],
@@ -205,6 +215,9 @@ export class TicketStore {
     // outcomes — a terminal ticket must already show applied/conflict state.
     const rt: TicketRuntime = {
       cancellation: new AbortController(),
+      questionSeq: 0,
+      pendingQuestions: new Map(),
+      answeredQuestions: new Map(),
       holdSettlement: options.holdSettlement,
       pauseGate: undefined,
       settledGate: new Deferred(),
@@ -280,6 +293,62 @@ export class TicketStore {
     this.maybeSettle(ticket);
   }
 
+  /** An unanswered question owns the worker and its write reservation. */
+  ask(ticket: Ticket, taskIndex: number, questionText: string, signal: AbortSignal): Promise<string> {
+    const { record, rt } = this.entry(ticket);
+    if (record.status !== "running" || signal.aborted) throw new Error("Question cancelled; the worker is no longer running.");
+    if (!questionText.trim()) throw new Error("ask_parent requires a nonempty question.");
+    if (record.questions.some((q) => q.taskId === record.tasks[taskIndex]?.id)) {
+      throw new Error(`Task ${record.tasks[taskIndex]?.id} already has an unanswered question.`);
+    }
+    const question: WorkerQuestion = {
+      id: `q-${++rt.questionSeq}`,
+      taskId: record.tasks[taskIndex]!.id,
+      question: questionText,
+    };
+    const answer = new Promise<string>((resolve, reject) => {
+      rt.pendingQuestions.set(question.id, { taskIndex, resolve, reject });
+    });
+    record.questions = [...record.questions, question];
+    console.info(`[delegate] ticket ${ticket.id} task ${question.taskId} waiting for answer ${question.id}`);
+    this.changed();
+    for (const notify of [...rt.waiters]) notify();
+    try {
+      this.onQuestion?.(ticket, question);
+    } catch (error) {
+      console.error(`[delegate] notifying parent of question ${ticket.id}/${question.id} failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    const abort = () => rt.pendingQuestions.get(question.id)?.reject(new Error(`Question ${question.id} cancelled.`));
+    signal.addEventListener("abort", abort, { once: true });
+    if (signal.aborted || record.status !== "running") abort();
+    return answer.finally(() => {
+      signal.removeEventListener("abort", abort);
+      rt.pendingQuestions.delete(question.id);
+      record.questions = record.questions.filter((q) => q.id !== question.id);
+      this.changed();
+    });
+  }
+
+  answer(ticket: Ticket, taskId: string, questionId: string, answer: string): string {
+    const { record, rt } = this.entry(ticket);
+    if (record.status !== "running") throw new Error(`Ticket '${ticket.id}' is ${record.status}; answer ${questionId} is too late.`);
+    if (!answer.trim()) throw new Error("An answer must be nonempty.");
+    const index = record.tasks.findIndex((task) => task.id === taskId);
+    const pending = rt.pendingQuestions.get(questionId);
+    const previous = rt.answeredQuestions.get(questionId);
+    if (index < 0 || (pending?.taskIndex ?? previous?.taskIndex) !== index) {
+      throw new Error(`No question '${questionId}' for task '${taskId}' on ticket '${ticket.id}'.`);
+    }
+    if (previous !== undefined) {
+      if (previous.answer !== answer) throw new Error(`Question '${questionId}' was already answered differently.`);
+      return `Answer ${questionId} already recorded for task ${taskId}.`;
+    }
+    rt.answeredQuestions.set(questionId, { taskIndex: index, answer });
+    console.info(`[delegate] ticket ${ticket.id} task ${taskId} answered question ${questionId}`);
+    pending!.resolve(answer);
+    return `Answer ${questionId} recorded for task ${taskId}; worker will resume when capacity is available.`;
+  }
+
   /**
    * Replace the dispatch notices (e.g. same-call shared writers
    * serializing). The sole write path for the ticket's notices.
@@ -335,6 +404,10 @@ export class TicketStore {
     if (isTerminal(record.status) || status === "running") return false;
     record.status = status;
     record.paused = false;
+    for (const [id, question] of rt.pendingQuestions) {
+      console.info(`[delegate] ticket ${ticket.id} invalidated question ${id}: ${status}`);
+      question.reject(new Error(`Question ${id} cancelled: ticket ${status}.`));
+    }
     this.changed();
     rt.pauseGate?.resolve();
     rt.settledGate.resolve();
@@ -416,10 +489,11 @@ export class TicketStore {
     ticket: Ticket,
     timeoutMs: number | undefined,
     signal: AbortSignal | undefined,
-  ): Promise<{ timedOut: boolean; aborted: boolean }> {
+  ): Promise<{ timedOut: boolean; aborted: boolean; questionPending: boolean }> {
     const { record, rt } = this.entry(ticket);
-    if (isTerminal(record.status)) return { timedOut: false, aborted: false };
-    if (signal?.aborted === true) return { timedOut: false, aborted: true };
+    if (isTerminal(record.status)) return { timedOut: false, aborted: false, questionPending: false };
+    if (record.questions.length > 0) return { timedOut: false, aborted: false, questionPending: true };
+    if (signal?.aborted === true) return { timedOut: false, aborted: true, questionPending: false };
     let notify!: () => void;
     const onSettled = new Promise<void>((resolve) => {
       notify = () => {
@@ -456,11 +530,14 @@ export class TicketStore {
       }
       rt.waiters.delete(notify);
     }
-    if (isTerminal(record.status)) return { timedOut: false, aborted: false };
+    if (isTerminal(record.status)) return { timedOut: false, aborted: false, questionPending: false };
+    if (record.questions.length > 0) return { timedOut: false, aborted: false, questionPending: true };
     if (outcome === "aborted" || signal?.aborted) {
-      return { timedOut: false, aborted: true };
+      return { timedOut: false, aborted: true, questionPending: false };
     }
-    return { timedOut: true, aborted: false };
+    // A question can be answered by another caller between its notification
+    // and this waiter resuming. Do not misreport that wake-up as a timeout.
+    return { timedOut: outcome === "timeout", aborted: false, questionPending: false };
   }
 
   /**
@@ -540,10 +617,13 @@ export interface TicketRpcResult {
 /** ticketAction RPCs against the store. */
 export async function handleTicketRpc(
   call: {
-    action: "poll" | "wait" | "cancel" | "pause" | "resume";
+    action: "poll" | "wait" | "cancel" | "pause" | "resume" | "answer";
     ticket: string | undefined;
     force: boolean;
     timeoutMs: number | undefined;
+    taskId: string | undefined;
+    questionId: string | undefined;
+    answer: string | undefined;
   },
   store: TicketStore,
   signal: AbortSignal | undefined,
@@ -562,13 +642,15 @@ export async function handleTicketRpc(
     case "poll":
       return { text: store.view(ticket), isError: false, ticket };
     case "wait": {
-      const { timedOut, aborted } = await store.wait(
+      const { timedOut, aborted, questionPending } = await store.wait(
         ticket,
         call.timeoutMs,
         signal,
       );
       const view = store.view(ticket);
-      const text = timedOut
+      const text = questionPending
+        ? `${view}\n\nWait detached: answer the pending question before waiting for this ticket.`
+        : timedOut
         ? `${view}\n\nWait timed out; the ticket is still ${statusWord(ticket)}.`
         : aborted
           ? `${view}\n\nWait detached; the caller aborted the wait. The ticket is still ${statusWord(ticket)}.`
@@ -581,5 +663,11 @@ export async function handleTicketRpc(
       return { text: store.pause(ticket), isError: false, ticket };
     case "resume":
       return { text: store.resume(ticket), isError: false, ticket };
+    case "answer":
+      try {
+        return { text: store.answer(ticket, call.taskId!, call.questionId!, call.answer!), isError: false, ticket };
+      } catch (error) {
+        return { text: error instanceof Error ? error.message : String(error), isError: true, ticket };
+      }
   }
 }

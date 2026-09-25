@@ -37,6 +37,12 @@ release notes and migration guidance; it must not arrive as rewrite drift.
 
 ### Execution and state
 
+- Async worker questions (#17) are additive: a child-only `ask_parent` tool
+  parks the worker, and a ticket-scoped `answer` RPC resumes it. Sync workers
+  do not expose the tool. A ticket wait now returns early when a worker asks,
+  so a parent already waiting on that ticket can answer instead of deadlocking.
+  This does not add general messaging or steering.
+
 - Input-ordered sync results, bounded global/per-model concurrency, cooperative
   cancellation, retry accounting, and compaction-inclusive usage accounting.
 - Live host-lifetime sessions keyed by `sessionId`; durable recovery through
