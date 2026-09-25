@@ -54,8 +54,12 @@ release notes and migration guidance; it must not arrive as rewrite drift.
   as specified in `SPEC.md` "Background delivery".
 - Saved async ticket results are pollable on a cold extension instance; an
   unfinished snapshot is `interrupted`, not resumed or automatically delivered.
+  Recovered cancelled tickets warn in the roster when a recorded worker's
+  termination was unconfirmed, even if all task outcomes were saved.
   Subagent Pi auto-retry is disabled in favor of Delegate's bounded,
-  side-effect-aware retry, including provider reset-window handling.
+  side-effect-aware retry, including provider reset-window handling. Explicit
+  credential failures outrank incidental rate-limit metadata; explicit
+  unhinted 403 rate limits may retry before side effects, but bare 403 does not.
 - Operation on a stock, unmodified Pi installation through its public
   extension API. Requiring a patched, forked, or unreleased Pi host is a
   breaking change, not an implementation detail.

@@ -90,7 +90,9 @@ use any design that makes these properties true and testable.
   agent directory. A formerly running ticket MUST be reported as interrupted
   after an unclean restart, never resumed, delivered, or mistaken for an
   ordinary failure. Completed outcomes remain visible; unfinished effects
-  are unknown. Persistence failures MUST be visible, not swallowed.
+  are unknown. A recovered cancelled ticket with an unconfirmed worker MUST
+  warn in the roster even if every task has an outcome. Persistence failures
+  MUST be visible, not swallowed.
 - Recovered tickets MUST NOT own live sessions, questions, worker handles,
   reservations, or delivery rights. Automatic replay of an unfinished task
   is forbidden without a separate side-effect-safe contract.

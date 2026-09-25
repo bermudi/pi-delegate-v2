@@ -62,12 +62,14 @@ copy its fixtures, mocks, call graph, or intermediate assertions.
   side-effect-safe retry. Quota/account guidance does not claim auto-resume.
 - **Covered now:** `tests/contract/recovery.test.ts` drives poll/wait/roster
   across separate public-tool instances, a running snapshot, terminal
-  cancellation with missing outcomes, invalid storage that does not block
-  sync dispatch/session RPC, failed writes after launch, and orderly shutdown;
+  cancellation with missing outcomes or a fully recorded quarantined worker
+  (including roster warning), invalid storage that does not block sync
+  dispatch/session RPC, failed writes after launch, and orderly shutdown;
   `tests/contract/provider-limits.test.ts` proves the provider-call
   counts and guidance for reset headers, timed 403 limits (including
   `rate_limit_exceeded`), explicit credential failures despite incidental
-  reset headers, and short limits.
+  rate-limit fields and reset headers, unhinted 403 provider limits versus
+  bare 403, and short limits.
   `tests/regression/failure-propagation.test.ts` retains the v1
   no-whole-task-retry scenario but replaces its model-swap expectation
   with the new account-limit contract.

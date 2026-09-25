@@ -230,9 +230,11 @@ tickets without starting children or replaying delivery. A ticket last recorded
 as running becomes terminal `interrupted`: its saved outcomes remain visible,
 but unfinished tasks have unknown effects and are never restarted by polling,
 waiting, or redispatching an `operationId`. A recovered terminal cancellation
-with missing task outcomes also warns that those tasks may have had effects;
-the terminal status alone does not prove their workers stopped. An orderly
-session shutdown still cancels running tickets before it completes. Recovered tickets cannot be
+with missing task outcomes or a recorded quarantined worker warns that tasks
+may still have had effects, including in the roster when every outcome is
+recorded; the terminal status alone does not prove their workers stopped. An
+orderly session shutdown still cancels running tickets before it completes.
+Recovered tickets cannot be
 paused, resumed, answered, or cancelled; new tickets use fresh opaque ids.
 No live write reservation is recovered: an orphaned subprocess may still be
 mutating a shared tree after a process crash. Inspect it before new writes.
@@ -442,7 +444,10 @@ Transient whole-task failures may retry. Temporary rate limits without a
 provider reset window can receive one short retry only before side effects;
 limits with a reset window (including provider reset headers and timed 403 rate
 limits), exhausted quota, billing, and authentication do not receive an
-immediate retry. The failure distinguishes waiting for a provider window from
+immediate retry. Explicit credential failures take precedence over incidental
+rate-limit metadata or reset headers; explicit unhinted 403 provider rate limits
+may receive the short retry, while a bare 403 remains an account problem. The
+failure distinguishes waiting for a provider window from
 account/configuration problems and preserves any provider-supplied
 reset hint. It does not promise an exact reset time or auto-resume. Callers
 cannot select a different model.

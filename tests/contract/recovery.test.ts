@@ -162,6 +162,47 @@ describe("saved async ticket results (new v2 restart contract, issue #26)", () =
     }
   });
 
+  test("a fully recorded quarantined cancellation warns on the recovered roster", async () => {
+    const first = await openAt();
+    const model = await installSubagentModel(first);
+    let release!: () => void;
+    let started!: () => void;
+    const entered = new Promise<void>((r) => { started = r; });
+    const gate = new Promise<void>((r) => { release = r; });
+    model.respond([async () => {
+      started();
+      await gate;
+      return fauxAssistantMessage("LATE-OUTPUT");
+    }]);
+    try {
+      const dispatched = await callDelegate(first, {
+        tasks: [{ prompt: "possibly change files" }], async: true,
+      });
+      const ticket = ticketIdOf(dispatched.text);
+      await entered;
+      await callDelegate(first, { ticketAction: "cancel", ticket, force: true });
+      // The caller-visible provisional outcome is saved before the worker
+      // necessarily stops. Read the snapshot through a cold public boundary.
+      const path = join(first.cwd, "delegate-tickets", `${ticket}.json`);
+      let saved: { outcomes: ({ quarantined?: boolean } | null)[] } | undefined;
+      for (let i = 0; i < 100; i++) {
+        saved = JSON.parse(readFileSync(path, "utf8"));
+        if (saved?.outcomes[0]?.quarantined) break;
+        await Bun.sleep(10);
+      }
+      expect(saved?.outcomes[0]?.quarantined).toBe(true);
+      const next = await openAt(first.cwd);
+      const roster = await callDelegate(next, { ticketAction: "poll" });
+      expect(roster.text).toContain(ticket);
+      expect(roster.text).toMatch(/termination was unconfirmed|may still have changed/i);
+      expect(roster.text).toMatch(/inspect the workspace before new writes/i);
+      expect((await callDelegate(next, { ticketAction: "poll", ticket })).text)
+        .toMatch(/termination was unconfirmed/i);
+    } finally {
+      release?.();
+    }
+  });
+
   test("a save failure after launch is disclosed; a cold reader never invents completion", async () => {
     const first = await openAt();
     const model = await installSubagentModel(first);

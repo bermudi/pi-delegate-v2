@@ -90,6 +90,9 @@ function recoveryWarning(ticket: Ticket): string | undefined {
   if (ticket.recovered && completedCount(ticket) < ticket.totalTasks) {
     return "Some task outcomes are missing from this saved result; their effects are unknown. Workers may have changed files or run commands. Inspect the workspace before new writes.";
   }
+  if (ticket.recovered && ticket.status === "cancelled" && ticket.outcomes.some((outcome) => outcome?.quarantined)) {
+    return "A cancelled worker's termination was unconfirmed; no live reservation was restored. It may still have changed files or run commands. Inspect the workspace before new writes.";
+  }
   return undefined;
 }
 

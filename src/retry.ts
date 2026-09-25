@@ -1,92 +1,49 @@
-/**
- * Whole-task retry classification, kept separate from generic failure
- * handling. Two questions are answered independently:
- *
- * - isModelAttributableError: the failure belongs to the resolved
- *   model/account (quota, billing, auth) or a timed provider window. An
- *   immediate same-model retry will not help; do not guess a reset time.
- * - isClearlyTransientError: the failure looks like a transient transport or
- *   provider blip worth one whole-task retry.
- */
+/* Whole-task provider failure classification. Only explicit provider limits
+ * override an ambiguous HTTP status; reset headers alone never imply a limit
+ * (or override an explicit credential/account failure). */
 
-const MODEL_ATTRIBUTABLE = [
-  "usage limit",
-  "upgrade for higher limits",
-  "quota",
-  "exceeded your",
-  "insufficient credit",
-  "insufficient quota",
-  "insufficient funds",
-  "billing",
-  "unauthorized",
-  "unauthenticated",
-  "authentication",
-  "invalid api key",
-];
+type FailureKind = "auth" | "quota" | "window" | "short-limit" | "transient" | "other";
 
-export function isModelAttributableError(error: string | undefined): boolean {
-  if (!error) return false;
-  const e = error.toLowerCase();
-  if (e.includes("abort")) return false;
-  return (
-    MODEL_ATTRIBUTABLE.some((pattern) => e.includes(pattern)) ||
-    (e.includes("api key") && e.includes("invalid")) ||
-    (e.includes("oauth token") && e.includes("invalid")) ||
-    /\b401\b/.test(e) ||
-    /\b403\b/.test(e)
-  );
+function classify(error: string | undefined): FailureKind {
+  if (!error) return "other";
+  // Provider prose and codes conventionally vary only in their word separators.
+  const text = error.toLowerCase().replace(/[_-]+/g, " ").replace(/\s+/g, " ");
+  if (text.includes("abort")) return "other";
+  const reset = /\b(?:retry after|x rate ?limit reset|reset(?:s|ting)? (?:in|at)|try again (?:in|after)|wait \d+\s*(?:s|sec|seconds?|m|min|minutes?|h|hours?))\b/.test(text);
+  // Header-like metadata is not itself a provider diagnosis.
+  const signal = text.replace(/\b(?:x rate ?limit(?: [a-z]+)?|rate limit):\s*\S+/g, "");
+  if (/\b(?:unauthorized|unauthenticated|authentication|invalid api key|api key (?:is )?invalid|invalid oauth token|oauth token (?:is )?invalid)\b/.test(signal)) return "auth";
+  if (/\b(?:usage limit|upgrade for higher limits|quota|exceeded your|insufficient (?:credit|funds)|billing)\b/.test(signal)) return "quota";
+  if (/\b(?:rate limit(?: exceeded)?|too many requests|429)\b/.test(signal)) return reset ? "window" : "short-limit";
+  if (/\b(?:401|403)\b/.test(signal)) return "auth";
+  // A hint without an identified limit is not enough to authorize a retry.
+  if (reset) return "other";
+  if (/\b(?:temporarily overloaded|temporarily unavailable|overloaded|timeout|timed out|connection reset|econnreset|connection refused|network error|5\d\d)\b/.test(signal)) return "transient";
+  return "other";
 }
 
-/** A reset hint is advisory provider text, not a clock we control. */
-function hasResetWindow(error: string): boolean {
-  return /\b(?:retry[-_ ]after|x[-_]ratelimit[-_]reset|reset(?:s|ting)?\s+(?:in|at)|try again (?:in|after)|wait\s+\d+\s*(?:s|sec|seconds?|m|min|minutes?|h|hours?))\b/i.test(error);
+export function isModelAttributableError(error: string | undefined): boolean {
+  return ["auth", "quota", "window"].includes(classify(error));
 }
 
 export function limitHint(error: string): string | undefined {
-  const providerLimit = /\b(?:usage limit|quota|rate[_ -]limit(?:[_ -]exceeded)?|too many requests|429)\b/i.test(error);
-  const accountFailure = /\b(?:unauthorized|unauthenticated|authentication|invalid (?:api key|oauth token)|billing|insufficient (?:funds|credit))\b/i.test(error);
-  // Explicit account failures win over incidental reset headers; a timed
-  // 403 rate limit still wins over the ambiguous status code alone.
-  if (!accountFailure && providerLimit && hasResetWindow(error)) {
-    return "Provider limit with a reported reset window; the provider's hint is above. No immediate retry or automatic resume is scheduled.";
-  }
-  if (accountFailure || /\b(?:401|403)\b/.test(error)) {
-    return "Account or authentication problem; check the provider account or user-side delegate.json configuration. Delegate will not automatically resume this task.";
-  }
-  if (providerLimit) {
-    if (/\b(?:usage limit|quota)\b/i.test(error)) {
+  switch (classify(error)) {
+    case "window":
+      return "Provider limit with a reported reset window; the provider's hint is above. No immediate retry or automatic resume is scheduled.";
+    case "auth":
+      return "Account or authentication problem; check the provider account or user-side delegate.json configuration. Delegate will not automatically resume this task.";
+    case "quota":
       return "Provider usage/quota limit; check when the account's limit resets or whether it needs attention. No automatic resume is scheduled.";
-    }
-    return "Temporary provider rate limit; a short retry may have been attempted before side effects. No automatic resume is scheduled.";
+    case "short-limit":
+      return "Temporary provider rate limit; a short retry may have been attempted before side effects. No automatic resume is scheduled.";
+    default:
+      return undefined;
   }
-  return undefined;
 }
 
-const TRANSIENT = [
-  "temporarily overloaded",
-  "temporarily unavailable",
-  "overloaded",
-  "rate limit",
-  "rate_limit",
-  "too many requests",
-  "timeout",
-  "timed out",
-  "connection reset",
-  "econnreset",
-  "connection refused",
-  "network error",
-];
-
 export function isClearlyTransientError(error: string | undefined): boolean {
-  if (!error) return false;
-  const e = error.toLowerCase();
-  if (e.includes("abort")) return false;
-  if (isModelAttributableError(error) || hasResetWindow(error)) return false;
-  return (
-    TRANSIENT.some((pattern) => e.includes(pattern)) ||
-    /\b429\b/.test(e) ||
-    /\b5\d\d\b/.test(e)
-  );
+  const kind = classify(error);
+  return kind === "short-limit" || kind === "transient";
 }
 
 export const MODEL_SWAP_HINT =

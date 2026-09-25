@@ -81,6 +81,49 @@ describe("provider limit guidance (new v2 issue #26 contract)", () => {
     expect(model.state.callCount).toBe(1);
   });
 
+  for (const errorMessage of [
+    "401 API key is invalid; rate_limit: 10; x-ratelimit-reset: 3600",
+    "401 invalid_api_key; x-rate-limit-reset: 3600",
+  ]) {
+    test(`explicit credentials outrank rate-limit fields: ${errorMessage}`, async () => {
+      session = await openDelegateBoundary();
+      const model = await installSubagentModel(session);
+      model.respond([fauxAssistantMessage("", { stopReason: "error", errorMessage })]);
+      const result = await callDelegate(session, { tasks: [{ prompt: "report" }] });
+      expect(result.isError).toBe(true);
+      expect(result.text).toContain(errorMessage);
+      expect(result.text).toMatch(/authentication problem/i);
+      expect(result.text).not.toMatch(/reported reset window|temporary provider rate limit/i);
+      expect(model.state.callCount).toBe(1);
+    });
+  }
+
+  for (const errorMessage of ["403 rate_limit_exceeded", "403 rate-limit-exceeded"]) {
+    test(`unhinted provider limit retries before side effects: ${errorMessage}`, async () => {
+      session = await openDelegateBoundary();
+      const model = await installSubagentModel(session);
+      model.respond([
+        fauxAssistantMessage("", { stopReason: "error", errorMessage }),
+        fauxAssistantMessage("RECOVERED"),
+      ]);
+      const result = await callDelegate(session, { tasks: [{ prompt: "report" }] });
+      expect(result.text).toContain("RECOVERED");
+      expect(model.state.callCount).toBe(2);
+    });
+  }
+
+  test("bare 403 stays an account problem even with an incidental reset header", async () => {
+    session = await openDelegateBoundary();
+    const model = await installSubagentModel(session);
+    model.respond([fauxAssistantMessage("", {
+      stopReason: "error", errorMessage: "403 forbidden; rate_limit: 10; x-rate-limit-remaining: 0; x-ratelimit-reset: 3600",
+    })]);
+    const result = await callDelegate(session, { tasks: [{ prompt: "report" }] });
+    expect(result.text).toMatch(/authentication problem/i);
+    expect(result.text).not.toMatch(/reported reset window/i);
+    expect(model.state.callCount).toBe(1);
+  });
+
   test("short rate limit can retry, but exhausted quota is not misreported as temporary", async () => {
     session = await openDelegateBoundary();
     const model = await installSubagentModel(session);
