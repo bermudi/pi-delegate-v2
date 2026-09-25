@@ -4,7 +4,7 @@
  * ticket tasks, feeds session events via `observe`, and retains finished
  * sync runs. Full transcripts never live here: tool previews are capped at
  * 512 chars, assistant text at a 32K tail, tool calls at 100, retained sync
- * runs at 20.
+ * runs at 20, settled ticket rows at 100.
  *
  * Deviation from the assigned signature: `AgentSessionEvent` is not exported
  * by `@earendil-works/pi-agent-core` at the pinned 0.87.0 declarations — the
@@ -87,6 +87,7 @@ const TOOL_CALL_LIMIT = 100;
 const PREVIEW_LIMIT = 512;
 const PROMPT_LIMIT = 200;
 const RETAINED_SYNC_LIMIT = 20;
+const RETAINED_TICKET_LIMIT = 100;
 const OMITTED_MARKER = "[Earlier text omitted]";
 
 /** Terminal statuses: they end a row's clock. */
@@ -415,15 +416,16 @@ export function createActivityStore(): ActivityStore {
     shiftOpenTools(entry.openTools, trimToolCalls(entry.toolCalls));
   };
 
-  const pruneSyncRuns = (): void => {
+  /** Evict oldest-settled entries of one kind past the retained limit. */
+  const pruneSettled = (kind: "ticket" | "sync", limit: number): void => {
     const finished: MutableEntry[] = [];
     for (const entry of entries.values()) {
-      if (entry.kind === "sync" && isSettled(entry.status)) {
+      if (entry.kind === kind && isSettled(entry.status)) {
         finished.push(entry);
       }
     }
     finished.sort((a, b) => (a.endedAt ?? 0) - (b.endedAt ?? 0));
-    for (const entry of finished.slice(0, -RETAINED_SYNC_LIMIT)) {
+    for (const entry of finished.slice(0, -limit)) {
       entries.delete(entry.key);
       if (latestSyncRun.get(entry.taskId)?.key === entry.key) {
         latestSyncRun.delete(entry.taskId);
@@ -463,7 +465,12 @@ export function createActivityStore(): ActivityStore {
       entry.status = status;
       entry.lastEventAt = Date.now();
       entry.endedAt = isSettled(status) ? (entry.endedAt ?? Date.now()) : undefined;
-      if (isSettled(status)) entry.openTools.clear();
+      if (isSettled(status)) {
+        entry.openTools.clear();
+        if (entry.kind === "ticket") {
+          pruneSettled("ticket", RETAINED_TICKET_LIMIT);
+        }
+      }
     },
 
     observe(ticketId, taskId, event): void {
@@ -564,7 +571,7 @@ export function createActivityStore(): ActivityStore {
           openTools: new Map(),
         });
       }
-      pruneSyncRuns();
+      pruneSettled("sync", RETAINED_SYNC_LIMIT);
     },
 
     snapshot(): readonly ActivityRow[] {
