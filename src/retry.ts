@@ -43,12 +43,14 @@ function hasResetWindow(error: string): boolean {
 }
 
 export function limitHint(error: string): string | undefined {
-  const providerLimit = /\b(?:usage limit|quota|rate.?limit|too many requests|429)\b/i.test(error);
-  // A 403 can also be a timed provider rate limit, not an auth failure.
-  if (providerLimit && hasResetWindow(error)) {
+  const providerLimit = /\b(?:usage limit|quota|rate[_ -]limit(?:[_ -]exceeded)?|too many requests|429)\b/i.test(error);
+  const accountFailure = /\b(?:unauthorized|unauthenticated|authentication|invalid (?:api key|oauth token)|billing|insufficient (?:funds|credit))\b/i.test(error);
+  // Explicit account failures win over incidental reset headers; a timed
+  // 403 rate limit still wins over the ambiguous status code alone.
+  if (!accountFailure && providerLimit && hasResetWindow(error)) {
     return "Provider limit with a reported reset window; the provider's hint is above. No immediate retry or automatic resume is scheduled.";
   }
-  if (/\b(?:401|403|unauthorized|unauthenticated|authentication|invalid api key|invalid oauth token|billing|insufficient (?:funds|credit))\b/i.test(error)) {
+  if (accountFailure || /\b(?:401|403)\b/.test(error)) {
     return "Account or authentication problem; check the provider account or user-side delegate.json configuration. Delegate will not automatically resume this task.";
   }
   if (providerLimit) {
@@ -65,6 +67,7 @@ const TRANSIENT = [
   "temporarily unavailable",
   "overloaded",
   "rate limit",
+  "rate_limit",
   "too many requests",
   "timeout",
   "timed out",

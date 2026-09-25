@@ -51,6 +51,36 @@ describe("provider limit guidance (new v2 issue #26 contract)", () => {
     expect(model.state.callCount).toBe(1);
   });
 
+  test("snake_case 403 rate_limit_exceeded with a reset window is a provider limit", async () => {
+    session = await openDelegateBoundary();
+    const model = await installSubagentModel(session);
+    model.respond([fauxAssistantMessage("", {
+      stopReason: "error",
+      errorMessage: "403 rate_limit_exceeded; resets in 3600 seconds",
+    })]);
+    const result = await callDelegate(session, { tasks: [{ prompt: "report" }] });
+    expect(result.isError).toBe(true);
+    expect(result.text).toContain("rate_limit_exceeded; resets in 3600 seconds");
+    expect(result.text).toMatch(/reported reset window/i);
+    expect(result.text).not.toMatch(/authentication problem/i);
+    expect(model.state.callCount).toBe(1);
+  });
+
+  test("explicit invalid API key takes precedence over an unrelated reset header", async () => {
+    session = await openDelegateBoundary();
+    const model = await installSubagentModel(session);
+    model.respond([fauxAssistantMessage("", {
+      stopReason: "error",
+      errorMessage: "401 invalid api key; x-ratelimit-reset: 3600",
+    })]);
+    const result = await callDelegate(session, { tasks: [{ prompt: "report" }] });
+    expect(result.isError).toBe(true);
+    expect(result.text).toContain("invalid api key; x-ratelimit-reset: 3600");
+    expect(result.text).toMatch(/authentication problem/i);
+    expect(result.text).not.toMatch(/reported reset window/i);
+    expect(model.state.callCount).toBe(1);
+  });
+
   test("short rate limit can retry, but exhausted quota is not misreported as temporary", async () => {
     session = await openDelegateBoundary();
     const model = await installSubagentModel(session);

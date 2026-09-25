@@ -65,7 +65,9 @@ copy its fixtures, mocks, call graph, or intermediate assertions.
   cancellation with missing outcomes, invalid storage that does not block
   sync dispatch/session RPC, failed writes after launch, and orderly shutdown;
   `tests/contract/provider-limits.test.ts` proves the provider-call
-  counts and guidance for reset headers, timed 403 limits, and short limits.
+  counts and guidance for reset headers, timed 403 limits (including
+  `rate_limit_exceeded`), explicit credential failures despite incidental
+  reset headers, and short limits.
   `tests/regression/failure-propagation.test.ts` retains the v1
   no-whole-task-retry scenario but replaces its model-swap expectation
   with the new account-limit contract.
