@@ -493,10 +493,24 @@ export class DispatchCoordinator {
       // worker, session, or slot; cancellation supersedes the block.
       if (task.dependsOn.length > 0) {
         for (const depIndex of task.dependsOn) {
-          await Promise.race([
-            quiescence.get(depIndex)?.promise ?? Promise.resolve(),
-            onAbort(signal),
-          ]);
+          // A recorded quarantined outcome is provisional but already
+          // decided for this gate: it exists only after cancellation was
+          // requested, and a worker truth after cancellation is never a
+          // success — while its confirmed quiescence may never arrive.
+          // Waiting on it would park the dependent (and the batch's
+          // Promise.all) on a worker that may still be mutating; skip the
+          // wait and let the gate below record the block with its reason.
+          const recorded = outcomes[depIndex];
+          const unsatisfiable =
+            recorded !== undefined &&
+            recorded.quarantined === true &&
+            !prerequisiteSatisfied(recorded, tasks[depIndex]!);
+          if (!unsatisfiable) {
+            await Promise.race([
+              quiescence.get(depIndex)?.promise ?? Promise.resolve(),
+              onAbort(signal),
+            ]);
+          }
           if (signal.aborted) {
             record({ index: task.index, id: task.id, status: "cancelled", retries: 0 });
             return;

@@ -316,6 +316,135 @@ test(
 );
 
 test(
+  "a dependent of a quarantined prerequisite blocks immediately instead of parking on unconfirmed quiescence",
+  async () => {
+    // The dependency gate waits for confirmed quiescence so a provisional
+    // outcome can never unblock downstream work — but a quarantined
+    // outcome only exists after cancellation was requested, and a worker
+    // truth after cancellation is never a success. Waiting on quiescence
+    // that may never arrive would park the whole batch on a worker that
+    // may still be mutating.
+    session = await openDelegateBoundary();
+    const subagents = await installSubagentModel(session);
+
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const gated: FauxResponseFactory = async () => {
+      await gate;
+      return fauxAssistantMessage("TOO-LATE");
+    };
+    subagents.respond([gated, fauxAssistantMessage("AFTER-QUARANTINE")]);
+
+    // The prerequisite's deadline fires while its provider call is gated:
+    // it records a quarantined failure while the worker may still run.
+    // The dependent must block off that record — not wait on quiescence.
+    const result = await callDelegate(session, {
+      tasks: [
+        { id: "stuck", prompt: "hang", tools: ["write"], deadlineMs: 500 },
+        {
+          id: "dependent",
+          prompt: "never runs",
+          tools: ["read"],
+          dependsOn: ["stuck"],
+        },
+      ],
+    });
+
+    // The call returned while the worker is still gated; the dependent
+    // consumed no worker and carries a visible, named block.
+    expect(subagents.state.callCount).toBe(1);
+    expect(result.text).toMatch(/blocked/i);
+    expect(result.text).toMatch(/stuck/);
+
+    // The abandoned worker's write scope stays reserved — the block did
+    // not make its quarantined resources eligible for reuse.
+    const rejected = await callDelegate(session, {
+      tasks: [{ prompt: "conflict", tools: ["write"] }],
+    });
+    expect(rejected.isError).toBe(true);
+
+    release();
+    const admitted = await dispatchUntilAdmitted(session, {
+      tasks: [{ prompt: "after", tools: ["write"] }],
+    });
+    expect(admitted.isError).toBe(false);
+    expect(admitted.text).toContain("AFTER-QUARANTINE");
+  },
+);
+
+test(
+  "a later-phase shared writer waits for an earlier overlapping writer's confirmed quiescence",
+  async () => {
+    // The phase boundary awaits recorded outcomes, not confirmed
+    // quiescence: without a cross-phase predecessor edge, a phase-1
+    // writer could start while a quarantined phase-0 writer still
+    // mutates the shared root.
+    session = await openDelegateBoundary();
+    const subagents = await installSubagentModel(session);
+
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let secondStarted = false;
+    const turn: FauxResponseFactory = async (context) => {
+      const messages = JSON.stringify(context.messages);
+      if (messages.includes("stuck writer")) {
+        await gate;
+        return fauxAssistantMessage("TOO-LATE");
+      }
+      if (messages.includes("second writer")) {
+        secondStarted = true;
+        return fauxAssistantMessage("SECOND-DONE");
+      }
+      return fauxAssistantMessage("PREREQ-DONE");
+    };
+    subagents.respond([turn, turn, turn]);
+
+    const dispatched = await callDelegate(session, {
+      tasks: [
+        {
+          id: "stuck",
+          prompt: "stuck writer",
+          tools: ["write"],
+          deadlineMs: 500,
+        },
+        { id: "prereq", prompt: "quick read", tools: ["read"] },
+        {
+          id: "second",
+          prompt: "second writer",
+          tools: ["write"],
+          dependsOn: ["prereq"],
+        },
+      ],
+      async: true,
+    });
+    const ticket = ticketIdOf(dispatched.text);
+
+    // Phase 0's provider calls are both in flight; let the deadline fire
+    // and phase 1 begin. The second writer must stay parked on the stuck
+    // writer's confirmed quiescence — no provider call while it is gated.
+    const deadline = Date.now() + 5000;
+    while (subagents.state.callCount < 2 && Date.now() < deadline) {
+      await new Promise((r) => setImmediate(r));
+    }
+    expect(subagents.state.callCount).toBe(2);
+    await new Promise((r) => setTimeout(r, 900));
+    expect(subagents.state.callCount).toBe(2);
+    expect(secondStarted).toBe(false);
+
+    // Confirmed quiescence frees the successor, which then runs to ok.
+    release();
+    const settled = await callDelegate(session, {
+      ticketAction: "wait",
+      ticket,
+      timeoutMs: 5000,
+    });
+    expect(settled.isError).toBe(false);
+    expect(subagents.state.callCount).toBe(3);
+    expect(secondStarted).toBe(true);
+  },
+);
+
+test(
   "a parent abort during an in-flight sync dispatch settles as a cancellation, not a deadline or a hang",
   async () => {
     // v1 evidence: caller-abort regressions — the parent's abort reaches the

@@ -136,7 +136,9 @@ use any design that makes these properties true and testable.
   predecessor failure MUST still allow its successor to run. Serialization
   MUST NOT consume scarce execution capacity while no task can execute.
 - Overlap with another active sync/async dispatch or quarantined task MUST
-  reject, not queue. Shared/isolated overlap MUST reject.
+  reject, not queue. Shared/isolated overlap MUST reject — except within
+  one call whose dependency graph orders every overlapping pair (see
+  "Dependencies and handoffs").
 - Inherited Git redirection with bash-capable multiple writers MUST fail closed.
 - V2 ships no unsafe-write bypass: no operator or caller setting may skip
   admission. Reintroducing one is a contract change, not a restoration.

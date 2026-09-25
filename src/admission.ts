@@ -154,25 +154,25 @@ export class AdmissionController {
           );
         }
       }
-      // Same-call shared writers serialize in task order — but only
-      // within a dependency phase. A predecessor edge to a later-phase
-      // task would deadlock the phase loop (the earlier phase cannot
-      // finish while it waits on a task that has not started), and a
-      // cross-phase pair is already serialized by the phase boundary
-      // itself, so the edge buys nothing either way.
-      if (group[0]!.workspace === "shared" && group.length > 1) {
-        const byPhase = new Map<number, number[]>();
-        for (const task of group) {
-          byPhase.set(task.phase, [...(byPhase.get(task.phase) ?? []), task.index]);
-        }
-        for (const members of byPhase.values()) {
-          for (let i = 1; i < members.length; i++) {
-            predecessors.set(members[i]!, members[i - 1]!);
-          }
+      // Same-call shared writers serialize in task order, chaining
+      // consecutive writers in (phase, index) order — including across
+      // phases. The phase boundary awaits recorded outcomes, not
+      // confirmed quiescence, so without a cross-phase edge a later-phase
+      // writer could start while an earlier quarantined writer still
+      // mutates the root. The sort keeps every predecessor in the same
+      // or an earlier phase, so an edge never points at a task whose
+      // phase has not started — that direction would deadlock the loop.
+      const writers = group.filter((task) => task.workspace === "shared");
+      if (writers.length > 1) {
+        const ordered = [...writers].sort(
+          (a, b) => a.phase - b.phase || a.index - b.index,
+        );
+        for (let i = 1; i < ordered.length; i++) {
+          predecessors.set(ordered[i]!.index, ordered[i - 1]!.index);
         }
         serialized.push({
-          tasks: group.map((task) => task.index),
-          roots: [...new Set(group.flatMap((task) => task.writeRoots!))],
+          tasks: ordered.map((task) => task.index),
+          roots: [...new Set(ordered.flatMap((task) => task.writeRoots!))],
         });
       }
     }

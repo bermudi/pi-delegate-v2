@@ -518,16 +518,19 @@ New v2 contract — no v1 evidence; the dependency graph is an additive
   phase-late so dependents see earlier applied changes; same-call
   shared/isolated overlap is admitted only when the graph orders every
   overlapping pair. Live tests in `tests/contract/dependencies.test.ts`.
-- **Regression:** a serialization predecessor edge from an earlier-phase
-  task to a later-phase one deadlocked the phase loop — same-phase pairs
-  still chain, cross-phase pairs rely on the phase boundary
-  (`admission.ts`).
+- **Regression:** predecessor edges chain writers in (phase, index)
+  order — never pointing at a later-phase task, which would deadlock
+  the phase loop — because the phase boundary awaits recorded outcomes,
+  not confirmed quiescence (`admission.ts`); a dependent of a
+  quarantined prerequisite blocks without waiting on quiescence that
+  may never arrive, since a post-cancellation worker truth can never
+  satisfy the gate (`coordinator.ts`). Live tests in
+  `tests/regression/cancellation.test.ts`.
 - **Internal:** graph resolution/phasing helpers (`graph.ts`) — not
   boundary-tested directly.
 - **Gap:** blocked outcomes under `async` tickets poll/delivery views;
   cancellation racing a dep gate (superseded paths asserted by code
-  review); a quarantined prerequisite unblocking a dependent on late
-  worker truth.
+  review).
 
 ## First tranche
 
