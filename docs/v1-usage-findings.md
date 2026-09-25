@@ -139,9 +139,9 @@ no downstream failures — a design that worked.
 
 ## Behavioral findings
 
-- **Models don't poll tickets.** 143 modern async dispatches; only 67 were
-  ever followed by a `ticketAction`. Of the 46 never managed, 78% were
-  *not* session-end fire-and-forget — the model moved on. v1's
+- **Models don't poll tickets.** 143 modern async dispatches; 97 were
+  ever followed by a `ticketAction`, 46 never were. Of the 46 never managed,
+  78% were *not* session-end fire-and-forget — the model moved on. v1's
   auto-delivery carried the load; v2 must not depend on models polling.
 - Control usage (modern): `wait` 63 > `poll` 29 > `cancel` 2 >
   `sessionAction:list` 19. **`pause`, `resume`, `sessionAction:close`: zero

@@ -124,6 +124,16 @@ interface FieldRule {
     readonly missingMessage?: string;
   };
   /**
+   * Value-shape companion to `onlyWith`: when the selector matches, a
+   * carried string that is empty or whitespace-only fails the requirement
+   * with `missingMessage`, exactly like an absent field. The published
+   * schema's `minLength: 1` stops empty strings at the tool boundary, so
+   * this row is what catches whitespace (which minLength passes) and
+   * shields direct `validateCall` callers — same defense-in-depth stance
+   * as the `sessionId` row's stricter check.
+   */
+  readonly blankIsMissing?: true;
+  /**
    * Inverted requirement: when the owning selector is present with any value
    * but `unless`, the field must be carried.
    */
@@ -214,7 +224,7 @@ const FIELD_RULES: Record<keyof RawArguments, FieldRule> = {
     onlyWith: { value: "answer", forbiddenMessage: `questionId is valid only with ticketAction "answer".`, missingMessage: `ticketAction "answer" requires questionId.` },
   },
   answer: {
-    mode: "ticket", carried: carriedWhenDefined("answer"), signalsIntent: true,
+    mode: "ticket", carried: carriedWhenDefined("answer"), signalsIntent: true, blankIsMissing: true,
     detached: `answer requires ticketAction "answer".`,
     foreign: { session: `answer is valid only with ticketAction "answer".`, dispatch: `answer is valid only with ticketAction "answer".` },
     onlyWith: { value: "answer", forbiddenMessage: `answer is valid only with ticketAction "answer".`, missingMessage: `ticketAction "answer" requires a nonempty answer.` },
@@ -312,6 +322,11 @@ function rejectForeignFields(mode: SelectorMode, args: RawArguments): void {
   }
 }
 
+/** Empty or whitespace-only string; presence-shaped requirements treat it as absent. */
+function isBlank(value: unknown): boolean {
+  return typeof value === "string" && value.trim() === "";
+}
+
 /**
  * Enforce the owning mode's carry rules in two passes — conditional carries,
  * then requirements — so a multi-violation input names the conditional
@@ -322,11 +337,15 @@ function enforceCarryRules(
   selector: string,
   args: RawArguments,
 ): void {
-  for (const rule of Object.values(FIELD_RULES)) {
+  for (const [name, rule] of Object.entries(FIELD_RULES)) {
     if (rule.mode !== mode || rule.onlyWith === undefined) continue;
     const { value, forbiddenMessage, missingMessage } = rule.onlyWith;
     if (selector === value) {
-      if (!rule.carried(args) && missingMessage !== undefined) {
+      if (
+        missingMessage !== undefined &&
+        (!rule.carried(args) ||
+          (rule.blankIsMissing === true && isBlank(args[name as keyof RawArguments])))
+      ) {
         fail(missingMessage);
       }
     } else if (rule.carried(args)) {

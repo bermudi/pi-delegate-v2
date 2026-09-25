@@ -147,10 +147,19 @@ describe("async worker questions (#17)", () => {
       { ticketAction: "answer", ticket: "missing", taskId: "t", questionId: "q" },
       { ticketAction: "poll", ticket: "missing", answer: "oops" },
       { tasks: [{ prompt: "no start" }], answer: "oops" },
+      // Empty string: stopped by the schema's minLength before execute.
       { ticketAction: "answer", ticket: "missing", taskId: "t", questionId: "q", answer: "" },
     ]) {
       expect((await callDelegate(session, args)).isError).toBe(true);
     }
+    // Whitespace passes minLength, so only validateCall can stop it — and
+    // the bogus ticket id proves it does: validation runs before lookup,
+    // and the error names the answer field rather than the ticket.
+    const blank = await callDelegate(session, {
+      ticketAction: "answer", ticket: "missing", taskId: "t", questionId: "q", answer: "   ",
+    });
+    expect(blank.isError).toBe(true);
+    expect(blank.text).toContain('ticketAction "answer" requires a nonempty answer');
     expect(model.state.callCount).toBe(0);
   });
 
