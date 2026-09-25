@@ -18,6 +18,7 @@ import {
   objectOf,
   openDelegateBoundary,
   ticketIdOf,
+  callDelegateTicket,
 } from "../support/pi-boundary.ts";
 
 function gate() {
@@ -117,13 +118,13 @@ describe("async result delivery", () => {
           .slice(before)
           .some((m) => m.role === "assistant"),
       ).toBe(true);
-      const poll = await callDelegate(session, {
-        ticketAction: "poll",
+      const poll = await callDelegateTicket(session, {
+        action: "poll",
         ticket,
       });
       expect(poll.text).toContain("DELIVERED-OUTPUT");
-      await callDelegate(session, {
-        ticketAction: "cancel",
+      await callDelegateTicket(session, {
+        action: "cancel",
         ticket,
         force: true,
       });
@@ -189,8 +190,8 @@ describe("async result delivery", () => {
     // unconfirmed. The faux gate ignores abort signals, so the worker stays
     // unquiesced until release — that is what makes the hold observable.
     const { host, blocked, sends, ticket } = await setup();
-    const waiting = callDelegate(session, {
-      ticketAction: "wait",
+    const waiting = callDelegateTicket(session, {
+      action: "wait",
       ticket,
       timeoutMs: 5000,
     });
@@ -202,7 +203,7 @@ describe("async result delivery", () => {
         shutdownSettled = true;
       });
     expect((await waiting).text).toContain("cancelled");
-    const poll = await callDelegate(session, { ticketAction: "poll", ticket });
+    const poll = await callDelegateTicket(session, { action: "poll", ticket });
     expect(poll.text).toContain("cancelled");
     await Bun.sleep(50);
     expect(shutdownSettled).toBe(false);
@@ -260,8 +261,8 @@ describe("async result delivery", () => {
     const deadline = Date.now() + 2000;
     let lastPoll = "";
     while (Date.now() < deadline) {
-      const poll = await callDelegate(session, {
-        ticketAction: "poll",
+      const poll = await callDelegateTicket(session, {
+        action: "poll",
         ticket,
       });
       lastPoll = poll.text;
@@ -285,7 +286,7 @@ describe("async result delivery", () => {
       reason: "quit",
     });
     await shutdown;
-    const poll = await callDelegate(session, { ticketAction: "poll", ticket });
+    const poll = await callDelegateTicket(session, { action: "poll", ticket });
     expect(poll.text).toMatch(/INTEGRATION: (retained|applied_unverified)/);
   });
 
@@ -303,7 +304,7 @@ describe("async result delivery", () => {
     });
     expect(dispatched.isError).toBe(true);
     expect(dispatched.text).toContain("shutting down");
-    const poll = await callDelegate(session, { ticketAction: "poll" });
+    const poll = await callDelegateTicket(session, { action: "poll" });
     expect(poll.isError).toBe(false);
     expect(poll.text).toContain("No tickets");
   });
@@ -330,8 +331,8 @@ describe("async result delivery", () => {
             args.join(" ").includes("delivery-test-failure"),
           ),
         );
-        const poll = await callDelegate(session, {
-          ticketAction: "poll",
+        const poll = await callDelegateTicket(session, {
+          action: "poll",
           ticket,
         });
         expect(poll.text).toContain("completed");
@@ -348,8 +349,8 @@ describe("async result delivery", () => {
     // INVARIANTS: terminal cancellation is idempotent, quarantine is not
     // cleanup; the delivered view is honest about pending worker cleanup.
     const { host, blocked, sends, ticket } = await setup();
-    const cancelled = await callDelegate(session, {
-      ticketAction: "cancel",
+    const cancelled = await callDelegateTicket(session, {
+      action: "cancel",
       ticket,
       force: true,
     });
@@ -365,7 +366,7 @@ describe("async result delivery", () => {
     expect(content).not.toContain("DELIVERED-OUTPUT");
     blocked.release();
     await Bun.sleep(100);
-    const poll = await callDelegate(session, { ticketAction: "poll", ticket });
+    const poll = await callDelegateTicket(session, { action: "poll", ticket });
     expect(poll.text).toContain("cancelled");
     expect(sends).toHaveBeenCalledTimes(1);
   });
@@ -383,12 +384,12 @@ describe("async result delivery", () => {
       async: true,
     });
     const ticket = ticketIdOf(dispatch.text);
-    await callDelegate(session, { ticketAction: "pause", ticket });
+    await callDelegateTicket(session, { action: "pause", ticket });
     blocked.release();
     await Bun.sleep(100);
     expect(sends).not.toHaveBeenCalled();
     expect(model.state.callCount).toBe(1);
-    await callDelegate(session, { ticketAction: "resume", ticket });
+    await callDelegateTicket(session, { action: "resume", ticket });
     await until(() => sends.mock.calls.length === 1);
     await host.agent.waitForIdle();
     expect(String(sends.mock.calls[0]![0].content)).toContain("SECOND-RESULT");

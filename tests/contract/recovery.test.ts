@@ -4,7 +4,10 @@ import { join } from "node:path";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import { fauxAssistantMessage, type FauxResponseFactory } from "@earendil-works/pi-ai";
 import type { TestSession } from "@marcfargas/pi-test-harness";
-import { callDelegate, installSubagentModel, openDelegateBoundary, ticketIdOf } from "../support/pi-boundary.ts";
+import { callDelegate, installSubagentModel, openDelegateBoundary, ticketIdOf,
+  callDelegateSession,
+  callDelegateTicket,
+} from "../support/pi-boundary.ts";
 
 describe("saved async ticket results (new v2 restart contract, issue #26)", () => {
   const sessions: TestSession[] = [];
@@ -28,18 +31,18 @@ describe("saved async ticket results (new v2 restart contract, issue #26)", () =
       tasks: [{ prompt: "provide a report" }], async: true,
     });
     const ticket = ticketIdOf(dispatched.text);
-    await callDelegate(first, { ticketAction: "wait", ticket, timeoutMs: 5000 });
+    await callDelegateTicket(first, { action: "wait", ticket, timeoutMs: 5000 });
 
     const next = await openAt(first.cwd);
-    const polled = await callDelegate(next, { ticketAction: "poll", ticket });
+    const polled = await callDelegateTicket(next, { action: "poll", ticket });
     expect(polled.isError).toBe(false);
     expect(polled.text).toContain("completed");
     expect(polled.text).toContain("SAVED-OUTPUT");
-    expect((await callDelegate(next, { ticketAction: "wait", ticket, timeoutMs: 10 })).text)
+    expect((await callDelegateTicket(next, { action: "wait", ticket, timeoutMs: 10 })).text)
       .toContain("SAVED-OUTPUT");
-    expect((await callDelegate(next, { ticketAction: "poll" })).text).toContain(ticket);
-    expect((await callDelegate(next, { ticketAction: "resume", ticket })).isError).toBe(true);
-    expect((await callDelegate(next, { ticketAction: "answer", ticket, taskId: "task-1", questionId: "q-1", answer: "x" })).isError).toBe(true);
+    expect((await callDelegateTicket(next, { action: "poll" })).text).toContain(ticket);
+    expect((await callDelegateTicket(next, { action: "resume", ticket })).isError).toBe(true);
+    expect((await callDelegateTicket(next, { action: "answer", ticket, taskId: "task-1", questionId: "q-1", answer: "x" })).isError).toBe(true);
     const disk = statSync(join(first.cwd, "delegate-tickets", `${ticket}.json`));
     expect(disk.mode & 0o077).toBe(0);
     expect(statSync(join(first.cwd, "delegate-tickets")).mode & 0o077).toBe(0);
@@ -71,14 +74,14 @@ describe("saved async ticket results (new v2 restart contract, issue #26)", () =
       // A fresh extension reading the on-disk snapshot models a cold start.
       // It cannot adopt the old instance's live worker.
       const next = await openAt(first.cwd);
-      const poll = await callDelegate(next, { ticketAction: "poll", ticket });
+      const poll = await callDelegateTicket(next, { action: "poll", ticket });
       expect(poll.text).toContain("interrupted");
       expect(poll.text).toContain("COMPLETED-FIRST");
       expect(poll.text).not.toContain("LATE-OUTPUT");
       expect(poll.text).toMatch(/unknown|may have changed/i);
-      const again = await callDelegate(next, { ticketAction: "wait", ticket, timeoutMs: 10 });
+      const again = await callDelegateTicket(next, { action: "wait", ticket, timeoutMs: 10 });
       expect(again.text).toContain("interrupted");
-      const cancel = await callDelegate(next, { ticketAction: "cancel", ticket, force: true });
+      const cancel = await callDelegateTicket(next, { action: "cancel", ticket, force: true });
       expect(cancel.isError).toBe(true);
       expect(cancel.text).toMatch(/recovered interrupted/i);
     } finally {
@@ -94,7 +97,7 @@ describe("saved async ticket results (new v2 restart contract, issue #26)", () =
     mkdirSync(dir, { mode: 0o700 });
     chmodSync(dir, 0o755);
     try {
-      expect((await callDelegate(first, { sessionAction: "list" })).isError).toBe(false);
+      expect((await callDelegateSession(first, { action: "list" })).isError).toBe(false);
       const sync = await callDelegate(first, { tasks: [{ prompt: "sync works" }] });
       expect(sync.isError).toBe(false);
       expect(sync.text).toContain("SHOULD-NOT-RUN");
@@ -110,11 +113,11 @@ describe("saved async ticket results (new v2 restart contract, issue #26)", () =
     const next = await openAt(first.cwd);
     const nextModel = await installSubagentModel(next);
     nextModel.respond([fauxAssistantMessage("SYNC-AFTER-CORRUPTION")]);
-    expect((await callDelegate(next, { sessionAction: "list" })).isError).toBe(false);
+    expect((await callDelegateSession(next, { action: "list" })).isError).toBe(false);
     const sync = await callDelegate(next, { tasks: [{ prompt: "sync despite corrupt journal" }] });
     expect(sync.isError).toBe(false);
     expect(sync.text).toContain("SYNC-AFTER-CORRUPTION");
-    const corrupt = await callDelegate(next, { ticketAction: "poll" });
+    const corrupt = await callDelegateTicket(next, { action: "poll" });
     expect(corrupt.isError).toBe(true);
     expect(corrupt.text).toMatch(/recover ticket|invalid or unsupported/i);
     const asyncCall = await callDelegate(next, { tasks: [{ prompt: "do not run" }], async: true });
@@ -140,7 +143,7 @@ describe("saved async ticket results (new v2 restart contract, issue #26)", () =
       });
       const ticket = ticketIdOf(dispatched.text);
       await entered;
-      const cancelled = await callDelegate(first, { ticketAction: "cancel", ticket, force: true });
+      const cancelled = await callDelegateTicket(first, { action: "cancel", ticket, force: true });
       expect(cancelled.isError).toBe(false);
       // Model a crash after the terminal status was saved but before the
       // provisional outcome: the live coordinator can race to record it.
@@ -150,12 +153,12 @@ describe("saved async ticket results (new v2 restart contract, issue #26)", () =
       saved.outcomes[0] = null;
       writeFileSync(path, JSON.stringify(saved));
       const next = await openAt(first.cwd);
-      const polled = await callDelegate(next, { ticketAction: "poll", ticket });
+      const polled = await callDelegateTicket(next, { action: "poll", ticket });
       expect(polled.text).toContain(`Ticket "${ticket}": cancelled`);
       expect(polled.text).toMatch(/effects are unknown|may have changed/i);
-      expect((await callDelegate(next, { ticketAction: "wait", ticket })).text)
+      expect((await callDelegateTicket(next, { action: "wait", ticket })).text)
         .toMatch(/effects are unknown|may have changed/i);
-      expect((await callDelegate(next, { ticketAction: "poll" })).text)
+      expect((await callDelegateTicket(next, { action: "poll" })).text)
         .toMatch(/effects are unknown|may have changed/i);
     } finally {
       release?.();
@@ -180,7 +183,7 @@ describe("saved async ticket results (new v2 restart contract, issue #26)", () =
       });
       const ticket = ticketIdOf(dispatched.text);
       await entered;
-      await callDelegate(first, { ticketAction: "cancel", ticket, force: true });
+      await callDelegateTicket(first, { action: "cancel", ticket, force: true });
       // The caller-visible provisional outcome is saved before the worker
       // necessarily stops. Read the snapshot through a cold public boundary.
       const path = join(first.cwd, "delegate-tickets", `${ticket}.json`);
@@ -192,11 +195,11 @@ describe("saved async ticket results (new v2 restart contract, issue #26)", () =
       }
       expect(saved?.outcomes[0]?.quarantined).toBe(true);
       const next = await openAt(first.cwd);
-      const roster = await callDelegate(next, { ticketAction: "poll" });
+      const roster = await callDelegateTicket(next, { action: "poll" });
       expect(roster.text).toContain(ticket);
       expect(roster.text).toMatch(/termination was unconfirmed|may still have changed/i);
       expect(roster.text).toMatch(/inspect the workspace before new writes/i);
-      expect((await callDelegate(next, { ticketAction: "poll", ticket })).text)
+      expect((await callDelegateTicket(next, { action: "poll", ticket })).text)
         .toMatch(/termination was unconfirmed/i);
     } finally {
       release?.();
@@ -217,14 +220,14 @@ describe("saved async ticket results (new v2 restart contract, issue #26)", () =
     chmodSync(dir, 0o500);
     try {
       release();
-      const live = await callDelegate(first, { ticketAction: "wait", ticket, timeoutMs: 5000 });
+      const live = await callDelegateTicket(first, { action: "wait", ticket, timeoutMs: 5000 });
       expect(live.text).toContain("LIVE-ONLY-OUTPUT");
       expect(live.text).toMatch(/recovery save failed/i);
     } finally {
       chmodSync(dir, 0o700);
     }
     const next = await openAt(first.cwd);
-    const recovered = await callDelegate(next, { ticketAction: "poll", ticket });
+    const recovered = await callDelegateTicket(next, { action: "poll", ticket });
     expect(recovered.text).toContain("interrupted");
     expect(recovered.text).not.toContain("LIVE-ONLY-OUTPUT");
   });
@@ -246,7 +249,7 @@ describe("saved async ticket results (new v2 restart contract, issue #26)", () =
       release();
       await shutdown;
       const next = await openAt(first.cwd);
-      const poll = await callDelegate(next, { ticketAction: "poll", ticket });
+      const poll = await callDelegateTicket(next, { action: "poll", ticket });
       expect(poll.text).toContain(`Ticket "${ticket}": cancelled`);
       expect(poll.text).not.toContain(`Ticket "${ticket}": interrupted`);
     } finally {

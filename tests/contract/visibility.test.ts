@@ -10,6 +10,7 @@ import {
   installSubagentModel,
   openDelegateBoundary,
   ticketIdOf,
+  callDelegateTicket,
 } from "../support/pi-boundary.ts";
 
 /**
@@ -94,7 +95,7 @@ describe("delegate visibility signals", () => {
     const ticket = ticketIdOf(dispatched.text);
 
     // Each turn settling with the ticket live must warn exactly once total.
-    await callDelegate(session, { ticketAction: "poll", ticket });
+    await callDelegateTicket(session, { action: "poll", ticket });
     const warnings = notifies(session).filter((n) =>
       /still running/.test(n.message),
     );
@@ -103,7 +104,7 @@ describe("delegate visibility signals", () => {
     expect(warnings[0]!.type).toBe("warning");
 
     release();
-    await callDelegate(session, { ticketAction: "wait", ticket, timeoutMs: 5000 });
+    await callDelegateTicket(session, { action: "wait", ticket, timeoutMs: 5000 });
     expect(
       notifies(session).filter((n) => /still running/.test(n.message)),
     ).toHaveLength(1);
@@ -135,13 +136,13 @@ describe("delegate visibility signals", () => {
     );
 
     g1.release();
-    await callDelegate(session, { ticketAction: "wait", ticket: t1, timeoutMs: 5000 });
+    await callDelegateTicket(session, { action: "wait", ticket: t1, timeoutMs: 5000 });
     expect(
       statusTexts(session).some((t) => t === `⏳ 1 subagent(s) · ${t2} · /subagents`),
     ).toBe(true);
 
     g2.release();
-    await callDelegate(session, { ticketAction: "wait", ticket: t2, timeoutMs: 5000 });
+    await callDelegateTicket(session, { action: "wait", ticket: t2, timeoutMs: 5000 });
     expect(statusTexts(session).at(-1)).toBeUndefined();
   });
 
@@ -164,8 +165,8 @@ describe("delegate visibility signals", () => {
     expect(running).toContain("/subagents");
 
     release();
-    const waited = await callDelegate(session, {
-      ticketAction: "wait",
+    const waited = await callDelegateTicket(session, {
+      action: "wait",
       ticket,
       timeoutMs: 5000,
     });
@@ -187,8 +188,8 @@ describe("delegate visibility signals", () => {
     });
     const ticket = ticketIdOf(dispatched.text);
 
-    const paused = await callDelegate(session, {
-      ticketAction: "pause",
+    const paused = await callDelegateTicket(session, {
+      action: "pause",
       ticket,
     });
     expect(paused.isError).toBe(false);
@@ -197,8 +198,8 @@ describe("delegate visibility signals", () => {
       texts.some((t) => t?.includes("Ⅱ") && t.includes(ticket) && t.includes("paused")),
     ).toBe(true);
 
-    const resumed = await callDelegate(session, {
-      ticketAction: "resume",
+    const resumed = await callDelegateTicket(session, {
+      action: "resume",
       ticket,
     });
     expect(resumed.isError).toBe(false);
@@ -207,7 +208,7 @@ describe("delegate visibility signals", () => {
     ).toBe(true);
 
     release();
-    await callDelegate(session, { ticketAction: "wait", ticket, timeoutMs: 5000 });
+    await callDelegateTicket(session, { action: "wait", ticket, timeoutMs: 5000 });
   });
 
   test("tree guard: dismissal stays on the branch and keeps work running", async () => {
@@ -246,8 +247,8 @@ describe("delegate visibility signals", () => {
     ]);
     // Staying left the work untouched: the ticket runs on and the footer
     // still names it.
-    const held = await callDelegate(session, {
-      ticketAction: "poll",
+    const held = await callDelegateTicket(session, {
+      action: "poll",
       ticket,
     });
     expect(held.text).toContain("running");
@@ -257,7 +258,7 @@ describe("delegate visibility signals", () => {
     expect(footer).toContain(ticket);
 
     release();
-    await callDelegate(session, { ticketAction: "wait", ticket, timeoutMs: 5000 });
+    await callDelegateTicket(session, { action: "wait", ticket, timeoutMs: 5000 });
   });
 
   test("tree guard: the cancel choice kills the work and navigates", async () => {
@@ -286,14 +287,14 @@ describe("delegate visibility signals", () => {
     const navigation = await host.navigateTree(target.id);
 
     expect(navigation.cancelled).toBe(false);
-    const poll = await callDelegate(session, {
-      ticketAction: "poll",
+    const poll = await callDelegateTicket(session, {
+      action: "poll",
       ticket,
     });
     expect(poll.text).toContain("cancelled");
     expect(statusTexts(session).at(-1)).toBeUndefined();
 
     release();
-    await callDelegate(session, { ticketAction: "wait", ticket, timeoutMs: 5000 });
+    await callDelegateTicket(session, { action: "wait", ticket, timeoutMs: 5000 });
   });
 });

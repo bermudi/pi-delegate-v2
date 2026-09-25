@@ -2,6 +2,8 @@ import { afterEach, describe, expect, test } from "bun:test";
 import type { TestSession } from "@marcfargas/pi-test-harness";
 import {
   callDelegate,
+  callDelegateSession,
+  callDelegateTicket,
   openDelegateBoundary,
 } from "../support/pi-boundary.ts";
 
@@ -21,6 +23,22 @@ describe("delegate validation contract", () => {
     return callDelegate(session, arguments_);
   }
 
+  async function callTicket(
+    arguments_: Record<string, unknown>,
+  ): Promise<{ readonly text: string; readonly isError: boolean }> {
+    session?.dispose();
+    session = await openDelegateBoundary();
+    return callDelegateTicket(session, arguments_);
+  }
+
+  async function callSession(
+    arguments_: Record<string, unknown>,
+  ): Promise<{ readonly text: string; readonly isError: boolean }> {
+    session?.dispose();
+    session = await openDelegateBoundary();
+    return callDelegateSession(session, arguments_);
+  }
+
   // ── Schema-level rejections (enforced at the boundary today) ────────────
 
   test("rejects values outside the closed enums", async () => {
@@ -29,13 +47,17 @@ describe("delegate validation contract", () => {
     for (const arguments_ of [
       { tasks: [{ prompt: "x", workspace: "none" }] },
       { tasks: [{ prompt: "x", thinking: "ultra" }] },
-      { ticketAction: "explode" },
-      { sessionAction: "restart" },
     ]) {
       const result = await call(arguments_);
       expect(result.isError).toBe(true);
       expect(result.text).toContain("Validation failed");
     }
+    const ticketResult = await callTicket({ action: "explode" });
+    expect(ticketResult.isError).toBe(true);
+    expect(ticketResult.text).toContain("Validation failed");
+    const sessionResult = await callSession({ action: "restart" });
+    expect(sessionResult.isError).toBe(true);
+    expect(sessionResult.text).toContain("Validation failed");
   });
 
   test("rejects task-level control fields instead of silently degrading", async () => {
@@ -45,13 +67,20 @@ describe("delegate validation contract", () => {
       { tasks: [{ prompt: "x", async: true }] },
       { tasks: [{ prompt: "x", sessionAction: "close" }] },
       { tasks: [{ prompt: "x", unsafeSharedWrites: true }] },
-      { action: "poll", tasks: [{ prompt: "x" }] },
     ]) {
       const result = await call(arguments_);
       expect(result.isError).toBe(true);
       expect(result.text).toContain("Validation failed");
       expect(result.text).not.toContain("dispatch is not implemented");
     }
+    // A dispatch-shaped call to delegate_ticket gets cross-tool guidance,
+    // never a silent degradation.
+    const guidance = await callTicket({
+      action: "poll",
+      tasks: [{ prompt: "x" }],
+    });
+    expect(guidance.isError).toBe(true);
+    expect(guidance.text).toContain("delegate(");
   });
 
   test("rejects task ids outside the correlation-key charset", async () => {
@@ -98,13 +127,15 @@ describe("delegate validation contract", () => {
     },
   );
 
-  test("rejects an empty sessionId with an actionable error", async () => {
+  test("a blank task sessionId is treated as absent and runs one-shot", async () => {
+    // Blank optional identifiers mean "not given" at the boundary: this
+    // task dispatches with no session instead of failing.
     session = await openDelegateBoundary();
     const result = await callDelegate(session, {
       tasks: [{ prompt: "x", sessionId: "" }],
     });
-    expect(result.isError).toBe(true);
-    expect(result.text).toMatch(/sessionId|non-empty|empty/i);
+    expect(result.text).not.toContain("Validation failed");
+    expect(result.text).not.toMatch(/sessionId must be a non-empty/);
   });
 
   test("rejects non-positive deadlines with an actionable error", async () => {
@@ -143,25 +174,37 @@ describe("delegate validation contract", () => {
   );
 
   test(
-    "rejects mixed-mode calls with an error naming the conflict",
+    "rejects cross-tool field mixes with guidance toward the right tool",
     async () => {
       // v1 evidence: schema.test.ts mode matrix (ticket control combined with
-      // tasks/sessionId/prompt; session precedence over tasks). SPEC: mixing
-      // fields from different modes is an error before any task starts.
-      for (const arguments_ of [
-        { ticketAction: "poll", tasks: [{ prompt: "x" }] },
-        { ticketAction: "wait", ticket: "t1", sessionId: "s1" },
-        { sessionAction: "list", tasks: [{ prompt: "x" }] },
-        { sessionAction: "close", sessionId: "s1", prompt: "x" },
-      ]) {
-        // Fresh session per case: a schema-level rejection never runs
+      // tasks/sessionId/prompt; session precedence over tasks). With the
+      // split tools, foreign fields cannot run: the boundary answers with
+      // guidance naming the sibling tool instead of executing anything.
+      const cases: [
+        (a: Record<string, unknown>) => Promise<{
+          readonly text: string;
+          readonly isError: boolean;
+        }>,
+        Record<string, unknown>,
+        RegExp,
+      ][] = [
+        [call, { ticketAction: "poll", tasks: [{ prompt: "x" }] }, /delegate_ticket/],
+        [call, { ticketAction: "wait", ticket: "t1" }, /delegate_ticket/],
+        [call, { sessionAction: "list", tasks: [{ prompt: "x" }] }, /delegate_session/],
+        [callTicket, { action: "wait", ticket: "t1", sessionId: "s1" }, /delegate_session/],
+        [callTicket, { action: "poll", tasks: [{ prompt: "x" }] }, /delegate\(/],
+        [callSession, { action: "close", sessionId: "s1", prompt: "x" }, /delegate\(/],
+      ];
+      for (const [invoke, arguments_, pattern] of cases) {
+        // Fresh session per case: schema and prepare rejections never run
         // tool.execute, and the harness dedupes the synthesized
         // tool_execution_end record by a playbook toolCallId that repeats
         // across runs on the same session.
-        const result = await call(arguments_);
+        const result = await invoke(arguments_);
         expect(result.isError).toBe(true);
+        expect(result.text).toMatch(pattern);
         expect(result.text).not.toContain("not implemented");
-        expect(result.text).not.toContain("Delegate Tool Manual");
+        expect(result.text).not.toContain("Delegate Manual");
       }
     },
   );
@@ -216,19 +259,16 @@ describe("delegate validation contract", () => {
       // v1 evidence: delegate.test.ts "cancel requires ticket ID",
       // "close sessionAction requires sessionId", "wait requires a ticket ID".
       session = await openDelegateBoundary();
-      const cases: [Record<string, unknown>, RegExp][] = [
-        [{ ticketAction: "cancel" }, /ticket/i],
-        [{ ticketAction: "wait" }, /ticket/i],
-        [{ ticketAction: "pause" }, /ticket/i],
-        [{ ticketAction: "resume" }, /ticket/i],
-        [{ sessionAction: "close" }, /sessionId/i],
-      ];
-      for (const [arguments_, pattern] of cases) {
-        const result = await callDelegate(session, arguments_);
+      for (const action of ["cancel", "wait", "pause", "resume"]) {
+        const result = await callDelegateTicket(session, { action });
         expect(result.isError).toBe(true);
-        expect(result.text).toMatch(pattern);
+        expect(result.text).toMatch(/ticket/i);
         expect(result.text).not.toContain("not implemented");
       }
+      const close = await callDelegateSession(session, { action: "close" });
+      expect(close.isError).toBe(true);
+      expect(close.text).toMatch(/sessionId/i);
+      expect(close.text).not.toContain("not implemented");
     },
   );
 });

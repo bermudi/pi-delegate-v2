@@ -32,10 +32,12 @@ import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import {
   callDelegate,
   callDelegateDetached,
+  callDelegateTicket,
   configureDelegate,
   delegateTool,
   installSubagentModel,
   openDelegateBoundary,
+  registeredTool,
   ticketIdOf,
 } from "../support/pi-boundary.js";
 
@@ -96,8 +98,8 @@ test(
     });
     const ticket = ticketIdOf(dispatched.text);
 
-    const cancelled = await callDelegate(session, {
-      ticketAction: "cancel",
+    const cancelled = await callDelegateTicket(session, {
+      action: "cancel",
       ticket,
       force: true,
     });
@@ -108,8 +110,8 @@ test(
     expect(subagents.state.callCount).toBe(1);
 
     release();
-    const waited = await callDelegate(session, {
-      ticketAction: "wait",
+    const waited = await callDelegateTicket(session, {
+      action: "wait",
       ticket,
       timeoutMs: 5000,
     });
@@ -155,7 +157,7 @@ test(
     });
     const ticket = ticketIdOf(dispatched.text);
 
-    await callDelegate(session, { ticketAction: "pause", ticket });
+    await callDelegateTicket(session, { action: "pause", ticket });
     release();
 
     // Barrier: wait until the tool call has completed, then let the
@@ -167,15 +169,15 @@ test(
     expect(existsSync(marker)).toBe(true);
     await new Promise((r) => setTimeout(r, 30));
 
-    const cancelled = await callDelegate(session, {
-      ticketAction: "cancel",
+    const cancelled = await callDelegateTicket(session, {
+      action: "cancel",
       ticket,
       force: true,
     });
     expect(cancelled.text).toMatch(/cancel/i);
 
-    const waited = await callDelegate(session, {
-      ticketAction: "wait",
+    const waited = await callDelegateTicket(session, {
+      action: "wait",
       ticket,
       timeoutMs: 5000,
     });
@@ -218,8 +220,8 @@ test(
     }
     expect(subagents.state.callCount).toBe(1);
 
-    const cancelled = await callDelegate(session, {
-      ticketAction: "cancel",
+    const cancelled = await callDelegateTicket(session, {
+      action: "cancel",
       ticket,
       force: true,
     });
@@ -238,8 +240,8 @@ test(
     // same dispatch now being admitted. The intervening wait round-trip
     // drains the worker's microtask cascade before this call is admitted.
     release();
-    const settled = await callDelegate(session, {
-      ticketAction: "wait",
+    const settled = await callDelegateTicket(session, {
+      action: "wait",
       ticket,
       timeoutMs: 5000,
     });
@@ -433,8 +435,8 @@ test(
 
     // Confirmed quiescence frees the successor, which then runs to ok.
     release();
-    const settled = await callDelegate(session, {
-      ticketAction: "wait",
+    const settled = await callDelegateTicket(session, {
+      action: "wait",
       ticket,
       timeoutMs: 5000,
     });
@@ -579,16 +581,16 @@ test(
     });
     const ticket = ticketIdOf(dispatched.text);
 
-    const cancelled = await callDelegate(session, {
-      ticketAction: "cancel",
+    const cancelled = await callDelegateTicket(session, {
+      action: "cancel",
       ticket,
       force: true,
     });
     expect(cancelled.text).toMatch(/cancel/i);
 
     release();
-    const waited = await callDelegate(session, {
-      ticketAction: "wait",
+    const waited = await callDelegateTicket(session, {
+      action: "wait",
       ticket,
       timeoutMs: 5000,
     });
@@ -681,7 +683,7 @@ test(
     });
     const ticket = ticketIdOf(dispatched.text);
 
-    await callDelegate(session, { ticketAction: "pause", ticket });
+    await callDelegateTicket(session, { action: "pause", ticket });
     release();
 
     // Wait until the tool call finished and the cascade reached the park.
@@ -696,14 +698,14 @@ test(
     // parked time would already have fired.
     await new Promise((r) => setTimeout(r, 500));
 
-    const resumed = await callDelegate(session, {
-      ticketAction: "resume",
+    const resumed = await callDelegateTicket(session, {
+      action: "resume",
       ticket,
     });
     expect(resumed.isError).toBe(false);
 
-    const settled = await callDelegate(session, {
-      ticketAction: "wait",
+    const settled = await callDelegateTicket(session, {
+      action: "wait",
       ticket,
       timeoutMs: 5000,
     });
@@ -743,16 +745,16 @@ test(
       await new Promise((r) => setImmediate(r));
     }
     expect(subagents.state.callCount).toBe(1);
-    const paused = await callDelegate(session, {
-      ticketAction: "pause",
+    const paused = await callDelegateTicket(session, {
+      action: "pause",
       ticket,
     });
     expect(paused.isError).toBe(false);
 
     // The gated call emits no events: the stall fires even though the
     // ticket is paused, because the worker never reached the park.
-    const settled = await callDelegate(session, {
-      ticketAction: "wait",
+    const settled = await callDelegateTicket(session, {
+      action: "wait",
       ticket,
       timeoutMs: 5000,
     });
@@ -942,8 +944,8 @@ test(
       ]);
       expect(dispatched.text).toContain("Ticket");
       const ticket = ticketIdOf(dispatched.text);
-      const poll = await callDelegate(session, {
-        ticketAction: "poll",
+      const poll = await callDelegateTicket(session, {
+        action: "poll",
         ticket,
       });
       expect(poll.text).toContain("cancelled");
@@ -983,7 +985,7 @@ test(
       // Direct execute of the registered tool: the dispatch must stay
       // parked while a second call force-cancels it, which the awaited
       // session.run API cannot express.
-      const tool = delegateTool(session) as unknown as {
+      interface RegisteredTool {
         execute(
           toolCallId: string,
           params: Record<string, unknown>,
@@ -993,7 +995,12 @@ test(
         ): Promise<{
           readonly content: readonly { readonly text?: string }[];
         }>;
-      };
+      }
+      const tool = delegateTool(session) as unknown as RegisteredTool;
+      const ticketTool = registeredTool(
+        session,
+        "delegate_ticket",
+      ) as unknown as RegisteredTool;
       const ctx = (session.session as AgentSession).extensionRunner
         .createContext();
       const textOf = (result: {
@@ -1011,6 +1018,18 @@ test(
             ctx,
           )
           .then(textOf);
+      const callTicket = (
+        params: Record<string, unknown>,
+      ): Promise<string> =>
+        ticketTool
+          .execute(
+            "force-cancel-ticket",
+            params,
+            new AbortController().signal,
+            () => {},
+            ctx,
+          )
+          .then(textOf);
 
       const dispatched = call({
         async: true,
@@ -1022,10 +1041,10 @@ test(
       await untilLogLines(hold.logPath, 2);
 
       // The dispatch has not returned yet, so the id comes from the roster.
-      const roster = await call({ ticketAction: "poll" });
+      const roster = await callTicket({ action: "poll" });
       const ticket = ticketIdOf(roster);
-      const cancelled = await call({
-        ticketAction: "cancel",
+      const cancelled = await callTicket({
+        action: "cancel",
         ticket,
         force: true,
       });
@@ -1040,7 +1059,7 @@ test(
         }),
       ]);
       expect(result).toContain(`Ticket "${ticket}"`);
-      const poll = await call({ ticketAction: "poll", ticket });
+      const poll = await callTicket({ action: "poll", ticket });
       expect(poll).toMatch(/cancelled/);
       expect(poll).toContain("1/1 tasks finished");
     } finally {
@@ -1141,7 +1160,7 @@ test(
       // The ticket never started, so it is not exposed: the failure text
       // names no ticket id, and the roster is empty.
       expect(result.text).not.toContain('Ticket "');
-      const roster = await callDelegate(session, { ticketAction: "poll" });
+      const roster = await callDelegateTicket(session, { action: "poll" });
       expect(roster.text).toContain("No tickets");
 
       await expectShutdownSettles(session);

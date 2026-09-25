@@ -12,6 +12,8 @@ import {
   installSubagentModel,
   openDelegateBoundary,
   ticketIdOf,
+  callDelegateSession,
+  callDelegateTicket,
 } from "../support/pi-boundary.ts";
 
 describe("delegate session contract", () => {
@@ -39,7 +41,7 @@ describe("delegate session contract", () => {
       });
       expect(first.isError).toBe(false);
 
-      const listed = await callDelegate(session, { sessionAction: "list" });
+      const listed = await callDelegateSession(session, { action: "list" });
       expect(listed.isError).toBe(false);
       expect(listed.text).toContain("conv");
 
@@ -72,13 +74,13 @@ describe("delegate session contract", () => {
         tasks: [{ prompt: "x", sessionId: "conv" }],
       });
 
-      const closed = await callDelegate(session, {
-        sessionAction: "close",
+      const closed = await callDelegateSession(session, {
+        action: "close",
         sessionId: "conv",
       });
       expect(closed.isError).toBe(false);
 
-      const listed = await callDelegate(session, { sessionAction: "list" });
+      const listed = await callDelegateSession(session, { action: "list" });
       expect(listed.text).not.toContain("conv");
 
       const fresh: FauxResponseFactory = (context) =>
@@ -198,16 +200,16 @@ describe("delegate session contract", () => {
       expect(subagents.state.callCount).toBe(2);
 
       // A live session mid-run is busy: close must refuse to race it.
-      const closedBusy = await callDelegate(session, {
-        sessionAction: "close",
+      const closedBusy = await callDelegateSession(session, {
+        action: "close",
         sessionId: "conv",
       });
       expect(closedBusy.isError).toBe(true);
       expect(closedBusy.text).toMatch(/conv|running|busy/i);
 
       const ticket = ticketIdOf(created.text);
-      const cancelled = await callDelegate(session, {
-        ticketAction: "cancel",
+      const cancelled = await callDelegateTicket(session, {
+        action: "cancel",
         ticket,
         force: true,
       });
@@ -218,8 +220,8 @@ describe("delegate session contract", () => {
       // is replaced once "unconfirmed" disappears from the ticket view).
       release();
       for (let i = 0; i < 200; i++) {
-        const view = await callDelegate(session, {
-          ticketAction: "poll",
+        const view = await callDelegateTicket(session, {
+          action: "poll",
           ticket,
         });
         if (view.text.includes("### Task") && !view.text.includes("unconfirmed")) {
@@ -228,7 +230,7 @@ describe("delegate session contract", () => {
         await new Promise((r) => setTimeout(r, 25));
       }
 
-      const listed = await callDelegate(session, { sessionAction: "list" });
+      const listed = await callDelegateSession(session, { action: "list" });
       expect(listed.text).not.toContain("conv");
 
       const inspect: FauxResponseFactory = (context) =>
@@ -254,8 +256,8 @@ describe("delegate session contract", () => {
       // SPEC: close removes the named session; a nonexistent one is an
       // actionable error, not a silent no-op.
       session = await openDelegateBoundary();
-      const result = await callDelegate(session, {
-        sessionAction: "close",
+      const result = await callDelegateSession(session, {
+        action: "close",
         sessionId: "ghost",
       });
       expect(result.isError).toBe(true);

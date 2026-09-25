@@ -23,6 +23,7 @@ import {
   installSubagentModel,
   openDelegateBoundary,
   ticketIdOf,
+  callDelegateTicket,
 } from "../support/pi-boundary.ts";
 
 function tempDir(): string {
@@ -607,8 +608,8 @@ describe("delegate telemetry contract", () => {
         async: true,
       });
       const ticket = ticketIdOf(dispatched.text);
-      const cancelled = await callDelegate(session, {
-        ticketAction: "cancel",
+      const cancelled = await callDelegateTicket(session, {
+        action: "cancel",
         ticket,
         force: true,
       });
@@ -764,8 +765,8 @@ describe("delegate telemetry contract", () => {
       expect(second.isError).toBe(false);
 
       release();
-      const waited = await callDelegate(session, {
-        ticketAction: "wait",
+      const waited = await callDelegateTicket(session, {
+        action: "wait",
         ticket,
         timeoutMs: 10_000,
       });

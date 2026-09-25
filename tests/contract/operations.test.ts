@@ -12,6 +12,8 @@ import {
   installSubagentModel,
   openDelegateBoundary,
   ticketIdOf,
+  callDelegateSession,
+  callDelegateTicket,
 } from "../support/pi-boundary.ts";
 
 interface DirectResult {
@@ -155,8 +157,8 @@ describe("delegate explicit operation identity", () => {
       expect(ticketIdOf(retryWhileRunning.text)).toBe(ticket);
 
       release();
-      const waited = await callDelegate(session, {
-        ticketAction: "wait",
+      const waited = await callDelegateTicket(session, {
+        action: "wait",
         ticket,
         timeoutMs: 5000,
       });
@@ -272,16 +274,16 @@ describe("delegate explicit operation identity", () => {
 
       const dispatched = await callDelegate(session, args);
       const ticket = ticketIdOf(dispatched.text);
-      const cancelled = await callDelegate(session, {
-        ticketAction: "cancel",
+      const cancelled = await callDelegateTicket(session, {
+        action: "cancel",
         ticket,
         force: true,
       });
       expect(cancelled.isError).toBe(false);
       release();
 
-      const polled = await callDelegate(session, {
-        ticketAction: "poll",
+      const polled = await callDelegateTicket(session, {
+        action: "poll",
         ticket,
       });
       expect(polled.text).toMatch(/cancelled/i);
@@ -289,8 +291,8 @@ describe("delegate explicit operation identity", () => {
 
       const retry = await callDelegate(session, args);
       expect(ticketIdOf(retry.text)).toBe(ticket);
-      const repolled = await callDelegate(session, {
-        ticketAction: "poll",
+      const repolled = await callDelegateTicket(session, {
+        action: "poll",
         ticket,
       });
       expect(repolled.text).toMatch(/cancelled/i);
@@ -369,8 +371,8 @@ describe("delegate explicit operation identity", () => {
       expect(subagents.state.callCount).toBe(1);
 
       release();
-      const waited = await callDelegate(session, {
-        ticketAction: "wait",
+      const waited = await callDelegateTicket(session, {
+        action: "wait",
         ticket,
         timeoutMs: 5000,
       });
@@ -469,10 +471,8 @@ describe("delegate explicit operation identity", () => {
           tasks: [{ prompt: "x", tools: ["read"] }],
           operationId: "bad id!",
         },
-        {
-          tasks: [{ prompt: "x", tools: ["read"] }],
-          operationId: "",
-        },
+        // `operationId: ""` is absent by the blank rule and covered by the
+        // unkeyed dispatch path, not by this invalid-shapes loop.
         {
           tasks: [{ prompt: "x", tools: ["read"] }],
           operationId: "k".repeat(65),
@@ -496,15 +496,15 @@ describe("delegate explicit operation identity", () => {
       const subagents = await installSubagentModel(session);
       subagents.respond([fauxAssistantMessage("NEVER-RUNS")]);
 
-      const ticketConflict = await callDelegate(session, {
-        ticketAction: "poll",
+      const ticketConflict = await callDelegateTicket(session, {
+        action: "poll",
         operationId: "k",
       });
       expect(ticketConflict.isError).toBe(true);
       expect(ticketConflict.text).toContain("operationId");
 
-      const sessionConflict = await callDelegate(session, {
-        sessionAction: "list",
+      const sessionConflict = await callDelegateSession(session, {
+        action: "list",
         operationId: "k",
       });
       expect(sessionConflict.isError).toBe(true);

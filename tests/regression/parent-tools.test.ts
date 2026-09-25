@@ -2,7 +2,13 @@ import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { fauxAssistantMessage, getCurrentTools } from "@earendil-works/pi-ai";
 import { createTestSession, type TestSession } from "@marcfargas/pi-test-harness";
 import { join, resolve } from "node:path";
-import { callDelegate, installSubagentModel, openDelegateBoundary, ticketIdOf } from "../support/pi-boundary.ts";
+import {
+  callDelegate,
+  callDelegateTicket,
+  installSubagentModel,
+  openDelegateBoundary,
+  ticketIdOf,
+} from "../support/pi-boundary.ts";
 
 import { mockParentTools } from "../support/parent-tools.ts";
 
@@ -45,7 +51,7 @@ describe("regression: parent tool mirroring", () => {
 
       // Let an erroneously admitted async batch settle before checking starts.
       if (async && !result.isError) {
-        await callDelegate(session, { ticketAction: "wait", ticket: ticketIdOf(result.text) });
+        await callDelegateTicket(session, { action: "wait", ticket: ticketIdOf(result.text) });
       }
       expect(subagents.state.callCount).toBe(0);
       expect(result.isError).toBe(true);
@@ -54,7 +60,7 @@ describe("regression: parent tool mirroring", () => {
       expect(result.text).toMatch(/explicit.*tools|restore.*parent/i);
       expect(subagents.state.callCount).toBe(0);
       expect(logged.mock.calls.flat().join(" ")).toContain("parent tool inventory unavailable");
-      const roster = await callDelegate(session, { ticketAction: "poll" });
+      const roster = await callDelegateTicket(session, { action: "poll" });
       expect(roster.text).not.toContain("running");
     });
   }
@@ -126,7 +132,7 @@ describe("regression: parent tool mirroring", () => {
     });
   }
 
-  test("default profile honors actual host restriction to delegate only", async () => {
+  test("default profile honors actual host restriction to the delegate tools", async () => {
     session = await createTestSession({
       extensions: [
         resolve(import.meta.dirname, "../../delegate.ts"),
@@ -147,7 +153,11 @@ describe("regression: parent tool mirroring", () => {
     expect(result.isError).toBe(false);
     expect(result.text).toContain("HOST-LIMITED-CHILD");
     expect(subagents.state.callCount).toBe(1);
-    expect(parent).toEqual(["delegate"]);
+    expect(parent).toEqual([
+      "delegate",
+      "delegate_ticket",
+      "delegate_session",
+    ]);
     expect(observed).toEqual([]);
   });
 });

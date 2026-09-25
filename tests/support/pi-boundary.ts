@@ -23,6 +23,8 @@ export interface PublicTool {
   readonly label: string;
   readonly description: string;
   readonly parameters: unknown;
+  readonly promptSnippet?: string;
+  readonly promptGuidelines?: string[];
 }
 
 export async function openDelegateBoundary(
@@ -44,20 +46,77 @@ export async function openDelegateBoundary(
   return session;
 }
 
-export function delegateTool(session: TestSession): PublicTool {
+/** The three public tool names the extension registers. */
+export const DELEGATE_TOOLS = [
+  "delegate",
+  "delegate_ticket",
+  "delegate_session",
+] as const;
+
+export function registeredTool(
+  session: TestSession,
+  name: string,
+): PublicTool {
   const definition = (session.session as AgentSession).extensionRunner
-    .getToolDefinition("delegate");
-  if (!definition) throw new Error("delegate tool was not registered");
+    .getToolDefinition(name);
+  if (!definition) throw new Error(`${name} tool was not registered`);
   return definition as unknown as PublicTool;
 }
 
+export function delegateTool(session: TestSession): PublicTool {
+  return registeredTool(session, "delegate");
+}
+
 let callSequence = 0;
+
+/**
+ * Fire a call to one of the delegate tools and resolve with its tool
+ * result once the surrounding `session.run` settles.
+ */
+export function callDelegateTool(
+  session: TestSession,
+  toolName: string,
+  arguments_: Record<string, unknown>,
+): Promise<ToolResultRecord> {
+  const previousResults = session.events.toolResultsFor(toolName).length;
+  callSequence += 1;
+
+  return session
+    .run(
+      when(`${toolName} contract call ${callSequence}`, [
+        calls(toolName, arguments_),
+        says("done"),
+      ]),
+    )
+    .then(() => {
+      const result =
+        session.events.toolResultsFor(toolName)[previousResults];
+      if (!result) {
+        throw new Error(`${toolName} call produced no tool result`);
+      }
+      return result;
+    });
+}
 
 export async function callDelegate(
   session: TestSession,
   arguments_: Record<string, unknown>,
 ): Promise<ToolResultRecord> {
   return callDelegateDetached(session, arguments_);
+}
+
+export async function callDelegateTicket(
+  session: TestSession,
+  arguments_: Record<string, unknown>,
+): Promise<ToolResultRecord> {
+  return callDelegateTool(session, "delegate_ticket", arguments_);
+}
+
+export async function callDelegateSession(
+  session: TestSession,
+  arguments_: Record<string, unknown>,
+): Promise<ToolResultRecord> {
+  return callDelegateTool(session, "delegate_session", arguments_);
 }
 
 /**
@@ -71,24 +130,15 @@ export function callDelegateDetached(
   session: TestSession,
   arguments_: Record<string, unknown>,
 ): Promise<ToolResultRecord> {
-  const previousResults = session.events.toolResultsFor("delegate").length;
-  callSequence += 1;
+  return callDelegateTool(session, "delegate", arguments_);
+}
 
-  return session
-    .run(
-      when(`delegate contract call ${callSequence}`, [
-        calls("delegate", arguments_),
-        says("done"),
-      ]),
-    )
-    .then(() => {
-      const result =
-        session.events.toolResultsFor("delegate")[previousResults];
-      if (!result) {
-        throw new Error("delegate call produced no tool result");
-      }
-      return result;
-    });
+/** Detached variant for delegate_ticket (e.g. waits interrupted mid-call). */
+export function callDelegateTicketDetached(
+  session: TestSession,
+  arguments_: Record<string, unknown>,
+): Promise<ToolResultRecord> {
+  return callDelegateTool(session, "delegate_ticket", arguments_);
 }
 
 export function objectOf(

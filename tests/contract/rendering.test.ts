@@ -15,6 +15,7 @@ import {
   installSubagentModel,
   openDelegateBoundary,
   ticketIdOf,
+  callDelegateTicket,
 } from "../support/pi-boundary.ts";
 
 /**
@@ -132,8 +133,8 @@ test(
       async: true,
     });
     const ticket = ticketIdOf(dispatched.text);
-    const settled = await callDelegate(session, {
-      ticketAction: "wait",
+    const settled = await callDelegateTicket(session, {
+      action: "wait",
       ticket,
       timeoutMs: 5000,
     });
@@ -169,8 +170,8 @@ test(
     const deadline = Date.now() + 5000;
     let running: ToolResultRecord | undefined;
     for (;;) {
-      running = await callDelegate(session, {
-        ticketAction: "poll",
+      running = await callDelegateTicket(session, {
+        action: "poll",
         ticket,
       });
       if (running.text.includes("1/2")) break;
@@ -185,8 +186,8 @@ test(
     expect(expanded).toContain(output);
 
     blocked.release();
-    await callDelegate(session, {
-      ticketAction: "wait",
+    await callDelegateTicket(session, {
+      action: "wait",
       ticket,
       timeoutMs: 5000,
     });
@@ -259,6 +260,6 @@ test(
 
     const help = await callDelegate(session, { tasks: [] });
     const expanded = renderToolResult(session, help, true);
-    expect(expanded).toContain("Delegate Tool Manual");
+    expect(expanded).toContain("Delegate Manual");
   },
 );

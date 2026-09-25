@@ -10,6 +10,7 @@ import {
   installSubagentModel,
   openDelegateBoundary,
   ticketIdOf,
+  callDelegateTicket,
 } from "../support/pi-boundary.ts";
 
 describe("delegate dispatch contract", () => {
@@ -160,8 +161,8 @@ describe("delegate dispatch contract", () => {
       expect(dispatched.isError).toBe(false);
       const ticket = ticketIdOf(dispatched.text);
 
-      const polled = await callDelegate(session, {
-        ticketAction: "wait",
+      const polled = await callDelegateTicket(session, {
+        action: "wait",
         ticket,
         timeoutMs: 5000,
       });

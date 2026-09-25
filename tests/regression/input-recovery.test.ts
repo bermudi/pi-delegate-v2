@@ -2,6 +2,8 @@ import { afterEach, describe, expect, test } from "bun:test";
 import type { TestSession } from "@marcfargas/pi-test-harness";
 import {
   callDelegate,
+  callDelegateSession,
+  callDelegateTicket,
   openDelegateBoundary,
 } from "../support/pi-boundary.ts";
 
@@ -21,6 +23,22 @@ describe("regression: malformed provider calls recover at the public boundary", 
     session?.dispose();
     session = await openDelegateBoundary();
     return callDelegate(session, arguments_);
+  }
+
+  async function callTicket(
+    arguments_: Record<string, unknown>,
+  ): Promise<{ readonly text: string; readonly isError: boolean }> {
+    session?.dispose();
+    session = await openDelegateBoundary();
+    return callDelegateTicket(session, arguments_);
+  }
+
+  async function callSession(
+    arguments_: Record<string, unknown>,
+  ): Promise<{ readonly text: string; readonly isError: boolean }> {
+    session?.dispose();
+    session = await openDelegateBoundary();
+    return callDelegateSession(session, arguments_);
   }
 
   test("recovers a JSON-stringified task array", async () => {
@@ -47,22 +65,22 @@ describe("regression: malformed provider calls recover at the public boundary", 
     expect(result.text).not.toContain("Validation failed");
   });
 
-  test("does not reinterpret explicit ticket or session control as work", async () => {
-    const ticket = await call({
-      ticketAction: "poll",
+  test("does not reinterpret foreign dispatch fields as ticket or session work", async () => {
+    const ticket = await callTicket({
+      action: "poll",
       prompt: "stray",
     });
     expect(ticket.isError).toBe(true);
-    expect(ticket.text).toContain("Validation failed");
+    expect(ticket.text).toContain("delegate(");
     expect(ticket.text).not.toContain("dispatch is not implemented");
 
-    const sessionControl = await call({
-      sessionAction: "close",
+    const sessionControl = await callSession({
+      action: "close",
       sessionId: "review",
       prompt: "stray",
     });
     expect(sessionControl.isError).toBe(true);
-    expect(sessionControl.text).toContain("Validation failed");
+    expect(sessionControl.text).toContain("delegate(");
     expect(sessionControl.text).not.toContain("dispatch is not implemented");
   });
 
@@ -101,16 +119,16 @@ describe("regression: malformed provider calls recover at the public boundary", 
     // and run the call; SPEC's repair list does not include them, so they
     // must fail the whole call at the boundary (v1 rejected them by
     // schema). Regression found in the #10 review.
-    const force = await call({
-      ticketAction: "cancel",
+    const force = await callTicket({
+      action: "cancel",
       ticket: "t-1",
       force: "true",
     });
     expect(force.isError).toBe(true);
     expect(force.text).toContain("'force'");
 
-    const timeout = await call({
-      ticketAction: "wait",
+    const timeout = await callTicket({
+      action: "wait",
       ticket: "t-1",
       timeoutMs: "123",
     });

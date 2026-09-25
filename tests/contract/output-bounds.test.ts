@@ -14,6 +14,7 @@ import {
   objectOf,
   openDelegateBoundary,
   ticketIdOf,
+  callDelegateTicket,
 } from "../support/pi-boundary.ts";
 
 /**
@@ -49,8 +50,8 @@ function spilledPathOf(text: string): string | undefined {
 async function pollUntil(session: TestSession, ticket: string, needle: RegExp) {
   const end = Date.now() + 5000;
   for (;;) {
-    const result = await callDelegate(session, {
-      ticketAction: "poll",
+    const result = await callDelegateTicket(session, {
+      action: "poll",
       ticket,
     });
     if (needle.test(result.text)) return result;
@@ -219,8 +220,8 @@ describe("delegate output bounding", () => {
       expect(spillFiles(dir)).toHaveLength(0);
 
       blocked.release();
-      const settled = await callDelegate(session, {
-        ticketAction: "wait",
+      const settled = await callDelegateTicket(session, {
+        action: "wait",
         ticket,
         timeoutMs: 5000,
       });
@@ -248,18 +249,18 @@ describe("delegate output bounding", () => {
       async: true,
     });
     const ticket = ticketIdOf(dispatched.text);
-    await callDelegate(session, {
-      ticketAction: "wait",
+    await callDelegateTicket(session, {
+      action: "wait",
       ticket,
       timeoutMs: 5000,
     });
 
-    const first = await callDelegate(session, {
-      ticketAction: "poll",
+    const first = await callDelegateTicket(session, {
+      action: "poll",
       ticket,
     });
-    const second = await callDelegate(session, {
-      ticketAction: "poll",
+    const second = await callDelegateTicket(session, {
+      action: "poll",
       ticket,
     });
     const firstPath = spilledPathOf(first.text);
@@ -300,8 +301,8 @@ describe("delegate output bounding", () => {
       });
       blocked.release();
 
-      const waited = await callDelegate(session, {
-        ticketAction: "wait",
+      const waited = await callDelegateTicket(session, {
+        action: "wait",
         ticket,
         timeoutMs: 5000,
       });

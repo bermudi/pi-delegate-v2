@@ -2,9 +2,12 @@ import { afterEach, describe, expect, test } from "bun:test";
 import type { TestSession } from "@marcfargas/pi-test-harness";
 import {
   callDelegate,
+  callDelegateSession,
+  callDelegateTicket,
   delegateTool,
   objectOf,
   openDelegateBoundary,
+  registeredTool,
 } from "../support/pi-boundary.ts";
 
 describe("delegate public tool contract", () => {
@@ -15,40 +18,48 @@ describe("delegate public tool contract", () => {
     session = undefined;
   });
 
-  test("registers one callable named delegate with human-facing metadata", async () => {
+  test("registers three tools with human-facing metadata", async () => {
     session = await openDelegateBoundary();
-    const tool = delegateTool(session);
+    const dispatch = delegateTool(session);
+    const ticket = registeredTool(session, "delegate_ticket");
+    const sessionTool = registeredTool(session, "delegate_session");
 
-    expect(tool.name).toBe("delegate");
-    expect(tool.label.trim().length).toBeGreaterThan(0);
-    expect(tool.description.trim().length).toBeGreaterThan(0);
+    expect(dispatch.name).toBe("delegate");
+    expect(dispatch.label).toBe("Delegate to Subagents");
+    expect(ticket.name).toBe("delegate_ticket");
+    expect(ticket.label).toBe("Delegate Tickets");
+    expect(sessionTool.name).toBe("delegate_session");
+    expect(sessionTool.label).toBe("Delegate Sessions");
+    for (const tool of [dispatch, ticket, sessionTool]) {
+      expect(tool.description.trim().length).toBeGreaterThan(0);
+      expect(tool.promptSnippet?.trim().length).toBeGreaterThan(0);
+    }
+  });
+
+  test("delegate's prompt guidance names its workflow rules", async () => {
+    session = await openDelegateBoundary();
+    const guidelines = delegateTool(session).promptGuidelines ?? [];
+    expect(guidelines.length).toBe(4);
+    expect(guidelines.join(" ")).toMatch(/never see|self-contained/i);
+    expect(guidelines.join(" ")).toMatch(/poll/i);
+    expect(guidelines.join(" ")).toMatch(/isolated/);
+    expect(guidelines.join(" ")).toMatch(/truncat/i);
   });
 
   test("publishes the canonical operation and task fields", async () => {
     session = await openDelegateBoundary();
-    const schema = objectOf(delegateTool(session).parameters, "tool schema");
-    const top = objectOf(schema.properties, "top-level properties");
+    const dispatch = objectOf(delegateTool(session).parameters, "delegate schema");
+    const top = objectOf(dispatch.properties, "top-level properties");
     const tasks = objectOf(top.tasks, "tasks schema");
     const task = objectOf(tasks.items, "task schema");
     const taskFields = objectOf(task.properties, "task properties");
 
     expect(Object.keys(top).sort()).toEqual(
-      [
-        "async",
-        "answer",
-        "force",
-        "operationId",
-        "sessionAction",
-        "sessionId",
-        "questionId",
-        "taskId",
-        "tasks",
-        "ticket",
-        "ticketAction",
-        "timeoutMs",
-        "workspace",
-      ].sort(),
+      ["async", "operationId", "tasks", "workspace"].sort(),
     );
+
+    // The task shape stays what it was — minus `model`, which callers no
+    // longer select (an explicit `model` gets a validation error instead).
     expect(Object.keys(taskFields).sort()).toEqual(
       [
         "agent",
@@ -56,7 +67,6 @@ describe("delegate public tool contract", () => {
         "deadlineMs",
         "dependsOn",
         "id",
-        "model",
         "prompt",
         "resumeFrom",
         "sessionId",
@@ -66,25 +76,57 @@ describe("delegate public tool contract", () => {
         "workspace",
       ].sort(),
     );
+
+    const ticket = objectOf(
+      registeredTool(session, "delegate_ticket").parameters,
+      "ticket schema",
+    );
+    expect(Object.keys(objectOf(ticket.properties)).sort()).toEqual(
+      [
+        "action",
+        "answer",
+        "force",
+        "questionId",
+        "taskId",
+        "ticket",
+        "timeoutMs",
+      ].sort(),
+    );
+
+    const sessionSchema = objectOf(
+      registeredTool(session, "delegate_session").parameters,
+      "session schema",
+    );
+    expect(Object.keys(objectOf(sessionSchema.properties)).sort()).toEqual(
+      ["action", "sessionId"].sort(),
+    );
   });
 
   test("publishes closed control and workspace values", async () => {
     session = await openDelegateBoundary();
-    const schema = objectOf(delegateTool(session).parameters);
-    const top = objectOf(schema.properties);
+    const dispatch = objectOf(delegateTool(session).parameters);
+    const top = objectOf(dispatch.properties);
     const tasks = objectOf(top.tasks);
     const task = objectOf(tasks.items);
     const fields = objectOf(task.properties);
 
-    expect(objectOf(top.ticketAction).enum).toEqual([
+    const ticket = objectOf(
+      registeredTool(session, "delegate_ticket").parameters,
+    );
+    expect(objectOf(objectOf(ticket.properties).action).enum).toEqual([
       "poll",
-      "cancel",
       "wait",
+      "cancel",
       "pause",
       "resume",
       "answer",
     ]);
-    expect(objectOf(top.sessionAction).enum).toEqual(["close", "list"]);
+    const sessionSchema = objectOf(
+      registeredTool(session, "delegate_session").parameters,
+    );
+    expect(objectOf(objectOf(sessionSchema.properties).action).enum).toEqual(
+      ["list", "close"],
+    );
     expect(objectOf(fields.workspace).enum).toEqual([
       "shared",
       "scratch",
@@ -108,6 +150,12 @@ describe("delegate public tool contract", () => {
 
     expect(top.action).toBeUndefined();
     expect(top.unsafeSharedWrites).toBeUndefined();
+    expect(top.ticketAction).toBeUndefined();
+    expect(top.sessionAction).toBeUndefined();
+    expect(top.ticket).toBeUndefined();
+    expect(top.sessionId).toBeUndefined();
+    expect(top.timeoutMs).toBeUndefined();
+    expect(top.force).toBeUndefined();
     expect(taskFields.async).toBeUndefined();
     expect(taskFields.operationId).toBeUndefined();
     expect(taskFields.sessionAction).toBeUndefined();
@@ -120,9 +168,9 @@ describe("delegate public tool contract", () => {
       session = await openDelegateBoundary();
       const result = await callDelegate(session, arguments_);
       expect(result.isError).toBe(false);
-      expect(result.text).toContain("Delegate Tool Manual");
-      expect(result.text).toContain("ticketAction");
-      expect(result.text).toContain("sessionAction");
+      expect(result.text).toContain("Delegate Manual");
+      expect(result.text).toContain("delegate_ticket");
+      expect(result.text).toContain("delegate_session");
     }
   });
 
@@ -130,11 +178,6 @@ describe("delegate public tool contract", () => {
     const invalidCalls: Record<string, unknown>[] = [
       { async: true },
       { tasks: [], async: true },
-      { ticket: "ticket-1" },
-      { force: true },
-      { timeoutMs: 1 },
-      { ticketAction: "poll", workspace: "isolated" },
-      { sessionAction: "list", workspace: "isolated" },
       { tasks: [{ prompt: "x" }], sessionId: "s" },
     ];
 
@@ -144,24 +187,23 @@ describe("delegate public tool contract", () => {
       const result = await callDelegate(session, arguments_);
 
       expect(result.isError).toBe(true);
-      expect(result.text).not.toContain("Delegate Tool Manual");
+      expect(result.text).not.toContain("Delegate Manual");
     }
   });
 
-  test("does not misclassify selected ticket or session operations as help", async () => {
-    // Ticket operations are implemented: a bare poll answers with the empty
-    // roster rather than the manual or an error.
+  test("does not misclassify roster operations as help", async () => {
+    // A bare ticket poll answers with the empty roster rather than the
+    // manual or an error.
     session = await openDelegateBoundary();
-    const polled = await callDelegate(session, { ticketAction: "poll" });
+    const polled = await callDelegateTicket(session, { action: "poll" });
     expect(polled.isError).toBe(false);
-    expect(polled.text).not.toContain("Delegate Tool Manual");
+    expect(polled.text).not.toContain("Delegate Manual");
 
-    // Session operations are implemented too: list answers with the empty
-    // session roster rather than the manual or an error.
+    // Session list answers with the empty session roster.
     session?.dispose();
     session = await openDelegateBoundary();
-    const listed = await callDelegate(session, { sessionAction: "list" });
+    const listed = await callDelegateSession(session, { action: "list" });
     expect(listed.isError).toBe(false);
-    expect(listed.text).not.toContain("Delegate Tool Manual");
+    expect(listed.text).not.toContain("Delegate Manual");
   });
 });

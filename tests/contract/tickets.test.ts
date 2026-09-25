@@ -9,6 +9,7 @@ import {
   installSubagentModel,
   openDelegateBoundary,
   ticketIdOf,
+  callDelegateTicket,
 } from "../support/pi-boundary.ts";
 
 /** A scripted subagent stream that blocks until `release` is invoked. */
@@ -34,7 +35,7 @@ describe("delegate ticket contract", () => {
     // v1 evidence: delegate.test.ts "poll with no tickets returns empty
     // message" and "includes a discovery hint".
     session = await openDelegateBoundary();
-    const result = await callDelegate(session, { ticketAction: "poll" });
+    const result = await callDelegateTicket(session, { action: "poll" });
     expect(result.isError).toBe(false);
     expect(result.text.trim().length).toBeGreaterThan(0);
     expect(result.text).toMatch(/no|none|empty/i);
@@ -48,13 +49,13 @@ describe("delegate ticket contract", () => {
       // `Ticket '<id>' not found.`
       session = await openDelegateBoundary();
       for (const arguments_ of [
-        { ticketAction: "poll", ticket: "nope-1" },
-        { ticketAction: "wait", ticket: "nope-1", timeoutMs: 50 },
-        { ticketAction: "cancel", ticket: "nope-1", force: true },
-        { ticketAction: "pause", ticket: "nope-1" },
-        { ticketAction: "resume", ticket: "nope-1" },
+        { action: "poll", ticket: "nope-1" },
+        { action: "wait", ticket: "nope-1", timeoutMs: 50 },
+        { action: "cancel", ticket: "nope-1", force: true },
+        { action: "pause", ticket: "nope-1" },
+        { action: "resume", ticket: "nope-1" },
       ]) {
-        const result = await callDelegate(session, arguments_);
+        const result = await callDelegateTicket(session, arguments_);
         expect(result.isError).toBe(true);
         expect(result.text).toMatch(/nope-1/);
         expect(result.text).toMatch(/not found/i);
@@ -79,8 +80,8 @@ describe("delegate ticket contract", () => {
       });
       const ticket = ticketIdOf(dispatched.text);
 
-      const waiting = callDelegate(session, {
-        ticketAction: "wait",
+      const waiting = callDelegateTicket(session, {
+        action: "wait",
         ticket,
         timeoutMs: 5000,
       });
@@ -90,8 +91,8 @@ describe("delegate ticket contract", () => {
       expect(waited.text).toContain("OUTPUT-RELEASED");
       expect(waited.text).toMatch(/done|complet/i);
 
-      const polled = await callDelegate(session, {
-        ticketAction: "poll",
+      const polled = await callDelegateTicket(session, {
+        action: "poll",
         ticket,
       });
       expect(polled.isError).toBe(false);
@@ -116,8 +117,8 @@ describe("delegate ticket contract", () => {
       });
       const ticket = ticketIdOf(dispatched.text);
 
-      const timedOut = await callDelegate(session, {
-        ticketAction: "wait",
+      const timedOut = await callDelegateTicket(session, {
+        action: "wait",
         ticket,
         timeoutMs: 30,
       });
@@ -126,8 +127,8 @@ describe("delegate ticket contract", () => {
 
       // The ticket is still alive and finishes once the work unblocks.
       release();
-      const settled = await callDelegate(session, {
-        ticketAction: "wait",
+      const settled = await callDelegateTicket(session, {
+        action: "wait",
         ticket,
         timeoutMs: 5000,
       });
@@ -151,15 +152,15 @@ describe("delegate ticket contract", () => {
       });
       const ticket = ticketIdOf(dispatched.text);
 
-      const preview = await callDelegate(session, {
-        ticketAction: "cancel",
+      const preview = await callDelegateTicket(session, {
+        action: "cancel",
         ticket,
       });
       expect(preview.isError).toBe(false);
       expect(preview.text).toMatch(/cancel|force/i);
 
-      const polled = await callDelegate(session, {
-        ticketAction: "poll",
+      const polled = await callDelegateTicket(session, {
+        action: "poll",
         ticket,
       });
       expect(polled.text).toMatch(/running|cancelling/i);
@@ -190,8 +191,8 @@ describe("delegate ticket contract", () => {
       });
       const ticket = ticketIdOf(dispatched.text);
 
-      const cancelled = await callDelegate(session, {
-        ticketAction: "cancel",
+      const cancelled = await callDelegateTicket(session, {
+        action: "cancel",
         ticket,
         force: true,
       });
@@ -200,8 +201,8 @@ describe("delegate ticket contract", () => {
 
       // A late worker finishing must not resurrect the ticket into "done".
       release();
-      const polled = await callDelegate(session, {
-        ticketAction: "poll",
+      const polled = await callDelegateTicket(session, {
+        action: "poll",
         ticket,
       });
       expect(polled.text).toMatch(/cancelled/i);
@@ -229,30 +230,30 @@ describe("delegate ticket contract", () => {
       });
       const ticket = ticketIdOf(dispatched.text);
 
-      const paused = await callDelegate(session, {
-        ticketAction: "pause",
+      const paused = await callDelegateTicket(session, {
+        action: "pause",
         ticket,
       });
       expect(paused.isError).toBe(false);
       expect(paused.text).toMatch(/paus/i);
 
       // While paused the ticket is still live, not terminal.
-      const polled = await callDelegate(session, {
-        ticketAction: "poll",
+      const polled = await callDelegateTicket(session, {
+        action: "poll",
         ticket,
       });
       expect(polled.text).toMatch(/running|paused/i);
       expect(polled.text).not.toMatch(/done|cancelled|failed/i);
 
-      const resumed = await callDelegate(session, {
-        ticketAction: "resume",
+      const resumed = await callDelegateTicket(session, {
+        action: "resume",
         ticket,
       });
       expect(resumed.isError).toBe(false);
       release();
 
-      const settled = await callDelegate(session, {
-        ticketAction: "wait",
+      const settled = await callDelegateTicket(session, {
+        action: "wait",
         ticket,
         timeoutMs: 5000,
       });
@@ -282,8 +283,8 @@ describe("delegate ticket contract", () => {
       });
       const ticket = ticketIdOf(dispatched.text);
 
-      const waited = await callDelegate(session, {
-        ticketAction: "wait",
+      const waited = await callDelegateTicket(session, {
+        action: "wait",
         ticket,
         timeoutMs: 5000,
       });
@@ -311,8 +312,8 @@ describe("delegate ticket contract", () => {
     });
     const ticket = ticketIdOf(dispatched.text);
 
-    const waited = await callDelegate(session, {
-      ticketAction: "wait",
+    const waited = await callDelegateTicket(session, {
+      action: "wait",
       ticket,
       timeoutMs: 5000,
     });

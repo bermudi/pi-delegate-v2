@@ -3,6 +3,7 @@ import type { TestSession } from "@marcfargas/pi-test-harness";
 import { fauxAssistantMessage, fauxToolCall, type FauxResponseFactory } from "@earendil-works/pi-ai";
 import {
   callDelegate, configureDelegate, installSubagentModel, openDelegateBoundary, ticketIdOf,
+  callDelegateTicket,
 } from "../support/pi-boundary.ts";
 
 // New #17 contract, not migrated from a v1 helper: exercise the registered
@@ -10,7 +11,7 @@ import {
 async function untilQuestion(session: TestSession, ticket: string): Promise<string> {
   const until = Date.now() + 4000;
   while (Date.now() < until) {
-    const view = await callDelegate(session, { ticketAction: "poll", ticket });
+    const view = await callDelegateTicket(session, { action: "poll", ticket });
     const match = view.text.match(/Waiting for parent answer: task \S+, question (q-\d+):/);
     if (match) return match[1]!;
     await new Promise((resolve) => setTimeout(resolve, 10));
@@ -37,31 +38,31 @@ describe("async worker questions (#17)", () => {
       tasks: [{ id: "first", prompt: "FIRST-TASK", tools: ["read"] }], async: true,
     })).text);
     const questionId = await untilQuestion(session, first);
-    const roster = await callDelegate(session, { ticketAction: "poll" });
+    const roster = await callDelegateTicket(session, { action: "poll" });
     expect(roster.text).toContain("Which path?");
     // The idle capacity is released; the first worker's question must not
     // monopolize the global or per-model slot.
     const second = ticketIdOf((await callDelegate(session, {
       tasks: [{ prompt: "SECOND-TASK", tools: ["read"] }], async: true,
     })).text);
-    const finished = await callDelegate(session, { ticketAction: "wait", ticket: second, timeoutMs: 2000 });
+    const finished = await callDelegateTicket(session, { action: "wait", ticket: second, timeoutMs: 2000 });
     expect(finished.text).toContain("SECOND-DONE");
-    const wrongTask = await callDelegate(session, {
-      ticketAction: "answer", ticket: first, taskId: "wrong", questionId, answer: "PARENT-ANSWER",
+    const wrongTask = await callDelegateTicket(session, {
+      action: "answer", ticket: first, taskId: "wrong", questionId, answer: "PARENT-ANSWER",
     });
     expect(wrongTask.isError).toBe(true);
-    const answered = await callDelegate(session, {
-      ticketAction: "answer", ticket: first, taskId: "first", questionId, answer: "PARENT-ANSWER",
+    const answered = await callDelegateTicket(session, {
+      action: "answer", ticket: first, taskId: "first", questionId, answer: "PARENT-ANSWER",
     });
     expect(answered.isError).toBe(false);
-    expect((await callDelegate(session, {
-      ticketAction: "answer", ticket: first, taskId: "first", questionId, answer: "DIFFERENT",
+    expect((await callDelegateTicket(session, {
+      action: "answer", ticket: first, taskId: "first", questionId, answer: "DIFFERENT",
     })).isError).toBe(true);
-    const result = await callDelegate(session, { ticketAction: "wait", ticket: first, timeoutMs: 2000 });
+    const result = await callDelegateTicket(session, { action: "wait", ticket: first, timeoutMs: 2000 });
     expect(result.text).toContain("USED-PARENT-ANSWER");
     expect(result.text).not.toContain("Waiting for parent answer");
-    expect((await callDelegate(session, {
-      ticketAction: "answer", ticket: first, taskId: "first", questionId, answer: "PARENT-ANSWER",
+    expect((await callDelegateTicket(session, {
+      action: "answer", ticket: first, taskId: "first", questionId, answer: "PARENT-ANSWER",
     })).isError).toBe(true);
   });
 
@@ -74,10 +75,10 @@ describe("async worker questions (#17)", () => {
     })).text);
     const questionId = await untilQuestion(session, ticket);
     await new Promise((resolve) => setTimeout(resolve, 330));
-    const settled = await callDelegate(session, { ticketAction: "wait", ticket, timeoutMs: 2500 });
+    const settled = await callDelegateTicket(session, { action: "wait", ticket, timeoutMs: 2500 });
     expect(settled.text).toMatch(/deadline exceeded/i);
-    expect((await callDelegate(session, {
-      ticketAction: "answer", ticket, taskId: "deadline", questionId, answer: "too late",
+    expect((await callDelegateTicket(session, {
+      action: "answer", ticket, taskId: "deadline", questionId, answer: "too late",
     })).isError).toBe(true);
   });
 
@@ -89,11 +90,11 @@ describe("async worker questions (#17)", () => {
       tasks: [{ id: "cancel", prompt: "ASK" }], async: true,
     })).text);
     const questionId = await untilQuestion(session, ticket);
-    await callDelegate(session, { ticketAction: "cancel", ticket, force: true });
-    expect((await callDelegate(session, {
-      ticketAction: "answer", ticket, taskId: "cancel", questionId, answer: "yes",
+    await callDelegateTicket(session, { action: "cancel", ticket, force: true });
+    expect((await callDelegateTicket(session, {
+      action: "answer", ticket, taskId: "cancel", questionId, answer: "yes",
     })).isError).toBe(true);
-    const result = await callDelegate(session, { ticketAction: "wait", ticket, timeoutMs: 2000 });
+    const result = await callDelegateTicket(session, { action: "wait", ticket, timeoutMs: 2000 });
     expect(result.text).toContain("cancelled");
   });
 
@@ -115,8 +116,8 @@ describe("async worker questions (#17)", () => {
     expect(conflicting.isError).toBe(true);
     expect(conflicting.text).toMatch(/overlap|conflict|reserved|active/i);
     expect(model.state.callCount).toBe(1);
-    await callDelegate(session, { ticketAction: "answer", ticket, taskId: "writer", questionId, answer: "do it" });
-    expect((await callDelegate(session, { ticketAction: "wait", ticket, timeoutMs: 2000 })).text).toContain("FINISHED");
+    await callDelegateTicket(session, { action: "answer", ticket, taskId: "writer", questionId, answer: "do it" });
+    expect((await callDelegateTicket(session, { action: "wait", ticket, timeoutMs: 2000 })).text).toContain("FINISHED");
   });
 
   test("an answer while paused is recorded once; another answer cannot replace it", async () => {
@@ -130,36 +131,39 @@ describe("async worker questions (#17)", () => {
       tasks: [{ id: "paused", prompt: "ask" }], async: true,
     })).text);
     const questionId = await untilQuestion(session, ticket);
-    await callDelegate(session, { ticketAction: "pause", ticket });
-    const reply = { ticketAction: "answer", ticket, taskId: "paused", questionId, answer: "original" };
-    expect((await callDelegate(session, reply)).isError).toBe(false);
-    expect((await callDelegate(session, reply)).isError).toBe(false);
-    expect((await callDelegate(session, { ...reply, answer: "changed" })).isError).toBe(true);
+    await callDelegateTicket(session, { action: "pause", ticket });
+    const reply = { action: "answer", ticket, taskId: "paused", questionId, answer: "original" };
+    expect((await callDelegateTicket(session, reply)).isError).toBe(false);
+    expect((await callDelegateTicket(session, reply)).isError).toBe(false);
+    expect((await callDelegateTicket(session, { ...reply, answer: "changed" })).isError).toBe(true);
     expect(model.state.callCount).toBe(1);
-    await callDelegate(session, { ticketAction: "resume", ticket });
-    expect((await callDelegate(session, { ticketAction: "wait", ticket, timeoutMs: 2000 })).text).toContain("ANSWERED");
+    await callDelegateTicket(session, { action: "resume", ticket });
+    expect((await callDelegateTicket(session, { action: "wait", ticket, timeoutMs: 2000 })).text).toContain("ANSWERED");
   });
 
   test("answer RPC fields are ticket-only and validated before any worker starts", async () => {
     session = await openDelegateBoundary();
     const model = await installSubagentModel(session);
     for (const args of [
-      { ticketAction: "answer", ticket: "missing", taskId: "t", questionId: "q" },
-      { ticketAction: "poll", ticket: "missing", answer: "oops" },
-      { tasks: [{ prompt: "no start" }], answer: "oops" },
-      // Empty string: stopped by the schema's minLength before execute.
-      { ticketAction: "answer", ticket: "missing", taskId: "t", questionId: "q", answer: "" },
+      { action: "answer", ticket: "missing", taskId: "t", questionId: "q" },
+      { action: "poll", ticket: "missing", answer: "oops" },
+      { action: "answer", ticket: "missing", taskId: "t", questionId: "q", answer: "" },
     ]) {
-      expect((await callDelegate(session, args)).isError).toBe(true);
+      expect((await callDelegateTicket(session, args)).isError).toBe(true);
     }
-    // Whitespace passes minLength, so only validateCall can stop it — and
-    // the bogus ticket id proves it does: validation runs before lookup,
-    // and the error names the answer field rather than the ticket.
-    const blank = await callDelegate(session, {
-      ticketAction: "answer", ticket: "missing", taskId: "t", questionId: "q", answer: "   ",
+    // A dispatch carrying a ticket-only field gets cross-tool guidance, not
+    // a worker start.
+    expect((await callDelegate(session, {
+      tasks: [{ prompt: "no start" }], answer: "oops",
+    })).isError).toBe(true);
+    // Whitespace is a string the schema accepts, so only validation can
+    // stop it — and the bogus ticket id proves it does: validation runs
+    // before lookup, and the error names the answer field, not the ticket.
+    const blank = await callDelegateTicket(session, {
+      action: "answer", ticket: "missing", taskId: "t", questionId: "q", answer: "   ",
     });
     expect(blank.isError).toBe(true);
-    expect(blank.text).toContain('ticketAction "answer" requires a nonempty answer');
+    expect(blank.text).toContain('action "answer" requires a nonempty answer');
     expect(model.state.callCount).toBe(0);
   });
 
@@ -176,7 +180,7 @@ describe("async worker questions (#17)", () => {
     const ticket = ticketIdOf((await callDelegate(session, {
       tasks: [{ id: "block", prompt: "ask" }], async: true,
     })).text);
-    const waiting = callDelegate(session, { ticketAction: "wait", ticket });
+    const waiting = callDelegateTicket(session, { action: "wait", ticket });
     release();
     const result = await Promise.race([
       waiting,
@@ -186,10 +190,10 @@ describe("async worker questions (#17)", () => {
     expect(result.text).toContain("Wait detached");
     const match = result.text.match(/question (q-\d+):/);
     expect(match).not.toBeNull();
-    await callDelegate(session, {
-      ticketAction: "answer", ticket, taskId: "block", questionId: match![1], answer: "yes",
+    await callDelegateTicket(session, {
+      action: "answer", ticket, taskId: "block", questionId: match![1], answer: "yes",
     });
-    expect((await callDelegate(session, { ticketAction: "wait", ticket, timeoutMs: 2000 })).text).toContain("done");
+    expect((await callDelegateTicket(session, { action: "wait", ticket, timeoutMs: 2000 })).text).toContain("done");
   });
 
   test("a question beside another tool call is rejected rather than parking a still-active worker", async () => {
@@ -205,9 +209,9 @@ describe("async worker questions (#17)", () => {
     const ticket = ticketIdOf((await callDelegate(session, {
       tasks: [{ prompt: "ask and read", tools: ["read"] }], async: true,
     })).text);
-    const settled = await callDelegate(session, { ticketAction: "wait", ticket, timeoutMs: 2000 });
+    const settled = await callDelegateTicket(session, { action: "wait", ticket, timeoutMs: 2000 });
     expect(settled.text).toContain("TURN-COMPLETED");
-    expect((await callDelegate(session, { ticketAction: "poll", ticket })).text).not.toContain("Waiting for parent answer");
+    expect((await callDelegateTicket(session, { action: "poll", ticket })).text).not.toContain("Waiting for parent answer");
   });
 
   test("a pooled worker can ask on a later async run after a synchronous run", async () => {
@@ -226,10 +230,10 @@ describe("async worker questions (#17)", () => {
       tasks: [{ id: "again", prompt: "second", sessionId: "reuse", tools: ["read"] }], async: true,
     })).text);
     const questionId = await untilQuestion(session, ticket);
-    await callDelegate(session, {
-      ticketAction: "answer", ticket, taskId: "again", questionId, answer: "continue",
+    await callDelegateTicket(session, {
+      action: "answer", ticket, taskId: "again", questionId, answer: "continue",
     });
-    expect((await callDelegate(session, { ticketAction: "wait", ticket, timeoutMs: 2000 })).text).toContain("SECOND-DONE");
+    expect((await callDelegateTicket(session, { action: "wait", ticket, timeoutMs: 2000 })).text).toContain("SECOND-DONE");
   });
 
   test("cancelling an answered worker queued to reacquire capacity cannot restart it", async () => {
@@ -273,13 +277,13 @@ describe("async worker questions (#17)", () => {
     } finally {
       if (startTimeout !== undefined) clearTimeout(startTimeout);
     }
-    await callDelegate(session, {
-      ticketAction: "answer", ticket: first, taskId: "waiting", questionId, answer: "yes",
+    await callDelegateTicket(session, {
+      action: "answer", ticket: first, taskId: "waiting", questionId, answer: "yes",
     });
-    await callDelegate(session, { ticketAction: "cancel", ticket: first, force: true });
+    await callDelegateTicket(session, { action: "cancel", ticket: first, force: true });
     releaseOccupier();
-    expect((await callDelegate(session, { ticketAction: "wait", ticket: second, timeoutMs: 2000 })).text).toContain("OCCUPIER-FINISHED");
-    const cancelled = await callDelegate(session, { ticketAction: "poll", ticket: first });
+    expect((await callDelegateTicket(session, { action: "wait", ticket: second, timeoutMs: 2000 })).text).toContain("OCCUPIER-FINISHED");
+    const cancelled = await callDelegateTicket(session, { action: "poll", ticket: first });
     expect(cancelled.text).toContain("cancelled");
     expect(cancelled.text).not.toContain("MUST-NOT-CONTINUE");
     expect(model.state.callCount).toBe(2);
