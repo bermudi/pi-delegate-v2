@@ -94,6 +94,14 @@ describe("input normalization contract", () => {
     expect(result.text).toMatch(/no|none|empty/i);
   });
 
+  test("a blank answer on a non-answer action stays a malformed call", async () => {
+    // Blank means "not given" for optional identifiers, but `answer` is a
+    // payload: present-but-empty is invalid, never an absent field.
+    const result = await callTicket({ action: "poll", answer: "" });
+    expect(result.isError).toBe(true);
+    expect(result.text).toContain('answer is valid only with action "answer"');
+  });
+
   test("a blank sessionId on close reports the required field", async () => {
     const result = await callSession({ action: "close", sessionId: "  " });
     expect(result.isError).toBe(true);

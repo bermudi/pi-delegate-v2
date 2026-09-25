@@ -1115,7 +1115,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
         "Run subagent tasks. Sync returns results in input order; async: true returns a ticket (inspect or control it with delegate_ticket) and delivers the settled result automatically; tasks: [] shows the manual; pooled sessions are managed with delegate_session. Same-repo writers serialize under 'shared'; 'isolated' runs independent edits in parallel; 'scratch' discards a disposable copy's changes.",
       parameters: delegateSchema,
       promptSnippet:
-        'delegate({ tasks: [{ prompt: "self-contained brief" }], async: true })',
+        "Run subagent tasks: synchronous, or async tickets whose results arrive automatically",
       promptGuidelines: [
         "Subagents never see this conversation — give each delegate task a self-contained brief.",
         "Async delegate results arrive automatically — do not poll in a loop; only wait on a ticket when the next step needs its result.",
@@ -1400,7 +1400,8 @@ export default function delegateExtension(api: ExtensionAPI): void {
       description:
         "Operate on a delegate async ticket: poll (the roster, or one ticket), wait for settlement, cancel, pause, resume, or answer a worker question. Dispatch new work with delegate; manage pooled sessions with delegate_session.",
       parameters: ticketSchema,
-      promptSnippet: 'delegate_ticket({ action: "poll" })',
+      promptSnippet:
+        "Poll, wait on, cancel, pause/resume, or answer questions for async delegate tickets",
       prepareArguments: prepareTicketArguments,
       renderResult: createResultRenderer(tickets),
 
@@ -1446,7 +1447,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
       description:
         "List or close pooled delegate sessions created by task sessionId fields. Dispatch tasks with delegate; operate on async tickets with delegate_ticket.",
       parameters: sessionSchema,
-      promptSnippet: 'delegate_session({ action: "list" })',
+      promptSnippet: "List or close pooled delegate subagent sessions",
       prepareArguments: prepareSessionArguments,
       renderResult: createResultRenderer(tickets),
 

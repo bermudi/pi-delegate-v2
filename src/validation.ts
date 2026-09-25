@@ -102,7 +102,10 @@ export function validateTicketCall(args: TicketArguments): TicketCall {
   for (const [name, value] of [
     ["taskId", taskId],
     ["questionId", questionId],
-    ["answer", answer],
+    // `answer` uses raw presence: an out-of-place blank reply is a
+    // malformed call, not an absent field. Blank = missing only inside
+    // action "answer", where it fails the nonempty requirement.
+    ["answer", args.answer],
   ] as const) {
     if (args.action !== "answer" && value !== undefined) {
       fail(`${name} is valid only with action "answer".`);
