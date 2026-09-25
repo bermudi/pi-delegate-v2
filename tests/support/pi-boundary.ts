@@ -46,13 +46,6 @@ export async function openDelegateBoundary(
   return session;
 }
 
-/** The three public tool names the extension registers. */
-export const DELEGATE_TOOLS = [
-  "delegate",
-  "delegate_ticket",
-  "delegate_session",
-] as const;
-
 export function registeredTool(
   session: TestSession,
   name: string,
@@ -131,14 +124,6 @@ export function callDelegateDetached(
   arguments_: Record<string, unknown>,
 ): Promise<ToolResultRecord> {
   return callDelegateTool(session, "delegate", arguments_);
-}
-
-/** Detached variant for delegate_ticket (e.g. waits interrupted mid-call). */
-export function callDelegateTicketDetached(
-  session: TestSession,
-  arguments_: Record<string, unknown>,
-): Promise<ToolResultRecord> {
-  return callDelegateTool(session, "delegate_ticket", arguments_);
 }
 
 export function objectOf(
