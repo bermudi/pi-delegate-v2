@@ -314,6 +314,11 @@ function stripBlank(record: Record<string, unknown>, keys: readonly string[]): v
   }
 }
 
+/** Defined and not blank — a value the caller actually gave. */
+function isGiven(value: unknown): boolean {
+  return value !== undefined && !isBlank(value);
+}
+
 function parseArray(value: string): unknown[] | undefined {
   try {
     const parsed: unknown = JSON.parse(value);
@@ -340,9 +345,9 @@ function delegateTicketExample(args: Record<string, unknown>): string {
       ? args.ticketAction
       : typeof args.action === "string" && TICKET_ACTIONS.includes(args.action)
         ? args.action
-        : args.taskId !== undefined ||
-            args.questionId !== undefined ||
-            args.answer !== undefined
+        : isGiven(args.taskId) ||
+            isGiven(args.questionId) ||
+            isGiven(args.answer)
           ? "answer"
           : args.force === true
             ? "cancel"

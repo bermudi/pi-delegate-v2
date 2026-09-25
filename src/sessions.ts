@@ -140,7 +140,7 @@ export class SessionPool {
       if (task.resumeFrom !== undefined) {
         throw new Error(
           `Session '${task.sessionId}' is already live; resumeFrom cannot be applied to a running conversation. ` +
-            `Close it first with delegate_session({ action: "close" }).`,
+            `Close it first with delegate_session({ action: "close", sessionId: "${task.sessionId}" }).`,
         );
       }
       const diffs = mismatches(entry.config, frozenConfig(task));
