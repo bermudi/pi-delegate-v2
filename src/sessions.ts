@@ -63,7 +63,7 @@ function mismatches(
 function incompatibleReuse(sessionId: string, diffs: readonly string[]): Error {
   return new Error(
     `Session '${sessionId}' is live with a frozen configuration; incompatible reuse: ${diffs.join("; ")}. ` +
-      `Close it first with sessionAction "close" or reuse it with matching cwd, tools, thinking, model, and base prompt.`,
+      `Close it first with delegate_session({ action: "close", sessionId: "${sessionId}" }) or reuse it with matching cwd, tools, thinking, model, and base prompt.`,
   );
 }
 
@@ -140,7 +140,7 @@ export class SessionPool {
       if (task.resumeFrom !== undefined) {
         throw new Error(
           `Session '${task.sessionId}' is already live; resumeFrom cannot be applied to a running conversation. ` +
-            `Close it first with sessionAction "close".`,
+            `Close it first with delegate_session({ action: "close" }).`,
         );
       }
       const diffs = mismatches(entry.config, frozenConfig(task));
@@ -262,7 +262,7 @@ export class SessionPool {
     }
   }
 
-  /** `sessionAction "list"`: every live pooled session, running or idle. */
+  /** `delegate_session` "list": every live pooled session, running or idle. */
   list(): string {
     if (this.entries.size === 0) {
       return "No live sessions. A task with a sessionId creates one.";
@@ -276,7 +276,7 @@ export class SessionPool {
   }
 
   /**
-   * `sessionAction "close"`: remove, then cooperatively abort and dispose.
+   * `delegate_session` "close": remove, then cooperatively abort and dispose.
    * A busy session is running work — closing it would race that run's state
    * updates, so it rejects.
    */
@@ -346,7 +346,7 @@ export interface SessionRpcResult {
   readonly isError: boolean;
 }
 
-/** sessionAction RPCs against the pool. */
+/** delegate_session actions against the pool. */
 export function handleSessionRpc(
   call: { action: "list" | "close"; sessionId: string | undefined },
   pool: SessionPool,

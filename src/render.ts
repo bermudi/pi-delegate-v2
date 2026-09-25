@@ -1,6 +1,6 @@
 /**
- * Human-facing renderers for the `delegate` tool's results and for the
- * delivered `delegate-result` custom message.
+ * Human-facing renderers for the `delegate`/`delegate_ticket`/`delegate_session`
+ * tools' results and for the delivered `delegate-result` custom message.
  *
  * Pi's stock result rendering only ever displays the LLM-facing `content`
  * text, which spill-bounds large outputs to a tail plus a file pointer —
@@ -98,7 +98,7 @@ function contentText(result: AgentToolResult<unknown>): string {
 }
 
 /**
- * The tool definition's `renderResult`: collapsed mirrors the stock
+ * The tool definitions' `renderResult`: collapsed mirrors the stock
  * fallback (a bounded preview of the content); expanded renders the
  * complete recorded outcomes from `details.results` — the whole output a
  * human expanding the result is promised.

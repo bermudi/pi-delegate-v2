@@ -152,7 +152,7 @@ function ticketView(
     ...(warning ? [warning] : []),
     ...ticket.notices,
     ...ticket.questions.map((q) =>
-      `Waiting for parent answer: task ${q.taskId}, question ${q.id}: ${q.question}\nReply with delegate({ ticketAction: "answer", ticket: "${ticket.id}", taskId: "${q.taskId}", questionId: "${q.id}", answer: "..." }).`),
+      `Waiting for parent answer: task ${q.taskId}, question ${q.id}: ${q.question}\nReply with delegate_ticket({ action: "answer", ticket: "${ticket.id}", taskId: "${q.taskId}", questionId: "${q.id}", answer: "..." }).`),
   ];
   for (const outcome of ticket.outcomes) {
     if (outcome)
@@ -163,7 +163,7 @@ function ticketView(
 
 function rosterView(tickets: readonly Ticket[]): string {
   if (tickets.length === 0) {
-    return "No tickets. Dispatch tasks with async: true to create one.";
+    return "No tickets. Dispatch tasks with delegate({ tasks: [...], async: true }) to create one.";
   }
   const lines = tickets.flatMap((ticket) => {
     const warning = ticket.recovered ? recoveryWarning(ticket) : undefined;
@@ -696,7 +696,7 @@ export interface TicketRpcResult {
   readonly ticket?: Ticket;
 }
 
-/** ticketAction RPCs against the store. */
+/** delegate_ticket actions against the store. */
 export async function handleTicketRpc(
   call: {
     action: "poll" | "wait" | "cancel" | "pause" | "resume" | "answer";

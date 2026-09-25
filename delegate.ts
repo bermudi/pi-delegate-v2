@@ -53,10 +53,9 @@ import {
   type Ticket,
 } from "./src/types.ts";
 import {
-  hasSessionIntent,
-  hasTicketIntent,
-  validateCall,
-  type RawArguments,
+  validateDispatchCall,
+  validateSessionCall,
+  validateTicketCall,
   type TaskInput,
 } from "./src/validation.ts";
 import {
@@ -81,49 +80,61 @@ const taskSchema = Type.Object(
     id: Type.Optional(
       Type.String({
         pattern: "^[A-Za-z0-9._-]{1,64}$",
-        description: "Optional correlation key.",
+        description: "Optional correlation key; unique within the batch.",
       }),
     ),
     prompt: Type.Optional(
-      Type.String({ description: "Self-contained task prompt." }),
-    ),
-    agent: Type.Optional(
-      Type.String({ description: "Named profile; omit for an inline task." }),
-    ),
-    cwd: Type.Optional(
-      Type.String({ description: "Working directory for the task." }),
-    ),
-    systemPrompt: Type.Optional(
-      Type.String({ description: "Base prompt for the subagent." }),
-    ),
-    model: Type.Optional(
       Type.String({
         description:
-          "Rejected: callers do not select subagent models. Omit entirely — tasks run on the parent's model, or the model the user configured for the agent in delegate.json.",
+          "Self-contained task brief; optional only when resumeFrom continues a transcript. Subagents never see this conversation.",
+      }),
+    ),
+    agent: Type.Optional(
+      Type.String({
+        description:
+          "Named profile: 'default' (mirrors the parent), 'scout' (read-only investigation), 'coder' (implementation), 'reviewer' (read-only review). Omit for an inline task.",
+      }),
+    ),
+    cwd: Type.Optional(
+      Type.String({
+        description:
+          "Working directory; relative paths resolve from the parent cwd.",
+      }),
+    ),
+    systemPrompt: Type.Optional(
+      Type.String({
+        description:
+          "Base prompt for the subagent; project context is added separately.",
       }),
     ),
     tools: Type.Optional(
       Type.Array(Type.String(), {
-        description: "Exact capabilities; * and ro are groups.",
+        description:
+          "Exact capabilities. '*' = the writer group (read, bash, edit, write); 'ro' = the read-only group (read, grep, find, ls); other entries name one child tool each.",
       }),
     ),
     thinking: Type.Optional(
       stringEnum(
         ["off", "minimal", "low", "medium", "high", "xhigh", "max"],
-        { description: "Thinking budget." },
+        { description: "Thinking budget level." },
       ),
     ),
     sessionId: Type.Optional(
       Type.String({
         description:
-          "Key for a live reusable session; later calls with the same id continue it. Its configuration is frozen at first use.",
+          "Key for a live reusable session; later tasks with the same id continue it. Its configuration is frozen at first use. List or close pooled sessions with delegate_session.",
       }),
     ),
     resumeFrom: Type.Optional(
-      Type.String({ description: "Absolute session transcript path." }),
+      Type.String({
+        description: "Absolute path to a .jsonl session transcript.",
+      }),
     ),
     deadlineMs: Type.Optional(
-      Type.Number({ description: "Positive wall-clock task budget." }),
+      Type.Number({
+        description:
+          "Positive wall-clock budget in milliseconds, counted from after queueing; omission means no deadline.",
+      }),
     ),
     workspace: Type.Optional(
       stringEnum(["shared", "scratch", "isolated"], {
@@ -141,45 +152,16 @@ const taskSchema = Type.Object(
   { additionalProperties: false },
 );
 
-const argumentsSchema = Type.Object(
+const delegateSchema = Type.Object(
   {
-    ticketAction: Type.Optional(
-      stringEnum(["poll", "cancel", "wait", "pause", "resume", "answer"], {
-        description: "Ticket operation.",
-      }),
-    ),
-    sessionAction: Type.Optional(
-      stringEnum(["close", "list"], { description: "Session operation." }),
-    ),
-    sessionId: Type.Optional(
-      Type.String({ description: "Session to close or flat-task session key." }),
-    ),
+    tasks: Type.Array(taskSchema, {
+      minItems: 0,
+      description: "Subagent tasks to run; pass [] for the manual.",
+    }),
     async: Type.Optional(
-      Type.Boolean({ description: "Run the entire batch in the background." }),
-    ),
-    ticket: Type.Optional(
-      Type.String({ description: "Background ticket identifier." }),
-    ),
-    force: Type.Optional(
-      Type.Boolean({ description: "Confirm cooperative cancellation." }),
-    ),
-    timeoutMs: Type.Optional(
-      Type.Number({ description: "Maximum ticket wait duration." }),
-    ),
-    taskId: Type.Optional(Type.String({ minLength: 1, description: "Task asking the question (answer RPC)." })),
-    questionId: Type.Optional(Type.String({ minLength: 1, description: "Question identifier from ticket poll (answer RPC)." })),
-    answer: Type.Optional(Type.String({ minLength: 1, description: "Parent answer to the worker's question." })),
-    tasks: Type.Optional(
-      Type.Array(taskSchema, {
-        minItems: 0,
-        description: "Tasks to run; omit or pass [] for help.",
-      }),
-    ),
-    operationId: Type.Optional(
-      Type.String({
-        pattern: "^[A-Za-z0-9._-]{1,64}$",
+      Type.Boolean({
         description:
-          "Bounded duplicate-safe dispatch key; same key/request reuses the original operation.",
+          "Run the whole batch in the background (default false): returns a ticket immediately and delivers the settled result automatically. Inspect or control it with delegate_ticket.",
       }),
     ),
     workspace: Type.Optional(
@@ -188,11 +170,81 @@ const argumentsSchema = Type.Object(
           "Default workspace for every task lacking its own. 'isolated' = parallel same-repo edits. 'scratch' = disposable copy, changes discarded.",
       }),
     ),
+    operationId: Type.Optional(
+      Type.String({
+        pattern: "^[A-Za-z0-9._-]{1,64}$",
+        description:
+          "Bounded duplicate-safe dispatch key; same key plus the same request reuses the original in-flight or settled result, same key plus a changed request errors.",
+      }),
+    ),
   },
   { additionalProperties: false },
 );
 
-type DelegateArguments = Static<typeof argumentsSchema>;
+const ticketSchema = Type.Object(
+  {
+    action: stringEnum(["poll", "wait", "cancel", "pause", "resume", "answer"], {
+      description:
+        "Ticket operation. poll: one ticket's view, or the roster when ticket is omitted. wait: block until settlement or timeoutMs. cancel: preview, or cooperative cancellation with force: true. pause/resume: hold and release queued work. answer: reply to a worker's pending question.",
+    }),
+    ticket: Type.Optional(
+      Type.String({
+        description:
+          "Ticket id; required for every action except a roster poll.",
+      }),
+    ),
+    timeoutMs: Type.Optional(
+      Type.Number({
+        description:
+          "Maximum wait in milliseconds; only with action 'wait'. A timeout detaches the waiter only — the ticket keeps running.",
+      }),
+    ),
+    force: Type.Optional(
+      Type.Boolean({
+        description:
+          "Only with action 'cancel': true performs the cancellation; omitted or false previews.",
+      }),
+    ),
+    taskId: Type.Optional(
+      Type.String({
+        description: "Only with action 'answer': the task that asked.",
+      }),
+    ),
+    questionId: Type.Optional(
+      Type.String({
+        description:
+          "Only with action 'answer': the question id shown in the ticket's poll view.",
+      }),
+    ),
+    answer: Type.Optional(
+      Type.String({
+        description:
+          "Only with action 'answer': the nonempty reply sent to the waiting worker.",
+      }),
+    ),
+  },
+  { additionalProperties: false },
+);
+
+const sessionSchema = Type.Object(
+  {
+    action: stringEnum(["list", "close"], {
+      description:
+        "'list' reports live pooled sessions; 'close' aborts, disposes, and removes one.",
+    }),
+    sessionId: Type.Optional(
+      Type.String({
+        description:
+          "Session id; required with action 'close', rejected with 'list'.",
+      }),
+    ),
+  },
+  { additionalProperties: false },
+);
+
+type DelegateArguments = Static<typeof delegateSchema>;
+type TicketToolArguments = Static<typeof ticketSchema>;
+type SessionToolArguments = Static<typeof sessionSchema>;
 type DelegateDetails = Record<string, unknown>;
 type DelegateResult = AgentToolResult<DelegateDetails>;
 
@@ -204,9 +256,63 @@ type TaskSchemaArguments = Static<typeof taskSchema>;
 /**
  * Flat-field fold list, derived from the task schema's own keys so a field
  * added to taskSchema participates in boundary recovery without a second
- * hand-maintained list.
+ * hand-maintained list. `model` no longer lives in the schema but still
+ * folds: a caller that sends it must see the model rejection, not a bare
+ * unknown-property error.
  */
-const taskFieldNames = Object.keys(taskSchema.properties) as readonly (keyof TaskSchemaArguments)[];
+const taskFieldNames = [
+  ...(Object.keys(taskSchema.properties) as readonly (keyof TaskSchemaArguments)[]),
+  "model",
+] as const;
+
+/**
+ * Dispatch-owned fields for sibling-tool guidance checks on
+ * delegate_ticket/delegate_session — a stray one means the caller pasted a
+ * dispatch call at the wrong tool. `sessionId` is absent: on delegate_ticket
+ * it routes to delegate_session guidance, on delegate_session it is native.
+ */
+const dispatchFieldNames = [
+  "tasks",
+  "async",
+  "workspace",
+  "operationId",
+  ...taskFieldNames.filter((field) => field !== "sessionId"),
+  "context",
+] as const;
+
+/** Ticket-owned fields for delegate_session's foreign-field guidance. */
+const ticketFieldNames = [
+  "ticketAction",
+  "ticket",
+  "force",
+  "timeoutMs",
+  "taskId",
+  "questionId",
+  "answer",
+] as const;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+/** Empty or whitespace-only string. */
+function isBlank(value: unknown): boolean {
+  return typeof value === "string" && value.trim() === "";
+}
+
+/** `null` means "not given" at every level of every tool's arguments. */
+function stripNulls(record: Record<string, unknown>): void {
+  for (const key of Object.keys(record)) {
+    if (record[key] === null) delete record[key];
+  }
+}
+
+/** A blank value counts as "not given" for the listed optional identifiers. */
+function stripBlank(record: Record<string, unknown>, keys: readonly string[]): void {
+  for (const key of keys) {
+    if (isBlank(record[key])) delete record[key];
+  }
+}
 
 function parseArray(value: string): unknown[] | undefined {
   try {
@@ -224,6 +330,72 @@ function normalizeTools(value: string): unknown {
   return token !== "" && !/[\s,]/.test(token) ? [token] : value;
 }
 
+const TICKET_ACTIONS = ["poll", "wait", "cancel", "pause", "resume", "answer"];
+const SESSION_ACTIONS = ["list", "close"];
+
+/** A `delegate_ticket` example call built from the fields the caller sent. */
+function delegateTicketExample(args: Record<string, unknown>): string {
+  const action =
+    typeof args.ticketAction === "string" && args.ticketAction !== ""
+      ? args.ticketAction
+      : typeof args.action === "string" && TICKET_ACTIONS.includes(args.action)
+        ? args.action
+        : args.taskId !== undefined ||
+            args.questionId !== undefined ||
+            args.answer !== undefined
+          ? "answer"
+          : args.force === true
+            ? "cancel"
+            : "poll";
+  const fields = [`action: ${JSON.stringify(action)}`];
+  if (typeof args.ticket === "string" && args.ticket !== "") {
+    fields.push(`ticket: ${JSON.stringify(args.ticket)}`);
+  }
+  if (action === "cancel" && args.force === true) fields.push("force: true");
+  if (action === "wait" && typeof args.timeoutMs === "number") {
+    fields.push(`timeoutMs: ${JSON.stringify(args.timeoutMs)}`);
+  }
+  if (action === "answer") {
+    for (const key of ["taskId", "questionId", "answer"] as const) {
+      if (typeof args[key] === "string" && args[key] !== "") {
+        fields.push(`${key}: ${JSON.stringify(args[key])}`);
+      }
+    }
+  }
+  return `delegate_ticket({ ${fields.join(", ")} })`;
+}
+
+/** A `delegate_session` example call built from the fields the caller sent. */
+function delegateSessionExample(args: Record<string, unknown>): string {
+  const action =
+    typeof args.sessionAction === "string" && args.sessionAction !== ""
+      ? args.sessionAction
+      : typeof args.action === "string" && SESSION_ACTIONS.includes(args.action)
+        ? args.action
+        : args.sessionId !== undefined
+          ? "close"
+          : "list";
+  const fields = [`action: ${JSON.stringify(action)}`];
+  if (typeof args.sessionId === "string" && args.sessionId !== "") {
+    fields.push(`sessionId: ${JSON.stringify(args.sessionId)}`);
+  }
+  return `delegate_session({ ${fields.join(", ")} })`;
+}
+
+/** A `delegate` dispatch example built from the task fields the caller sent. */
+function delegateDispatchExample(args: Record<string, unknown>): string {
+  if (Array.isArray(args.tasks)) {
+    return `delegate({ tasks: ${JSON.stringify(args.tasks)} })`;
+  }
+  const task: Record<string, unknown> = {};
+  for (const key of taskFieldNames) {
+    if (args[key] !== undefined) task[key] = args[key];
+  }
+  return Object.keys(task).length > 0
+    ? `delegate({ tasks: [${JSON.stringify(task)}] })`
+    : `delegate({ tasks: [{ prompt: "..." }] })`;
+}
+
 /** Run before host schema coercion so obsolete fields receive migration guidance. */
 function rejectObsoleteContext(record: Record<string, unknown>): void {
   if (Object.hasOwn(record, "context")) {
@@ -235,14 +407,21 @@ function rejectObsoleteContext(record: Record<string, unknown>): void {
   }
 }
 
-function normalizeTask(value: unknown): unknown {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    return value;
-  }
-  const task = { ...(value as Record<string, unknown>) };
+function normalizeTask(value: unknown, index: number): unknown {
+  if (!isRecord(value)) return value;
+  const task = { ...value };
+  // Presence of `context` rejects even when null — before null stripping.
   rejectObsoleteContext(task);
+  stripNulls(task);
+  if (task.model !== undefined) {
+    throw new Error(
+      `tasks[${index}]: the model field is not accepted — callers do not select subagent models. ` +
+        `Remove it: the task runs on the parent's model, or on the model the user ` +
+        `configured for its agent under "models" in the delegate.json config.`,
+    );
+  }
   if (typeof task.tools === "string") task.tools = normalizeTools(task.tools);
-  if (task.agent === "") delete task.agent;
+  stripBlank(task, ["sessionId", "cwd", "resumeFrom", "agent"]);
   return task;
 }
 
@@ -268,55 +447,86 @@ function rejectAmbiguousShapes(args: Record<string, unknown>): void {
       `'operationId' must be a string of 1-64 letters, digits, dots, underscores, or hyphens, not ${JSON.stringify(args.operationId)}.`,
     );
   }
-  for (const field of ["async", "force", "timeoutMs"] as const) {
-    const value = args[field];
-    if (typeof value === "string") {
-      throw new Error(
-        `'${field}' must be a ${field === "timeoutMs" ? "number" : "boolean"}, not the string ${JSON.stringify(value)}.`,
-      );
-    }
+  if (typeof args.async === "string") {
+    throw new Error(
+      `'async' must be a boolean, not the string ${JSON.stringify(args.async)}.`,
+    );
   }
   if (!Array.isArray(args.tasks)) return;
   args.tasks.forEach((task, index) => {
-    if (task === null || typeof task !== "object") return;
-    const record = task as Record<string, unknown>;
+    if (!isRecord(task)) return;
     const where = `tasks[${index}]`;
     // normalizeTask has already repaired JSON-array strings and bare tokens;
     // a surviving string is ambiguous by construction.
-    if (typeof record.tools === "string") {
+    if (typeof task.tools === "string") {
       throw new Error(
-        `${where}: 'tools' must be an array of tool names — a JSON array string or one bare name also works — not the ambiguous string ${JSON.stringify(record.tools)}.`,
+        `${where}: 'tools' must be an array of tool names — a JSON array string or one bare name also works — not the ambiguous string ${JSON.stringify(task.tools)}.`,
       );
     }
-    if (typeof record.deadlineMs === "string") {
+    if (typeof task.deadlineMs === "string") {
       throw new Error(
-        `${where}: 'deadlineMs' must be a positive number, not the string ${JSON.stringify(record.deadlineMs)}.`,
+        `${where}: 'deadlineMs' must be a positive number, not the string ${JSON.stringify(task.deadlineMs)}.`,
       );
     }
   });
 }
 
-function prepareArguments(value: unknown): DelegateArguments {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    return value as DelegateArguments;
-  }
+/**
+ * `delegate` argument normalization, before schema validation: nulls mean
+ * "not given", blanks mean "not given" for optional identifiers, fields
+ * owned by the sibling tools reject with migration guidance (selector
+ * fields first), then the authorized repairs — stringified tasks, flat
+ * task fields, string tools, blank agent — run. An absent `tasks` becomes
+ * `[]`, so `{}` still returns the manual.
+ */
+function prepareDispatchArguments(value: unknown): DelegateArguments {
+  if (!isRecord(value)) return value as DelegateArguments;
 
-  const args = { ...(value as Record<string, unknown>) };
+  const args = { ...value };
+  // Presence of `context` rejects even when null — before null stripping.
   rejectObsoleteContext(args);
+  stripNulls(args);
+  stripBlank(args, ["operationId", "sessionId", "cwd", "resumeFrom", "agent"]);
+
+  // Fields the pre-split tool owned: guidance with an example to the right
+  // tool beats a bare additionalProperties failure.
+  if (
+    args.ticketAction !== undefined ||
+    args.ticket !== undefined ||
+    args.force !== undefined ||
+    args.taskId !== undefined ||
+    args.questionId !== undefined ||
+    args.answer !== undefined
+  ) {
+    throw new Error(
+      `Ticket operations moved to delegate_ticket: ${delegateTicketExample(args)}.`,
+    );
+  }
+  if (args.sessionAction !== undefined) {
+    throw new Error(
+      `Session operations moved to delegate_session: ${delegateSessionExample(args)}.`,
+    );
+  }
+  if (args.timeoutMs !== undefined) {
+    throw new Error(
+      `A delegate run waits for every task and cannot be bounded with timeoutMs. ` +
+        `Dispatch with async: true, then bound the wait on its ticket: ` +
+        `delegate_ticket({ action: "wait", ticket: "<ticket>", timeoutMs: ${JSON.stringify(args.timeoutMs)} }).`,
+    );
+  }
+  if (args.action !== undefined) {
+    throw new Error(
+      `delegate takes no "action" field. Ticket operations use delegate_ticket({ action: "poll", ... }); ` +
+        `session operations use delegate_session({ action: "list" }).`,
+    );
+  }
   if (typeof args.tasks === "string") {
     const parsed = parseArray(args.tasks);
     if (parsed) args.tasks = parsed;
   }
 
   const hasTasks = Array.isArray(args.tasks) && args.tasks.length > 0;
-  // Folding intent comes from the validation field-ownership table — the
-  // same source that rejects orphan fields — so the two encodings cannot
-  // disagree. Raw pre-schema shape: the intent predicates value-gate the
-  // session selector themselves.
-  const ticketIntent = hasTicketIntent(args as Pick<RawArguments, "ticketAction" | "ticket">);
-  const sessionIntent = hasSessionIntent(args as Pick<RawArguments, "sessionAction">);
-
-  if (!hasTasks && !ticketIntent && !sessionIntent) {
+  if (!hasTasks) {
     const task: Record<string, unknown> = {};
     for (const field of taskFieldNames) {
       if (args[field] !== undefined) {
@@ -326,6 +536,7 @@ function prepareArguments(value: unknown): DelegateArguments {
     }
     if (Object.keys(task).length > 0) args.tasks = [task];
   }
+  if (args.tasks === undefined) args.tasks = [];
 
   if (Array.isArray(args.tasks)) {
     args.tasks = args.tasks.map(normalizeTask);
@@ -336,17 +547,103 @@ function prepareArguments(value: unknown): DelegateArguments {
   return args as DelegateArguments;
 }
 
-const help = `# Delegate Tool Manual
+/**
+ * `delegate_ticket` normalization: nulls and blanks as above, then
+ * pre-split field names and dispatch/session fields get guidance to the
+ * right tool, then the string-coercion guards.
+ */
+function prepareTicketArguments(value: unknown): TicketToolArguments {
+  if (!isRecord(value)) return value as TicketToolArguments;
 
-Delegate runs subagent tasks synchronously or as an asynchronous ticket.
+  const args = { ...value };
+  stripNulls(args);
+  // Blank `answer` survives: only validation may tell a present-but-empty
+  // reply from a missing one — a non-answer action must still reject it.
+  stripBlank(args, ["ticket", "taskId", "questionId"]);
 
-## Dispatch
-- Pass a non-empty \`tasks\` array to dispatch work. Sync calls return every
-  task's result in input order; \`async: true\` returns a ticket immediately
-  and runs the batch in the background.
+  if (args.ticketAction !== undefined) {
+    throw new Error(
+      `The ticket action field is "action", not "ticketAction": ${delegateTicketExample(args)}.`,
+    );
+  }
+  if (args.sessionAction !== undefined || args.sessionId !== undefined) {
+    throw new Error(
+      `Session operations live on delegate_session, not delegate_ticket: ${delegateSessionExample(args)}.`,
+    );
+  }
+  for (const key of dispatchFieldNames) {
+    if (args[key] !== undefined) {
+      throw new Error(
+        `'${key}' is a delegate dispatch field; task dispatch lives on delegate, not delegate_ticket: ${delegateDispatchExample(args)}.`,
+      );
+    }
+  }
+  if (typeof args.force === "string") {
+    throw new Error(
+      `'force' must be a boolean, not the string ${JSON.stringify(args.force)}.`,
+    );
+  }
+  if (typeof args.timeoutMs === "string") {
+    throw new Error(
+      `'timeoutMs' must be a number, not the string ${JSON.stringify(args.timeoutMs)}.`,
+    );
+  }
+
+  return args as TicketToolArguments;
+}
+
+/**
+ * `delegate_session` normalization: nulls and blanks as above, then
+ * pre-split field names and dispatch/ticket fields get guidance to the
+ * right tool.
+ */
+function prepareSessionArguments(value: unknown): SessionToolArguments {
+  if (!isRecord(value)) return value as SessionToolArguments;
+
+  const args = { ...value };
+  stripNulls(args);
+  stripBlank(args, ["sessionId"]);
+
+  if (args.sessionAction !== undefined) {
+    throw new Error(
+      `The session action field is "action", not "sessionAction": ${delegateSessionExample(args)}.`,
+    );
+  }
+  for (const key of ticketFieldNames) {
+    if (args[key] !== undefined) {
+      throw new Error(
+        `Ticket operations live on delegate_ticket, not delegate_session: ${delegateTicketExample(args)}.`,
+      );
+    }
+  }
+  for (const key of dispatchFieldNames) {
+    if (args[key] !== undefined) {
+      throw new Error(
+        `'${key}' is a delegate dispatch field; task dispatch lives on delegate, not delegate_session: ${delegateDispatchExample(args)}.`,
+      );
+    }
+  }
+
+  return args as SessionToolArguments;
+}
+
+const help = `# Delegate Manual
+
+Three sibling tools share Delegate's machinery:
+- \`delegate\` dispatches subagent tasks, synchronously or on an async ticket.
+- \`delegate_ticket\` operates on async tickets: poll, wait, cancel, pause,
+  resume, answer.
+- \`delegate_session\` lists and closes pooled subagent sessions.
+
+## delegate — dispatch
+- \`tasks\` (required): a non-empty array dispatches work; \`[]\` shows this
+  manual. Sync calls wait for every task and return results in input order;
+  \`async: true\` returns a ticket immediately — the settled result is
+  delivered automatically, so do not poll in a loop.
 - Task fields: \`prompt\` (required unless \`resumeFrom\`), \`id\` (correlation
-  key), \`agent\` (named profile), \`cwd\`, \`systemPrompt\`,
-  \`tools\` (\`*\`/\`ro\` groups or names), \`thinking\`, \`deadlineMs\`,
+  key), \`agent\` (\`default\`/\`scout\`/\`coder\`/\`reviewer\`; omit for
+  inline), \`cwd\`, \`systemPrompt\`, \`tools\` (\`*\` writer group, \`ro\`
+  read-only group, or tool names), \`thinking\`, \`deadlineMs\` (ms),
   \`sessionId\`, \`resumeFrom\`, \`workspace\` (shared/scratch/isolated),
   \`dependsOn\` (task ids to run first).
   A top-level \`workspace\` is the batch default.
@@ -381,27 +678,27 @@ Delegate runs subagent tasks synchronously or as an asynchronous ticket.
   not the edits. A read-only task cannot use it — it needs no copy.
   Cannot use \`sessionId\` or \`resumeFrom\`.
 
-## Tickets
-- \`ticketAction: "poll"\` — status of one \`ticket\`, or all tickets when the
-  field is omitted. Never blocks.
-- \`ticketAction: "wait"\` — block until the ticket settles; \`timeoutMs\`
-  detaches only the waiter, the work continues.
-- \`ticketAction: "cancel"\` — previews without \`force\`; with \`force: true\`
-  the ticket is cancelled now and in-flight tasks are asked to stop
-  (cooperative; no rollback).
-- \`ticketAction: "answer"\` — answer a worker's pending \`ask_parent\`
-  question using \`ticket\`, \`taskId\`, \`questionId\`, and \`answer\`.
+## delegate_ticket — tickets
+- \`{ action: "poll" }\` — the ticket roster, or one ticket's status with
+  \`ticket\`. Never blocks.
+- \`{ action: "wait", ticket }\` — block until the ticket settles;
+  \`timeoutMs\` (ms) detaches only the waiter, the work continues.
+- \`{ action: "cancel", ticket }\` — previews without \`force\`; with
+  \`force: true\` the ticket is cancelled now and in-flight tasks are asked
+  to stop (cooperative; no rollback).
+- \`{ action: "pause" | "resume", ticket }\` — hold and release queued work;
+  a paused ticket stays live and keeps its reservations.
+- \`{ action: "answer", ticket, taskId, questionId, answer }\` — answer a
+  worker's pending \`ask_parent\` question (all four fields required).
   Poll to see outstanding questions. Only async workers can ask.
-- \`ticketAction: "pause"\` / \`"resume"\` — hold and release queued work; a
-  paused ticket stays live and keeps its reservations.
 
-## Sessions
+## delegate_session — sessions
 - A task with \`sessionId\` keeps its session live after it finishes; a later
-  call with the same id continues that conversation. The session's cwd,
+  task with the same id continues that conversation. The session's cwd,
   tools, thinking, model, and base prompt are frozen at first use —
   incompatible reuse is rejected.
-- \`sessionAction: "list"\` lists live sessions; \`sessionAction: "close"\`
-  with \`sessionId\` closes one.
+- \`{ action: "list" }\` lists live sessions; \`{ action: "close", sessionId }\`
+  closes one.
 
 ## Telemetry
 - Disabled by default; enable only via "telemetry" in delegate.json.
@@ -424,7 +721,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
     if (ctx === undefined || shuttingDown) return;
     const message = {
       customType: "delegate-question",
-      content: `Worker ${question.taskId} on ticket ${ticket.id} asks: ${question.question}\nAnswer with delegate({ ticketAction: "answer", ticket: "${ticket.id}", taskId: "${question.taskId}", questionId: "${question.id}", answer: "..." }). Do not wait on this ticket while it needs your answer.`,
+      content: `Worker ${question.taskId} on ticket ${ticket.id} asks: ${question.question}\nAnswer with delegate_ticket({ action: "answer", ticket: "${ticket.id}", taskId: "${question.taskId}", questionId: "${question.id}", answer: "..." }). Do not wait on this ticket while it needs your answer.`,
       display: true,
       details: { ticket: ticket.id, taskId: question.taskId, questionId: question.id },
     };
@@ -436,10 +733,10 @@ export default function delegateExtension(api: ExtensionAPI): void {
       if (sameLeaf) api.sendMessage(message, { deliverAs: "followUp", triggerTurn: true });
       else {
         api.sendMessage(message, { triggerTurn: false });
-        ctx.ui.notify(`Worker ${question.taskId} asks a question on ticket ${ticket.id}; poll and answer it on this branch.`, "info");
+        ctx.ui.notify(`Worker ${question.taskId} asks a question on ticket ${ticket.id}; poll and answer it with delegate_ticket on this branch.`, "info");
       }
     } catch (error) {
-      console.error(`[delegate] notifying question ${ticket.id}/${question.id} failed (poll the ticket): ${error instanceof Error ? error.message : String(error)}`);
+      console.error(`[delegate] notifying question ${ticket.id}/${question.id} failed (poll it with delegate_ticket): ${error instanceof Error ? error.message : String(error)}`);
     }
   });
   const visibility = new VisibilitySignals(() => tickets.list());
@@ -811,13 +1108,21 @@ export default function delegateExtension(api: ExtensionAPI): void {
   });
 
   api.registerTool(
-    defineTool<typeof argumentsSchema, DelegateDetails>({
+    defineTool<typeof delegateSchema, DelegateDetails>({
       name: "delegate",
       label: "Delegate to Subagents",
       description:
-        "Run subagent tasks. Sync returns results; async returns a ticket; tasks:[] shows help. Same-repo writers serialize under 'shared'; 'isolated' runs independent edits in parallel; 'scratch' discards a disposable copy's changes.",
-      parameters: argumentsSchema,
-      prepareArguments,
+        "Run subagent tasks. Sync returns results in input order; async: true returns a ticket (inspect or control it with delegate_ticket) and delivers the settled result automatically; tasks: [] shows the manual; pooled sessions are managed with delegate_session. Same-repo writers serialize under 'shared'; 'isolated' runs independent edits in parallel; 'scratch' discards a disposable copy's changes.",
+      parameters: delegateSchema,
+      promptSnippet:
+        'delegate({ tasks: [{ prompt: "self-contained brief" }], async: true })',
+      promptGuidelines: [
+        "Subagents never see this conversation — give each delegate task a self-contained brief.",
+        "Async delegate results arrive automatically — do not poll in a loop; only wait on a ticket when the next step needs its result.",
+        'Use workspace "isolated" for independent edits in the same repo.',
+        "Split very large task batches across delegate calls; overlong tool calls get truncated.",
+      ],
+      prepareArguments: prepareDispatchArguments,
       // The stock renderer only displays `content` — which is the
       // spill-bounded projection — so expansion never showed the whole
       // output. This renderer keeps the collapsed preview but renders the
@@ -825,7 +1130,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
       renderResult: createResultRenderer(tickets),
 
       async execute(_toolCallId, params, signal, onUpdate, ctx) {
-        const call = validateCall(params);
+        const call = validateDispatchCall(params);
         // Every tool call re-arms the footer context (v1 semantics: the
         // execute context carries the full UI surface for our lifetime).
         visibility.captureFooterCtx(ctx);
@@ -835,50 +1140,11 @@ export default function delegateExtension(api: ExtensionAPI): void {
             details: { mode: "help" as const },
           };
         }
-        // Only ticket RPCs and async dispatches need the saved journal.
-        // A corrupt or inaccessible journal must not block sync work or
-        // live session controls; async creation remains durable before spawn.
-        if (call.mode === "ticket" || (call.mode === "dispatch" && call.async)) {
+        // Only async dispatch needs the saved journal, and ticket creation
+        // must be durable before workers spawn; a corrupt or inaccessible
+        // journal must not block synchronous work.
+        if (call.async) {
           tickets.connect(resolveAgentDir(ctx).dir);
-        }
-        if (call.mode === "ticket") {
-          const result = await handleTicketRpc(call, tickets, signal);
-          return {
-            content: [{ type: "text" as const, text: result.text }],
-            details: {
-              mode: "ticket" as const,
-              action: call.action,
-              ticket: result.ticket?.id,
-              // The rendered text may be spill-bounded; the record is not —
-              // details keep the complete outcomes for the expanded view.
-              // Only poll/wait carry them: cancel/pause/resume expand to
-              // their action response text, not the ticket document.
-              results:
-                call.action === "poll" || call.action === "wait"
-                  ? result.ticket?.outcomes
-                  : undefined,
-              ...(result.ticket !== undefined &&
-              result.ticket.notices.length > 0
-                ? { notices: result.ticket.notices }
-                : {}),
-              ...(call.action === "poll" || call.action === "wait"
-                ? { questions: result.ticket?.questions }
-                : {}),
-            },
-            isError: result.isError,
-          };
-        }
-        if (call.mode === "session") {
-          const result = handleSessionRpc(call, sessions, admission);
-          return {
-            content: [{ type: "text" as const, text: result.text }],
-            details: {
-              mode: "session" as const,
-              action: call.action,
-              sessionId: call.sessionId,
-            },
-            isError: result.isError,
-          };
         }
 
         let operationTicket: Ticket | undefined;
@@ -1062,7 +1328,8 @@ export default function delegateExtension(api: ExtensionAPI): void {
                   type: "text" as const,
                   text:
                     `Ticket "${ticket.id}" created: ${ticket.totalTasks} task(s) running in the background.\n` +
-                    `Check progress with delegate({ ticketAction: "poll", ticket: "${ticket.id}" }).` +
+                    `Results will be delivered automatically when the batch settles; keep working. ` +
+                    `delegate_ticket can wait on or cancel it if needed (action "wait" / "cancel").` +
                     (ticket.notices.length > 0
                       ? `\n${ticket.notices.join("\n")}`
                       : ""),
@@ -1122,6 +1389,80 @@ export default function delegateExtension(api: ExtensionAPI): void {
               ? tickets.finishedPromise(operationTicket)
               : Promise.resolve(),
         );
+      },
+    }),
+  );
+
+  api.registerTool(
+    defineTool<typeof ticketSchema, DelegateDetails>({
+      name: "delegate_ticket",
+      label: "Delegate Tickets",
+      description:
+        "Operate on a delegate async ticket: poll (the roster, or one ticket), wait for settlement, cancel, pause, resume, or answer a worker question. Dispatch new work with delegate; manage pooled sessions with delegate_session.",
+      parameters: ticketSchema,
+      promptSnippet: 'delegate_ticket({ action: "poll" })',
+      prepareArguments: prepareTicketArguments,
+      renderResult: createResultRenderer(tickets),
+
+      async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+        const call = validateTicketCall(params);
+        visibility.captureFooterCtx(ctx);
+        // Ticket RPCs need the saved journal; a corrupt or inaccessible one
+        // fails this call visibly but does not affect dispatch or sessions.
+        tickets.connect(resolveAgentDir(ctx).dir);
+        const result = await handleTicketRpc(call, tickets, signal);
+        return {
+          content: [{ type: "text" as const, text: result.text }],
+          details: {
+            mode: "ticket" as const,
+            action: call.action,
+            ticket: result.ticket?.id,
+            // The rendered text may be spill-bounded; the record is not —
+            // details keep the complete outcomes for the expanded view.
+            // Only poll/wait carry them: cancel/pause/resume expand to
+            // their action response text, not the ticket document.
+            results:
+              call.action === "poll" || call.action === "wait"
+                ? result.ticket?.outcomes
+                : undefined,
+            ...(result.ticket !== undefined &&
+            result.ticket.notices.length > 0
+              ? { notices: result.ticket.notices }
+              : {}),
+            ...(call.action === "poll" || call.action === "wait"
+              ? { questions: result.ticket?.questions }
+              : {}),
+          },
+          isError: result.isError,
+        };
+      },
+    }),
+  );
+
+  api.registerTool(
+    defineTool<typeof sessionSchema, DelegateDetails>({
+      name: "delegate_session",
+      label: "Delegate Sessions",
+      description:
+        "List or close pooled delegate sessions created by task sessionId fields. Dispatch tasks with delegate; operate on async tickets with delegate_ticket.",
+      parameters: sessionSchema,
+      promptSnippet: 'delegate_session({ action: "list" })',
+      prepareArguments: prepareSessionArguments,
+      renderResult: createResultRenderer(tickets),
+
+      async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+        const call = validateSessionCall(params);
+        visibility.captureFooterCtx(ctx);
+        const result = handleSessionRpc(call, sessions, admission);
+        return {
+          content: [{ type: "text" as const, text: result.text }],
+          details: {
+            mode: "session" as const,
+            action: call.action,
+            sessionId: call.sessionId,
+          },
+          isError: result.isError,
+        };
       },
     }),
   );
