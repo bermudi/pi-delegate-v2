@@ -81,6 +81,16 @@ function isBlank(value: unknown): boolean {
 }
 
 /**
+ * Callers never select subagent models (SPEC "Dispatch"). The same text
+ * rejects `model` wherever it appears — inside a task, folded into one, or
+ * stranded at the top level — so it is shared with the boundary layer.
+ */
+export const MODEL_FIELD_REJECTION =
+  `the model field is not accepted — callers do not select subagent models. ` +
+  `Remove it: the task runs on the parent's model, or on the model the user ` +
+  `configured for its agent under "models" in the delegate.json config.`;
+
+/**
  * Within-tool rules for `delegate_ticket`: `ticket` is required for every
  * action except `poll` (bare poll is the roster), `force` only accompanies
  * `cancel`, `timeoutMs` only `wait`, and `taskId`/`questionId`/`answer`
@@ -207,14 +217,16 @@ function validateTasks(tasks: readonly TaskInput[]): void {
       sessionIds.add(task.sessionId);
     }
     if (task.model !== undefined) {
-      fail(
-        `${where}: the model field is not accepted — callers do not select subagent models. ` +
-          `Remove it: the task runs on the parent's model, or on the model the user ` +
-          `configured for its agent under "models" in the delegate.json config.`,
-      );
+      fail(`${where}: ${MODEL_FIELD_REJECTION}`);
     }
     if (task.prompt !== undefined && task.prompt.trim() === "") {
       fail(`${where}: prompt must be a non-empty string.`);
+    }
+    if (task.systemPrompt !== undefined && task.systemPrompt.trim() === "") {
+      // Blank stays invalid for non-identifier fields (SPEC "Input
+      // recovery"): a blank systemPrompt would otherwise override — and
+      // silently erase — the profile's base prompt.
+      fail(`${where}: systemPrompt must be a non-empty string.`);
     }
     if (task.prompt === undefined && task.resumeFrom === undefined) {
       fail(`${where}: a task needs a prompt (prompt is optional only with resumeFrom).`);

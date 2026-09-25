@@ -53,6 +53,7 @@ import {
   type Ticket,
 } from "./src/types.ts";
 import {
+  MODEL_FIELD_REJECTION,
   validateDispatchCall,
   validateSessionCall,
   validateTicketCall,
@@ -256,14 +257,13 @@ type TaskSchemaArguments = Static<typeof taskSchema>;
 /**
  * Flat-field fold list, derived from the task schema's own keys so a field
  * added to taskSchema participates in boundary recovery without a second
- * hand-maintained list. `model` no longer lives in the schema but still
- * folds: a caller that sends it must see the model rejection, not a bare
- * unknown-property error.
+ * hand-maintained list. `model` is deliberately absent: it is not a task
+ * field and is rejected outright wherever it appears — folding or echoing
+ * it would only disguise the rejection.
  */
-const taskFieldNames = [
-  ...(Object.keys(taskSchema.properties) as readonly (keyof TaskSchemaArguments)[]),
-  "model",
-] as const;
+const taskFieldNames = Object.keys(
+  taskSchema.properties,
+) as readonly (keyof TaskSchemaArguments)[];
 
 /**
  * Dispatch-owned fields for sibling-tool guidance checks on
@@ -340,8 +340,11 @@ const SESSION_ACTIONS = ["list", "close"];
 
 /** A `delegate_ticket` example call built from the fields the caller sent. */
 function delegateTicketExample(args: Record<string, unknown>): string {
+  // Selector values are clamped to the real enum: an example that repeats
+  // an invalid action back fails again if the caller follows it.
   const action =
-    typeof args.ticketAction === "string" && args.ticketAction !== ""
+    typeof args.ticketAction === "string" &&
+    TICKET_ACTIONS.includes(args.ticketAction)
       ? args.ticketAction
       : typeof args.action === "string" && TICKET_ACTIONS.includes(args.action)
         ? args.action
@@ -353,7 +356,7 @@ function delegateTicketExample(args: Record<string, unknown>): string {
             ? "cancel"
             : "poll";
   const fields = [`action: ${JSON.stringify(action)}`];
-  if (typeof args.ticket === "string" && args.ticket !== "") {
+  if (typeof args.ticket === "string" && !isBlank(args.ticket)) {
     fields.push(`ticket: ${JSON.stringify(args.ticket)}`);
   }
   if (action === "cancel" && args.force === true) fields.push("force: true");
@@ -362,7 +365,7 @@ function delegateTicketExample(args: Record<string, unknown>): string {
   }
   if (action === "answer") {
     for (const key of ["taskId", "questionId", "answer"] as const) {
-      if (typeof args[key] === "string" && args[key] !== "") {
+      if (typeof args[key] === "string" && !isBlank(args[key])) {
         fields.push(`${key}: ${JSON.stringify(args[key])}`);
       }
     }
@@ -373,7 +376,8 @@ function delegateTicketExample(args: Record<string, unknown>): string {
 /** A `delegate_session` example call built from the fields the caller sent. */
 function delegateSessionExample(args: Record<string, unknown>): string {
   const action =
-    typeof args.sessionAction === "string" && args.sessionAction !== ""
+    typeof args.sessionAction === "string" &&
+    SESSION_ACTIONS.includes(args.sessionAction)
       ? args.sessionAction
       : typeof args.action === "string" && SESSION_ACTIONS.includes(args.action)
         ? args.action
@@ -381,7 +385,7 @@ function delegateSessionExample(args: Record<string, unknown>): string {
           ? "close"
           : "list";
   const fields = [`action: ${JSON.stringify(action)}`];
-  if (typeof args.sessionId === "string" && args.sessionId !== "") {
+  if (typeof args.sessionId === "string" && !isBlank(args.sessionId)) {
     fields.push(`sessionId: ${JSON.stringify(args.sessionId)}`);
   }
   return `delegate_session({ ${fields.join(", ")} })`;
@@ -419,11 +423,7 @@ function normalizeTask(value: unknown, index: number): unknown {
   rejectObsoleteContext(task);
   stripNulls(task);
   if (task.model !== undefined) {
-    throw new Error(
-      `tasks[${index}]: the model field is not accepted — callers do not select subagent models. ` +
-        `Remove it: the task runs on the parent's model, or on the model the user ` +
-        `configured for its agent under "models" in the delegate.json config.`,
-    );
+    throw new Error(`tasks[${index}]: ${MODEL_FIELD_REJECTION}`);
   }
   if (typeof task.tools === "string") task.tools = normalizeTools(task.tools);
   stripBlank(task, ["sessionId", "cwd", "resumeFrom", "agent"]);
@@ -525,6 +525,12 @@ function prepareDispatchArguments(value: unknown): DelegateArguments {
         `session operations use delegate_session({ action: "list" }).`,
     );
   }
+  // `model` is invalid wherever a caller puts it — inside a task, folded
+  // into one, or stranded at the top level beside an explicit tasks array.
+  // Reject it like `context`, before the fold can absorb it.
+  if (args.model !== undefined) {
+    throw new Error(MODEL_FIELD_REJECTION);
+  }
   if (typeof args.tasks === "string") {
     const parsed = parseArray(args.tasks);
     if (parsed) args.tasks = parsed;
@@ -540,6 +546,22 @@ function prepareDispatchArguments(value: unknown): DelegateArguments {
       }
     }
     if (Object.keys(task).length > 0) args.tasks = [task];
+  } else {
+    // Flat fields cannot merge into an explicit batch (SPEC: folding only
+    // applies without a task array) — a stray task field beside one is a
+    // caller mistake, so name it rather than surfacing a bare
+    // additionalProperties error. `workspace` is excluded: it is also a
+    // legal top-level batch default.
+    const stray = taskFieldNames.filter(
+      (field) => field !== "workspace" && args[field] !== undefined,
+    );
+    if (stray.length > 0) {
+      throw new Error(
+        `cannot mix top-level task field(s) ${stray
+          .map((field) => `'${field}'`)
+          .join(", ")} with an explicit tasks array; move them into a task entry or remove tasks.`,
+      );
+    }
   }
   if (args.tasks === undefined) args.tasks = [];
 
@@ -582,6 +604,19 @@ function prepareTicketArguments(value: unknown): TicketToolArguments {
         `'${key}' is a delegate dispatch field; task dispatch lives on delegate, not delegate_ticket: ${delegateDispatchExample(args)}.`,
       );
     }
+  }
+  // A correct-shaped call aimed at the wrong tool routes there instead of
+  // hitting a bare enum error on `action`.
+  if (
+    typeof args.action === "string" &&
+    SESSION_ACTIONS.includes(args.action)
+  ) {
+    throw new Error(
+      `"${args.action}" is a delegate_session action, not a delegate_ticket one: ${delegateSessionExample(args)}.`,
+    );
+  }
+  if (args.model !== undefined) {
+    throw new Error(MODEL_FIELD_REJECTION);
   }
   if (typeof args.force === "string") {
     throw new Error(
@@ -627,6 +662,19 @@ function prepareSessionArguments(value: unknown): SessionToolArguments {
         `'${key}' is a delegate dispatch field; task dispatch lives on delegate, not delegate_session: ${delegateDispatchExample(args)}.`,
       );
     }
+  }
+  // A correct-shaped call aimed at the wrong tool routes there instead of
+  // hitting a bare enum error on `action`.
+  if (
+    typeof args.action === "string" &&
+    TICKET_ACTIONS.includes(args.action)
+  ) {
+    throw new Error(
+      `"${args.action}" is a delegate_ticket action, not a delegate_session one: ${delegateTicketExample(args)}.`,
+    );
+  }
+  if (args.model !== undefined) {
+    throw new Error(MODEL_FIELD_REJECTION);
   }
 
   return args as SessionToolArguments;

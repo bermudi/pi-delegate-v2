@@ -196,10 +196,8 @@ describe("delegate validation contract", () => {
         [callSession, { action: "close", sessionId: "s1", prompt: "x" }, /delegate\(/],
       ];
       for (const [invoke, arguments_, pattern] of cases) {
-        // Fresh session per case: schema and prepare rejections never run
-        // tool.execute, and the harness dedupes the synthesized
-        // tool_execution_end record by a playbook toolCallId that repeats
-        // across runs on the same session.
+        // Fresh session per case keeps each rejection independent — no
+        // shared transcript, ticket store, or extension state between calls.
         const result = await invoke(arguments_);
         expect(result.isError).toBe(true);
         expect(result.text).toMatch(pattern);
@@ -212,16 +210,37 @@ describe("delegate validation contract", () => {
   test(
     "does not merge flat fields into an explicit non-empty task array",
     async () => {
-      // v1 evidence: schema.test.ts "rejects any flat task field mixed with an
-      // explicit tasks array". SPEC input-recovery: flat folding only applies
-      // when there is no task array.
+      // v1 evidence: schema.test.ts "rejects any flat task field mixed with
+      // an explicit tasks array". SPEC input-recovery: flat folding only
+      // applies when there is no task array — a stray field beside one names
+      // itself rather than surfacing a bare additionalProperties error.
       session = await openDelegateBoundary();
       const result = await callDelegate(session, {
         tasks: [{ prompt: "inside" }],
         prompt: "outside",
+        sessionId: "s1",
       });
       expect(result.isError).toBe(true);
+      expect(result.text).toContain("cannot mix top-level task field(s)");
+      expect(result.text).toContain("'prompt'");
+      expect(result.text).toContain("'sessionId'");
       expect(result.text).not.toContain("dispatch is not implemented");
+    },
+  );
+
+  test(
+    "a top-level model field gets the model rejection beside an explicit tasks array",
+    async () => {
+      // Issue #27: `model` rejects the same way `context` does — wherever it
+      // appears, including stranded at the top level next to `tasks`.
+      session = await openDelegateBoundary();
+      const result = await callDelegate(session, {
+        tasks: [{ prompt: "x" }],
+        model: "some/model",
+      });
+      expect(result.isError).toBe(true);
+      expect(result.text).toContain("model field is not accepted");
+      expect(result.text).toContain("delegate.json");
     },
   );
 

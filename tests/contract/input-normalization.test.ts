@@ -25,9 +25,8 @@ describe("input normalization contract", () => {
   async function call(
     arguments_: Record<string, unknown>,
   ): Promise<{ readonly text: string; readonly isError: boolean }> {
-    // Fresh session per call: the harness dedupes synthesized
-    // tool_execution_end records by a playbook toolCallId that repeats
-    // across runs on the same session.
+    // Fresh session per call keeps each case independent — no shared
+    // transcript, ticket store, or extension state between calls.
     session?.dispose();
     session = await openDelegateBoundary();
     return callDelegate(session, arguments_);
@@ -119,11 +118,18 @@ describe("input normalization contract", () => {
     expect(result.text).toContain("ONE-SHOT");
   });
 
-  test("blank task id and prompt remain invalid", async () => {
+  test("blank task id, prompt, and systemPrompt remain invalid", async () => {
     const blankId = await call({ tasks: [{ id: "  ", prompt: "x" }] });
     expect(blankId.isError).toBe(true);
     const blankPrompt = await call({ tasks: [{ prompt: "  " }] });
     expect(blankPrompt.isError).toBe(true);
+    // A schema-completing model's systemPrompt:"" must fail loudly — a
+    // blank override would otherwise silently erase the profile's prompt.
+    const blankSystemPrompt = await call({
+      tasks: [{ prompt: "x", systemPrompt: " " }],
+    });
+    expect(blankSystemPrompt.isError).toBe(true);
+    expect(blankSystemPrompt.text).toMatch(/systemPrompt/);
   });
 
   // ── cross-tool guidance: pre-split field names ────────────────────────────
@@ -174,6 +180,34 @@ describe("input normalization contract", () => {
     expect(result.isError).toBe(true);
     expect(result.text).toContain("delegate_ticket");
     expect(result.text).toContain("delegate_session");
+  });
+
+  test("guidance examples never echo an invalid action back", async () => {
+    // An example must be followable: a bogus or blank selector value is
+    // clamped to a valid action rather than repeated verbatim.
+    const ticket = await callTicket({ ticketAction: "bogus" });
+    expect(ticket.isError).toBe(true);
+    expect(ticket.text).toContain("delegate_ticket");
+    expect(ticket.text).not.toContain("bogus");
+
+    const sessionResult = await callSession({ sessionAction: "bogus" });
+    expect(sessionResult.isError).toBe(true);
+    expect(sessionResult.text).toContain(
+      'delegate_session({ action: "list" })',
+    );
+    expect(sessionResult.text).not.toContain("bogus");
+  });
+
+  test("a sibling tool's action value routes there", async () => {
+    // A correct-shaped call aimed at the wrong tool gets named guidance,
+    // not a bare enum rejection.
+    const sessionAction = await callTicket({ action: "list" });
+    expect(sessionAction.isError).toBe(true);
+    expect(sessionAction.text).toContain("delegate_session");
+
+    const ticketAction = await callSession({ action: "poll" });
+    expect(ticketAction.isError).toBe(true);
+    expect(ticketAction.text).toContain("delegate_ticket");
   });
 
   // ── cross-tool guidance: foreign shapes on the new tools ──────────────────

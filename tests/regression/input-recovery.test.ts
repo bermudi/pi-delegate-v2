@@ -18,8 +18,8 @@ describe("regression: malformed provider calls recover at the public boundary", 
   async function call(
     arguments_: Record<string, unknown>,
   ): Promise<{ readonly text: string; readonly isError: boolean }> {
-    // Harness playbooks restart their generated tool-call IDs on each run.
-    // A fresh Pi session ensures a repeated ID is never mistaken for a replay.
+    // Fresh session per call keeps each case independent — no shared
+    // transcript, ticket store, or extension state between calls.
     session?.dispose();
     session = await openDelegateBoundary();
     return callDelegate(session, arguments_);

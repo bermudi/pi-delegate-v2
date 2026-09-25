@@ -130,10 +130,14 @@ gaps.
   top-level and inside tasks; blank-identifier rules in both directions
   (poll roster on blank ticket, required-field errors on blank
   `sessionId`/`taskId`/`questionId`/`answer`, still-invalid blank `id`/
-  `prompt`, one-shot dispatch on blank task `sessionId`); cross-tool guidance
-  asserted on result text including the example call — pre-split selectors
-  and foreign dispatch/ticket/session fields on all three tools; flat fields
-  never merged into an explicit task array; duplicate task/session ids;
+  `prompt`/`systemPrompt`, one-shot dispatch on blank task `sessionId`);
+  cross-tool guidance asserted on result text including the example call —
+  pre-split selectors and foreign dispatch/ticket/session fields on all
+  three tools, a sibling tool's action value routing there, and examples
+  that clamp an invalid action instead of echoing it; flat fields never
+  merged into an explicit task array, with the stray field named; a
+  top-level `model` beside `tasks` getting the model rejection; duplicate
+  task/session ids;
   non-positive `deadlineMs`; scratch/isolated + `sessionId`/`resumeFrom`;
   prompt-less task without resume; unknown agent guidance; required-field
   messages for ticket/session RPC; a task `model` field is rejected before
