@@ -24,6 +24,10 @@ use any design that makes these properties true and testable.
 - Cancellation is cooperative. It MUST NOT claim to stop subprocesses or roll
   back completed side effects.
 - Cancellation cause precedence is parent abort, then deadline, then stall.
+- A task carries no wall-clock time budget unless its caller supplies
+  `deadlineMs`; omission MUST mean no deadline. No configuration default,
+  host default, or other implicit mechanism may add one, and the inactivity
+  watchdog MUST NOT be repurposed as a wall-clock limit.
 
 ## Dispatch identity
 

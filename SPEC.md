@@ -46,7 +46,7 @@ A task accepts:
 | `thinking` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max` |
 | `sessionId` | Key for a live reusable session |
 | `resumeFrom` | Absolute `.jsonl` transcript path |
-| `deadlineMs` | Positive wall-clock budget beginning after queueing |
+| `deadlineMs` | Positive wall-clock budget beginning after queueing; omission means no deadline |
 | `workspace` | `shared`, `scratch`, or `isolated` |
 | `dependsOn` | Ids of tasks in this batch that must succeed first; their outputs are handed off |
 
@@ -448,6 +448,9 @@ reset hint. It does not promise an exact reset time or auto-resume. Callers
 cannot select a different model.
 
 Stall timeouts measure inactivity; deadlines measure wall-clock time.
+Deadlines exist only when the caller passes `deadlineMs`. Omission means no
+deadline: no configuration key, host default, or implicit budget may
+introduce a wall-clock time limit.
 Cancellation does not promise rollback or immediate termination. Delegate does
 not reuse or clean up resources while they may still mutate state; resources
 whose safety cannot be established remain unavailable.
