@@ -229,14 +229,18 @@ storage. On a new extension instance, poll, wait, and the roster expose saved
 tickets without starting children or replaying delivery. A ticket last recorded
 as running becomes terminal `interrupted`: its saved outcomes remain visible,
 but unfinished tasks have unknown effects and are never restarted by polling,
-waiting, or redispatching an `operationId`. An orderly session shutdown still
-cancels running tickets before it completes. Recovered tickets cannot be
+waiting, or redispatching an `operationId`. A recovered terminal cancellation
+with missing task outcomes also warns that those tasks may have had effects;
+the terminal status alone does not prove their workers stopped. An orderly
+session shutdown still cancels running tickets before it completes. Recovered tickets cannot be
 paused, resumed, answered, or cancelled; new tickets use fresh opaque ids.
 No live write reservation is recovered: an orphaned subprocess may still be
 mutating a shared tree after a process crash. Inspect it before new writes.
 
 If storage cannot be initialized or the ticket creation record cannot be
-written, async dispatch fails before workers start. A later save failure is
+written, async dispatch fails before workers start. Ticket RPCs also fail
+visibly when saved storage is invalid; synchronous dispatch and live session
+RPCs do not require ticket storage and continue independently. A later save failure is
 logged and disclosed on that ticket; disk recovery may then show an older
 snapshot, conservatively marking unfinished work interrupted. Corrupt or
 unsupported saved records fail visibly rather than being silently discarded.
@@ -436,9 +440,10 @@ pooled under a new `sessionId`.
 
 Transient whole-task failures may retry. Temporary rate limits without a
 provider reset window can receive one short retry only before side effects;
-limits with a reset window, exhausted quota, billing, and authentication do not
-receive an immediate retry. The failure distinguishes waiting for a provider
-window from account/configuration problems and preserves any provider-supplied
+limits with a reset window (including provider reset headers and timed 403 rate
+limits), exhausted quota, billing, and authentication do not receive an
+immediate retry. The failure distinguishes waiting for a provider window from
+account/configuration problems and preserves any provider-supplied
 reset hint. It does not promise an exact reset time or auto-resume. Callers
 cannot select a different model.
 

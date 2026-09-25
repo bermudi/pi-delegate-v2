@@ -835,9 +835,12 @@ export default function delegateExtension(api: ExtensionAPI): void {
             details: { mode: "help" as const },
           };
         }
-        // A ticket RPC may be the first call after a restart. Connect before
-        // dispatch as well so the creation record precedes every worker.
-        tickets.connect(resolveAgentDir(ctx).dir);
+        // Only ticket RPCs and async dispatches need the saved journal.
+        // A corrupt or inaccessible journal must not block sync work or
+        // live session controls; async creation remains durable before spawn.
+        if (call.mode === "ticket" || (call.mode === "dispatch" && call.async)) {
+          tickets.connect(resolveAgentDir(ctx).dir);
+        }
         if (call.mode === "ticket") {
           const result = await handleTicketRpc(call, tickets, signal);
           return {

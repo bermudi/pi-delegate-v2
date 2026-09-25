@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import { fauxAssistantMessage, type FauxResponseFactory } from "@earendil-works/pi-ai";
@@ -94,18 +94,72 @@ describe("saved async ticket results (new v2 restart contract, issue #26)", () =
     mkdirSync(dir, { mode: 0o700 });
     chmodSync(dir, 0o755);
     try {
+      expect((await callDelegate(first, { sessionAction: "list" })).isError).toBe(false);
+      const sync = await callDelegate(first, { tasks: [{ prompt: "sync works" }] });
+      expect(sync.isError).toBe(false);
+      expect(sync.text).toContain("SHOULD-NOT-RUN");
+      expect(provider.state.callCount).toBe(1);
       const denied = await callDelegate(first, { tasks: [{ prompt: "do not start" }], async: true });
       expect(denied.isError).toBe(true);
       expect(denied.text).toMatch(/owner-only|ticket/i);
-      expect(provider.state.callCount).toBe(0);
+      expect(provider.state.callCount).toBe(1);
     } finally {
       chmodSync(dir, 0o700);
     }
     writeFileSync(join(dir, "t-00000000-0000-4000-8000-000000000000.json"), "{}", { mode: 0o600 });
     const next = await openAt(first.cwd);
+    const nextModel = await installSubagentModel(next);
+    nextModel.respond([fauxAssistantMessage("SYNC-AFTER-CORRUPTION")]);
+    expect((await callDelegate(next, { sessionAction: "list" })).isError).toBe(false);
+    const sync = await callDelegate(next, { tasks: [{ prompt: "sync despite corrupt journal" }] });
+    expect(sync.isError).toBe(false);
+    expect(sync.text).toContain("SYNC-AFTER-CORRUPTION");
     const corrupt = await callDelegate(next, { ticketAction: "poll" });
     expect(corrupt.isError).toBe(true);
     expect(corrupt.text).toMatch(/recover ticket|invalid or unsupported/i);
+    const asyncCall = await callDelegate(next, { tasks: [{ prompt: "do not run" }], async: true });
+    expect(asyncCall.isError).toBe(true);
+    expect(nextModel.state.callCount).toBe(1);
+  });
+
+  test("cold terminal cancellation with missing outcomes warns of unknown effects", async () => {
+    const first = await openAt();
+    const model = await installSubagentModel(first);
+    let release!: () => void;
+    let started!: () => void;
+    const entered = new Promise<void>((r) => { started = r; });
+    const gate = new Promise<void>((r) => { release = r; });
+    model.respond([async () => {
+      started();
+      await gate;
+      return fauxAssistantMessage("LATE-OUTPUT");
+    }]);
+    try {
+      const dispatched = await callDelegate(first, {
+        tasks: [{ prompt: "possibly change files" }], async: true,
+      });
+      const ticket = ticketIdOf(dispatched.text);
+      await entered;
+      const cancelled = await callDelegate(first, { ticketAction: "cancel", ticket, force: true });
+      expect(cancelled.isError).toBe(false);
+      // Model a crash after the terminal status was saved but before the
+      // provisional outcome: the live coordinator can race to record it.
+      const path = join(first.cwd, "delegate-tickets", `${ticket}.json`);
+      const saved = JSON.parse(readFileSync(path, "utf8")) as { status: string; outcomes: unknown[] };
+      expect(saved.status).toBe("cancelled");
+      saved.outcomes[0] = null;
+      writeFileSync(path, JSON.stringify(saved));
+      const next = await openAt(first.cwd);
+      const polled = await callDelegate(next, { ticketAction: "poll", ticket });
+      expect(polled.text).toContain(`Ticket "${ticket}": cancelled`);
+      expect(polled.text).toMatch(/effects are unknown|may have changed/i);
+      expect((await callDelegate(next, { ticketAction: "wait", ticket })).text)
+        .toMatch(/effects are unknown|may have changed/i);
+      expect((await callDelegate(next, { ticketAction: "poll" })).text)
+        .toMatch(/effects are unknown|may have changed/i);
+    } finally {
+      release?.();
+    }
   });
 
   test("a save failure after launch is disclosed; a cold reader never invents completion", async () => {

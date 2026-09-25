@@ -83,6 +83,16 @@ function completedCount(ticket: Ticket): number {
   return ticket.outcomes.filter((outcome) => outcome !== undefined).length;
 }
 
+function recoveryWarning(ticket: Ticket): string | undefined {
+  if (ticket.status === "interrupted") {
+    return "This run stopped without a final record. Unfinished tasks may have changed files or run commands; nothing will resume automatically.";
+  }
+  if (ticket.recovered && completedCount(ticket) < ticket.totalTasks) {
+    return "Some task outcomes are missing from this saved result; their effects are unknown. Workers may have changed files or run commands. Inspect the workspace before new writes.";
+  }
+  return undefined;
+}
+
 function taskSection(
   ticket: Ticket,
   outcome: TaskOutcome,
@@ -133,11 +143,10 @@ function ticketView(
   whole = false,
   renderedOutputs?: WeakMap<TaskOutcome, string>,
 ): string {
+  const warning = recoveryWarning(ticket);
   const lines = [
     `Ticket "${ticket.id}": ${statusWord(ticket)} — ${completedCount(ticket)}/${ticket.totalTasks} tasks finished.`,
-    ...(ticket.status === "interrupted"
-      ? ["This run stopped without a final record. Unfinished tasks may have changed files or run commands; nothing will resume automatically."]
-      : []),
+    ...(warning ? [warning] : []),
     ...ticket.notices,
     ...ticket.questions.map((q) =>
       `Waiting for parent answer: task ${q.taskId}, question ${q.id}: ${q.question}\nReply with delegate({ ticketAction: "answer", ticket: "${ticket.id}", taskId: "${q.taskId}", questionId: "${q.id}", answer: "..." }).`),
@@ -153,10 +162,14 @@ function rosterView(tickets: readonly Ticket[]): string {
   if (tickets.length === 0) {
     return "No tickets. Dispatch tasks with async: true to create one.";
   }
-  const lines = tickets.flatMap((ticket) => [
-    `- "${ticket.id}" ${statusWord(ticket)} — ${completedCount(ticket)}/${ticket.totalTasks} tasks finished`,
-    ...ticket.questions.map((q) => `  waiting for answer: ${q.taskId}/${q.id}: ${q.question}`),
-  ]);
+  const lines = tickets.flatMap((ticket) => {
+    const warning = ticket.recovered ? recoveryWarning(ticket) : undefined;
+    return [
+      `- "${ticket.id}" ${statusWord(ticket)} — ${completedCount(ticket)}/${ticket.totalTasks} tasks finished`,
+      ...(warning ? [`  ${warning}`] : []),
+      ...ticket.questions.map((q) => `  waiting for answer: ${q.taskId}/${q.id}: ${q.question}`),
+    ];
+  });
   return `Tickets:\n${lines.join("\n")}`;
 }
 

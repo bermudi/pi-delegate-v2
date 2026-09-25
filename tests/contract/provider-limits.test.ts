@@ -22,6 +22,35 @@ describe("provider limit guidance (new v2 issue #26 contract)", () => {
     expect(model.state.callCount).toBe(1);
   });
 
+  test("x-ratelimit-reset header holds a 429 without immediate retry", async () => {
+    session = await openDelegateBoundary();
+    const model = await installSubagentModel(session);
+    model.respond([fauxAssistantMessage("", {
+      stopReason: "error",
+      errorMessage: "429 rate limit; x-ratelimit-reset: 3600 seconds",
+    })]);
+    const result = await callDelegate(session, { tasks: [{ prompt: "report" }] });
+    expect(result.isError).toBe(true);
+    expect(result.text).toContain("x-ratelimit-reset: 3600 seconds");
+    expect(result.text).toMatch(/reported reset window|no immediate retry/i);
+    expect(model.state.callCount).toBe(1);
+  });
+
+  test("a 403 rate limit with an explicit window is not misdiagnosed as authentication", async () => {
+    session = await openDelegateBoundary();
+    const model = await installSubagentModel(session);
+    model.respond([fauxAssistantMessage("", {
+      stopReason: "error",
+      errorMessage: "403 rate limit resets in 3600 seconds",
+    })]);
+    const result = await callDelegate(session, { tasks: [{ prompt: "report" }] });
+    expect(result.isError).toBe(true);
+    expect(result.text).toContain("resets in 3600 seconds");
+    expect(result.text).toMatch(/reported reset window/i);
+    expect(result.text).not.toMatch(/authentication problem/i);
+    expect(model.state.callCount).toBe(1);
+  });
+
   test("short rate limit can retry, but exhausted quota is not misreported as temporary", async () => {
     session = await openDelegateBoundary();
     const model = await installSubagentModel(session);

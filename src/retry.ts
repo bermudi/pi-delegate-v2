@@ -39,17 +39,19 @@ export function isModelAttributableError(error: string | undefined): boolean {
 
 /** A reset hint is advisory provider text, not a clock we control. */
 function hasResetWindow(error: string): boolean {
-  return /\b(?:retry.after|reset(?:s|ting)?\s+(?:in|at)|try again (?:in|after)|wait\s+\d+\s*(?:s|sec|seconds?|m|min|minutes?|h|hours?))\b/i.test(error);
+  return /\b(?:retry[-_ ]after|x[-_]ratelimit[-_]reset|reset(?:s|ting)?\s+(?:in|at)|try again (?:in|after)|wait\s+\d+\s*(?:s|sec|seconds?|m|min|minutes?|h|hours?))\b/i.test(error);
 }
 
 export function limitHint(error: string): string | undefined {
+  const providerLimit = /\b(?:usage limit|quota|rate.?limit|too many requests|429)\b/i.test(error);
+  // A 403 can also be a timed provider rate limit, not an auth failure.
+  if (providerLimit && hasResetWindow(error)) {
+    return "Provider limit with a reported reset window; the provider's hint is above. No immediate retry or automatic resume is scheduled.";
+  }
   if (/\b(?:401|403|unauthorized|unauthenticated|authentication|invalid api key|invalid oauth token|billing|insufficient (?:funds|credit))\b/i.test(error)) {
     return "Account or authentication problem; check the provider account or user-side delegate.json configuration. Delegate will not automatically resume this task.";
   }
-  if (/\b(?:usage limit|quota|rate.?limit|too many requests|429)\b/i.test(error)) {
-    if (hasResetWindow(error)) {
-      return "Provider limit with a reported reset window; the provider's hint is above. No immediate retry or automatic resume is scheduled.";
-    }
+  if (providerLimit) {
     if (/\b(?:usage limit|quota)\b/i.test(error)) {
       return "Provider usage/quota limit; check when the account's limit resets or whether it needs attention. No automatic resume is scheduled.";
     }

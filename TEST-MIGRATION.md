@@ -61,11 +61,13 @@ copy its fixtures, mocks, call graph, or intermediate assertions.
   immediate child retry; unhinted short rate limits may still get one
   side-effect-safe retry. Quota/account guidance does not claim auto-resume.
 - **Covered now:** `tests/contract/recovery.test.ts` drives poll/wait/roster
-  across separate public-tool instances, a running snapshot, invalid
-  storage, failed writes after launch, and orderly shutdown;
+  across separate public-tool instances, a running snapshot, terminal
+  cancellation with missing outcomes, invalid storage that does not block
+  sync dispatch/session RPC, failed writes after launch, and orderly shutdown;
   `tests/contract/provider-limits.test.ts` proves the provider-call
-  counts and guidance. `tests/regression/failure-propagation.test.ts` retains
-  the v1 no-whole-task-retry scenario but replaces its model-swap expectation
+  counts and guidance for reset headers, timed 403 limits, and short limits.
+  `tests/regression/failure-propagation.test.ts` retains the v1
+  no-whole-task-retry scenario but replaces its model-swap expectation
   with the new account-limit contract.
 - **Gap:** process-kill recovery and session replacement through Pi's own
   navigation API are not independently exercised by these tests. The journal
