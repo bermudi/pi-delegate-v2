@@ -13,6 +13,11 @@ bun test
 bun run typecheck
 ```
 
+The extension registers three sibling tools: `delegate` dispatches subagent
+tasks (`tasks` required; `[]` shows the manual), `delegate_ticket` operates on
+async tickets (`action`: poll/wait/cancel/pause/resume/answer), and
+`delegate_session` lists and closes pooled sessions (`action`: list/close).
+
 ## Async results
 
 `async: true` returns a ticket and automatically delivers the settled batch
@@ -35,8 +40,10 @@ turn). The question appears in ticket polls and a parent notification. Answer
 it with the ticket, task, and question identifiers shown there:
 
 ```json
-{ "ticketAction": "answer", "ticket": "…", "taskId": "…", "questionId": "…", "answer": "Use the existing format." }
+{ "action": "answer", "ticket": "…", "taskId": "…", "questionId": "…", "answer": "Use the existing format." }
 ```
+
+on `delegate_ticket`.
 
 Waiting releases execution capacity, **not** the worker's workspace or
 shared-write reservation. Task deadlines keep running. A parent already

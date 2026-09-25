@@ -7,16 +7,16 @@ mechanisms are explicitly not requirements.
 
 ## Operations
 
-`delegate` has four mutually exclusive modes, selected after input
-normalization in this order:
+Delegate registers three sibling tools. Each owns one concern, so dispatch,
+ticket, and session fields can never be combined in one call:
 
-1. **Ticket RPC** — top-level `ticketAction`.
-2. **Session RPC** — top-level `sessionAction`.
-3. **Dispatch** — a non-empty `tasks` array.
-4. **Help** — no tasks, or an empty task array.
+1. **`delegate`** — dispatches subagent tasks; an empty `tasks` array shows
+   the manual.
+2. **`delegate_ticket`** — ticket RPC on a required `action` field.
+3. **`delegate_session`** — session RPC on a required `action` field.
 
-Mixing fields from different modes is an error. Validation happens before any
-task starts.
+Fields belonging to a different tool fail the call with guidance naming the
+right tool. Validation happens before any task starts.
 
 ### Dispatch
 
@@ -201,11 +201,11 @@ are not security sandboxes.
 ### Ticket RPC
 
 ```ts
-delegate({ ticketAction: "poll", ticket? })
-delegate({ ticketAction: "wait", ticket, timeoutMs? })
-delegate({ ticketAction: "pause" | "resume", ticket })
-delegate({ ticketAction: "cancel", ticket, force? })
-delegate({ ticketAction: "answer", ticket, taskId, questionId, answer })
+delegate_ticket({ action: "poll", ticket? })
+delegate_ticket({ action: "wait", ticket, timeoutMs? })
+delegate_ticket({ action: "pause" | "resume", ticket })
+delegate_ticket({ action: "cancel", ticket, force? })
+delegate_ticket({ action: "answer", ticket, taskId, questionId, answer })
 ```
 
 - `poll` returns one ticket or the ticket roster.
@@ -408,8 +408,8 @@ the database, WAL, and SHM files are owner-only.
 ### Session RPC
 
 ```ts
-delegate({ sessionAction: "list" })
-delegate({ sessionAction: "close", sessionId })
+delegate_session({ action: "list" })
+delegate_session({ action: "close", sessionId })
 ```
 
 `list` reports live pooled sessions. `close` aborts, disposes, and removes the
@@ -421,15 +421,22 @@ For compatibility with imperfect tool callers, Delegate silently repairs only
 unambiguous shapes:
 
 - a JSON-stringified task array;
-- flat task fields wrapped into one task when there is no ticket/session intent;
+- flat task fields wrapped into one task;
 - `tools` supplied as a JSON array string or one bare token;
-- `agent: ""`, treated as omitted.
+- `agent: ""`, treated as omitted;
+- `null` on any field, treated as absent — top-level and inside tasks alike;
+- a blank (`""` or whitespace-only) optional identifier, treated as absent:
+  `operationId`, `ticket`, `sessionId`, `taskId`, `questionId`, and a task's
+  `sessionId`, `cwd`, `resumeFrom`, or `agent`.
 
-It does not merge flat fields into an existing non-empty task array. Unknown
-task keys, task-level `async`/`sessionAction`, duplicate IDs or session IDs,
-busy sessions, unresolved agents/tools, a task `model` field, and invalid mode
-combinations fail the whole call with an actionable error and no started
-tasks.
+It does not merge flat fields into an existing non-empty task array. A `tasks`
+field that stays absent becomes `[]`, so `{}` still returns the manual. Blank
+values that are not optional identifiers — task `id`, `prompt`,
+`systemPrompt`, `dependsOn` entries, and ticket `answer` — remain present and
+fail their normal validation. Unknown task keys, task-level `async`/`sessionAction`,
+duplicate IDs or session IDs, busy sessions, unresolved agents/tools, a task
+`model` field, and fields belonging to a sibling tool fail the whole call with
+an actionable error and no started tasks.
 
 ## Sessions, retries, and cancellation
 

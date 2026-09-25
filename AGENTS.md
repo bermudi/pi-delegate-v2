@@ -1,7 +1,8 @@
 # pi-delegate v2
 
 A [Pi](https://github.com/earendil-works/pi) extension providing the
-`delegate` tool: subagent dispatch, async tickets, pooled sessions, and
+`delegate`, `delegate_ticket`, and `delegate_session` tools: subagent
+dispatch, async tickets, pooled sessions, and
 workspace isolation. This is a specification-first rewrite; the v1 repository
 at `../pi-delegate` is the behavioral oracle.
 
@@ -74,7 +75,8 @@ V1 is evidence for behavior, never a design source. When consulting it:
 - Classify v1 evidence as contract, regression, or internal per
   `TEST-MIGRATION.md`; discard tests that only pin helpers, private state,
   or decomposition.
-- Tests go through the registered `delegate` tool — never import production
+- Tests go through the registered `delegate`, `delegate_ticket`, and
+  `delegate_session` tools — never import production
   internals, and never add a production export solely for tests.
 - Keep provenance: each migrated test cites its v1 source scenario.
 - The harness must remain provider-free. Subagent models use pi-ai's `faux`

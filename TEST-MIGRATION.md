@@ -112,29 +112,38 @@ Per subsystem: contract behaviors, regression scenarios carried forward,
 internal-only v1 tests discarded, what v2 tests already represent, and known
 gaps.
 
-### Input recovery and mode validation
+### Input recovery and cross-tool validation
 
-- **Contract:** four-mode selection after normalization; mode exclusivity;
-  closed enums; batch validated before any task starts; actionable errors.
+- **Contract:** three sibling tools after normalization; fields belonging to
+  another tool reject with guidance naming it; closed enums; batch validated
+  before any task starts; actionable errors.
 - **Regression:** stringified/flat/task-string normalization; task-level
   `async`/`sessionAction` silently degrading; `workspace:"none"` misparse;
   orphaned ticket fields producing help.
 - **Internal:** direct calls to `normalizeDelegateArguments` /
   `validateDelegateOperation`; exact error wording; description-length
   budgets.
-- **Covered now:** help for omitted/empty tasks; orphaned-field rejection;
-  enum rejection; task-level control-field rejection; task-id charset;
-  stringified/flat/tools recovery; ticket/session intent never folded into
-  tasks; flat fields never merged into an explicit task array; duplicate
-  task/session ids; non-positive `deadlineMs`; scratch/isolated +
-  `sessionId`/`resumeFrom`; mixed-mode conflict errors; prompt-less task
-  without resume; unknown agent guidance; required-field messages for
-  ticket/session RPC; a task `model` field is rejected before any task
-  starts with guidance toward the config; a named agent's `models` entry
-  overrides the parent model for that agent (and inline tasks provably
-  inherit the parent); a configured reference that does not resolve
-  in the registry names the entry and the config file
-  (`tests/contract/dispatch.test.ts`).
+- **Covered now:** the three registered names/labels/schema keys (task keys
+  without `model`); help for omitted/empty tasks; orphaned-field rejection;
+  enum rejection on each tool's `action`; task-level control-field rejection;
+  task-id charset; stringified/flat/tools recovery; `null` stripping at
+  top-level and inside tasks; blank-identifier rules in both directions
+  (poll roster on blank ticket, required-field errors on blank
+  `sessionId`/`taskId`/`questionId`/`answer`, still-invalid blank `id`/
+  `prompt`, one-shot dispatch on blank task `sessionId`); cross-tool guidance
+  asserted on result text including the example call — pre-split selectors
+  and foreign dispatch/ticket/session fields on all three tools; flat fields
+  never merged into an explicit task array; duplicate task/session ids;
+  non-positive `deadlineMs`; scratch/isolated + `sessionId`/`resumeFrom`;
+  prompt-less task without resume; unknown agent guidance; required-field
+  messages for ticket/session RPC; a task `model` field is rejected before
+  any task starts with guidance toward the config; a named agent's `models`
+  entry overrides the parent model for that agent (and inline tasks provably
+  inherit the parent); a configured reference that does not resolve in the
+  registry names the entry and the config file
+  (`tests/contract/dispatch.test.ts`, `tests/contract/tool-boundary.test.ts`,
+  `tests/contract/input-normalization.test.ts`,
+  `tests/contract/validation.test.ts`, `tests/regression/input-recovery.test.ts`).
 - **Gap:** none specific to model selection.
 
 ### Synchronous dispatch
@@ -161,8 +170,9 @@ gaps.
   cause, guidance, and logging; explicit tools (including `[]`), built-in
   scout/coder/reviewer, and inline choices bypass the probe; successful
   restricted-parent mirroring retains read-only tools and preserves empty or
-  unsupported-only inventories; a public extension's `setActiveTools(["delegate"])`
-  restriction independently exercises the real host path (review 5722868479)
+  unsupported-only inventories; a public extension's `setActiveTools` on the
+  three delegate tools independently exercises the real host path
+  (review 5722868479)
   (`tests/regression/parent-tools.test.ts`). Host-only injection in
   `tests/support/parent-tools.ts` targets Pi 0.84.2's extension runtime callback
   while retaining the wrapper's live inventory. Calls still use the registered
@@ -774,7 +784,7 @@ A fresh-context review pass then hardened the lifecycle edges:
 
 ## Seventh tranche (pooled sessions)
 
-`src/sessions.ts` implements `sessionId` pooling, `sessionAction` RPCs, and
+`src/sessions.ts` implements `sessionId` pooling, `delegate_session` RPCs, and
 shutdown. The pool is owned by the extension closure; admission's
 busy-session marks already serialize same-ID calls across acquisition,
 execution, and state update, so no second locking layer exists.

@@ -19,14 +19,16 @@ release notes and migration guidance; it must not arrive as rewrite drift.
 
 ### Calls and configuration
 
-- The four modes, their top-level selectors, dispatch-wide `async`, canonical
-  task fields, closed enum values, and batch-before-start validation described
-  in `SPEC.md`.
+- The three sibling tools — `delegate` (dispatch and manual),
+  `delegate_ticket`, and `delegate_session` — with their canonical fields,
+  dispatch-wide `async`, canonical task fields, closed enum values, and
+  batch-before-start validation described in `SPEC.md`.
 - Defensive normalization of stringified tasks, flat task calls, string tools,
-  and empty agent names.
-- Top-level-only session RPC. Task-level `async` and `sessionAction`, legacy
-  `action`, and unsafe-write bypasses remain rejected (all of them — see the
-  breaking-change entry below).
+  empty agent names, `null` fields, and blank optional identifiers.
+- Top-level-only session RPC on `delegate_session`. Task-level `async` and
+  `sessionAction`, an `action` field on `delegate` itself, and unsafe-write
+  bypasses remain rejected (all of them — see the breaking-change entry
+  below).
 - `default`, `scout`, `coder`, and `reviewer` semantics; task-over-profile
   precedence; Markdown discovery order and first-definition wins.
 - User-global `delegate.json` configuration. Project files do not become
@@ -206,6 +208,34 @@ guidance toward the config; a configured reference that does not resolve in
   Migration: express per-agent thinking/tools as task fields now
   (frontmatter later); drop the stale keys; rely on concurrency bounds and
   polling rather than a ticket cap or TTL sweep.
+
+- **One `delegate` tool split into three (#27).** V1's kitchen-sink schema
+  advertised dispatch, ticket, and session fields together, and the largest
+  observed caller failure was combining them. V2 registers three tools —
+  `delegate` (dispatch; `tasks` is required, `[]` returns the manual),
+  `delegate_ticket` (required `action`: poll/wait/cancel/pause/resume/answer),
+  and `delegate_session` (required `action`: list/close) — sharing the same
+  stores and runtime. A call that still mixes concerns does not partially
+  execute: foreign fields fail the call with guidance naming the right tool
+  and an example built from the values the caller sent. The within-operation
+  rules are unchanged (`ticket` required except roster poll, `force` only
+  with cancel, `timeoutMs` only with wait, `taskId`/`questionId`/`answer`
+  only with answer; `sessionId` required for close and rejected for list).
+  Migration:
+
+  | Old call | New call |
+  | --- | --- |
+  | `delegate({ ticketAction: "poll", ticket? })` | `delegate_ticket({ action: "poll", ticket? })` |
+  | `delegate({ ticketAction: "wait", ticket, timeoutMs? })` | `delegate_ticket({ action: "wait", ticket, timeoutMs? })` |
+  | `delegate({ ticketAction: "pause"\|"resume", ticket })` | `delegate_ticket({ action: "pause"\|"resume", ticket })` |
+  | `delegate({ ticketAction: "cancel", ticket, force? })` | `delegate_ticket({ action: "cancel", ticket, force? })` |
+  | `delegate({ ticketAction: "answer", ticket, taskId, questionId, answer })` | `delegate_ticket({ action: "answer", ticket, taskId, questionId, answer })` |
+  | `delegate({ sessionAction: "list" })` | `delegate_session({ action: "list" })` |
+  | `delegate({ sessionAction: "close", sessionId })` | `delegate_session({ action: "close", sessionId })` |
+
+  Dispatch calls are unchanged except that `tasks` is now schema-required
+  (callers get `[]` behavior — the manual — when it is omitted anyway) and
+  task `model` is gone from the schema (still rejected explicitly when sent).
 
 ## v2 deferred capabilities — all since shipped
 
